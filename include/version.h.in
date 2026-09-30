@@ -1,0 +1,6 @@
+#ifndef WRM_VERSION_H
+#define WRM_VERSION_H
+
+#define WRM_VERSION "@WRM081632_VERSION@"
+
+#endif

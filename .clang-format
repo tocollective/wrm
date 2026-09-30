@@ -1,0 +1,28 @@
+BasedOnStyle: LLVM
+UseCRLF: false
+
+ColumnLimit: 80
+ReflowComments: false
+
+UseTab: Always
+IndentWidth: 4
+TabWidth: 4
+
+IndentCaseLabels: true
+
+AllowShortIfStatementsOnASingleLine: true
+AllowShortFunctionsOnASingleLine: false
+AllowShortEnumsOnASingleLine: false
+
+IndentPPDirectives: None
+AlignConsecutiveMacros: false
+AlignTrailingComments: false
+AlignOperands: Align
+AlignArrayOfStructures: Left
+BreakBeforeBinaryOperators: NonAssignment
+BinPackArguments: false
+PointerAlignment: Left
+
+SpacesBeforeTrailingComments: 1
+
+Cpp11BracedListStyle: false
