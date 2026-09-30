@@ -8,6 +8,18 @@ WRM.081632 – is a 32-bit, RISC based, little-endian CPU architecture.
 dd if=/dev/zero of=firmware.rom  bs=1m  count=32
 ```
 
+## Web (Emscripten)
+
+```sh
+emcmake cmake -S . -B build-web
+cmake --build build-web
+emrun bin/wrm081632.html
+```
+
+The firmware is packed into the build from `bin/firmware.rom`
+(override with `-DWRM081632_WEB_FIRMWARE=path`). The UART console has
+no input in the browser; its output goes to the page and the JS console.
+
 # Useful links
 
 [Pentium](https://en.wikipedia.org/wiki/Pentium_(original))

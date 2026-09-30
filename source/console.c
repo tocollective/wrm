@@ -21,6 +21,23 @@ size_t console_read(uint8_t* buffer, const size_t size) {
 	return count;
 }
 
+#elif defined(__EMSCRIPTEN__)
+
+// A browser has no terminal: reading stdin pops up a prompt() dialog.
+// Output still reaches the page through stdout.
+
+void console_open(void) {
+}
+
+void console_close(void) {
+}
+
+size_t console_read(uint8_t* buffer, const size_t size) {
+	(void)buffer;
+	(void)size;
+	return 0;
+}
+
 #else
 
 #include <errno.h>

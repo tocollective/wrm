@@ -7,6 +7,7 @@
 // When stdin is a terminal it is switched to raw mode without local echo,
 // so every typed byte reaches the machine at once and only the firmware's
 // echo shows up on screen. Ctrl+C still works.
+// Under Emscripten there is no stdin, so the RX line stays idle.
 
 // Prepares stdin; the terminal is restored by console_close or at exit.
 void console_open(void);
