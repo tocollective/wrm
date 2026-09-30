@@ -42,10 +42,18 @@ void rom_load(rom_t* rom, const char* path) {
 }
 
 uint8_t rom_peek8(rom_t* rom, const size_t address) {
+	if (!rom) return 0;
+	return rom->data[address];
 }
 
 uint16_t rom_peek16(rom_t* rom, const size_t address) {
+	const uint16_t a = rom_peek8(rom, address);
+	const uint16_t b = rom_peek8(rom, address + 1);
+	return (b << 8) | a;
 }
 
 uint32_t rom_peek32(rom_t* rom, const size_t address) {
+	const uint32_t a = rom_peek16(rom, address);
+	const uint32_t b = rom_peek16(rom, address + 2);
+	return (b << 16) | a;
 }

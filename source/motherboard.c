@@ -39,13 +39,96 @@ static bool motherboard_install_ram_slot(motherboard_t* mb, const int slot,
 	return false;
 }
 
+static ram_t* motherboard_find_ram(motherboard_t* mb, const uint32_t address,
+								   size_t* offset) {
+	size_t base = MB_RAM_BASE;
+	for (int i = 0; i < RAM_SLOT_COUNT; i++) {
+		ram_slot_t* slot = &mb->ram_slot[i];
+		if (!slot->installed) continue;
+		if (address >= base && address - base < slot->ram->size) {
+			*offset = address - base;
+			return slot->ram;
+		}
+		base += slot->ram->size;
+	}
+	return NULL;
+}
+
+// returns true on bus error
+static bool motherboard_bus_read(void* ctx, const uint32_t address,
+								 const uint8_t size, uint32_t* value) {
+	motherboard_t* mb = ctx;
+
+	if (address >= MB_ROM_BASE) {
+		const size_t offset = address - MB_ROM_BASE;
+		if (offset + size > mb->rom->size) return true;
+		switch (size) {
+			case 1:
+				*value = rom_peek8(mb->rom, offset);
+				return false;
+			case 2:
+				*value = rom_peek16(mb->rom, offset);
+				return false;
+			case 4:
+				*value = rom_peek32(mb->rom, offset);
+				return false;
+		}
+		return true;
+	}
+
+	size_t offset = 0;
+	ram_t* ram = motherboard_find_ram(mb, address, &offset);
+	if (!ram || offset + size > ram->size) return true;
+	switch (size) {
+		case 1:
+			*value = ram_peek8(ram, offset);
+			return false;
+		case 2:
+			*value = ram_peek16(ram, offset);
+			return false;
+		case 4:
+			*value = ram_peek32(ram, offset);
+			return false;
+	}
+	return true;
+}
+
+// returns true on bus error
+static bool motherboard_bus_write(void* ctx, const uint32_t address,
+								  const uint8_t size, const uint32_t value) {
+	motherboard_t* mb = ctx;
+
+	if (address >= MB_ROM_BASE) return true; // ROM is read-only
+
+	size_t offset = 0;
+	ram_t* ram = motherboard_find_ram(mb, address, &offset);
+	if (!ram || offset + size > ram->size) return true;
+	switch (size) {
+		case 1:
+			ram_poke8(ram, offset, value);
+			return false;
+		case 2:
+			ram_poke16(ram, offset, value);
+			return false;
+		case 4:
+			ram_poke32(ram, offset, value);
+			return false;
+	}
+	return true;
+}
+
 motherboard_t* motherboard_create(void) {
 	config_t* cfg = config_get();
 
 	motherboard_t* mb = (motherboard_t*)calloc(1, sizeof(motherboard_t));
 	if (!mb) error("Failed to allocate Motherboard!");
 
-	mb->cpu = cpu_create();
+	const bus_t bus = {
+		.ctx = mb,
+		.read = motherboard_bus_read,
+		.write = motherboard_bus_write,
+	};
+	mb->cpu = cpu_create(bus);
 
 	for (int i = 0; i < RAM_SLOT_COUNT; i++) {
 		mb->ram_slot[i].ram = NULL;

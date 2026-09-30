@@ -8,6 +8,10 @@
 
 #define RAM_SLOT_COUNT 4
 
+// Memory map (see docs/SPECIFICATION.md)
+#define MB_RAM_BASE 0x00000000 // installed slots are mapped back to back
+#define MB_ROM_BASE 0xFE000000 // ROM_MAX_SIZE bytes up to 0xFFFFFFFF
+
 typedef struct ram_slot {
 	ram_t* ram;
 	bool installed;

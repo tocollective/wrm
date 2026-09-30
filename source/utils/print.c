@@ -19,7 +19,6 @@ void warning(const char* msg, ...) {
 	vfprintf(stderr, msg, args);
 	va_end(args);
 	fprintf(stderr, "\n");
-	exit(1);
 }
 
 void error(const char* msg, ...) {
