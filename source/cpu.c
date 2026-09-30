@@ -15,12 +15,19 @@
 // - A load followed by a dependent instruction stalls ID for one cycle.
 // - Branches are predicted not taken and resolved in EX; a taken branch
 //   squashes the two younger instructions in IF and ID.
-// - Faults travel down the pipeline and are raised in WB (precise).
+// - Every fetch, load and store goes through the MMU. Faults (including
+//   page faults) travel down the pipeline and are raised in WB (precise):
+//   they enter the handler at IVEC, or halt when raised in supervisor
+//   mode with IE clear.
 // - Interrupts are taken between two instructions: after WB has retired,
 //   the younger ones still in flight are squashed and refetched on IRET.
 // - MFCR, MTCR and IRET wait in ID until the older instructions have left
 //   EX and MEM, so control registers are read in EX and written in WB
 //   without forwarding.
+// - The mode (STATUS.UM) and the translation only change in WB, and every
+//   change squashes the younger instructions: a trap, IRET (which jumps to
+//   EPC when it retires), MTCR STATUS, MTCR PTBR and TLBI. So each stage
+//   can check privileges against the current mode.
 
 static uint32_t sign_extend(const uint32_t value, const int bits) {
 	const uint32_t sign = 1u << (bits - 1);
@@ -38,12 +45,15 @@ cpu_t* cpu_create(const bus_t bus) {
 	cpu_t* cpu = (cpu_t*)calloc(1, sizeof(cpu_t));
 	if (!cpu) error("Failed to allocate CPU!");
 	cpu->bus = bus;
+	cpu->mmu = mmu_create(bus);
 	cpu_reset(cpu);
 	return cpu;
 }
 
 void cpu_destroy(cpu_t* cpu) {
 	if (!cpu) return;
+	mmu_destroy(cpu->mmu);
+	cpu->mmu = NULL;
 	free(cpu);
 	cpu = NULL;
 }
@@ -53,8 +63,10 @@ void cpu_reset(cpu_t* cpu) {
 	memset(cpu->gpr, 0, sizeof(cpu->gpr));
 	memset(&cpu->pipeline, 0, sizeof(cpu->pipeline));
 	memset(cpu->cr, 0, sizeof(cpu->cr));
+	mmu_reset(cpu->mmu);
 	cpu->pc = CPU_PC_START;
 	cpu->halted = false;
+	cpu->halt_fault = 0;
 	cpu->waiting = false;
 	cpu->irq = false;
 	cpu->cycles = 0;
@@ -67,6 +79,7 @@ static cpu_format_t cpu_opcode_format(const uint8_t opcode) {
 		case CPU_OP_NOP:
 		case CPU_OP_WFI:
 		case CPU_OP_IRET:
+		case CPU_OP_SYSCALL:
 			return CPU_FORMAT_N;
 
 		case CPU_OP_ADD:
@@ -97,6 +110,7 @@ static cpu_format_t cpu_opcode_format(const uint8_t opcode) {
 		case CPU_OP_SLTIU:
 		case CPU_OP_MFCR:
 		case CPU_OP_MTCR:
+		case CPU_OP_TLBI:
 		case CPU_OP_LB:
 		case CPU_OP_LBU:
 		case CPU_OP_LH:
@@ -187,6 +201,38 @@ static bool cpu_is_serializing(const cpu_instruction_t* in) {
 		   || in->opcode == CPU_OP_IRET;
 }
 
+// CYCLE, CYCLEH, INSTRET, INSTRETH
+static bool cpu_cr_is_counter(const uint32_t cr) {
+	return cr >= CPU_CR_CYCLE && cr <= CPU_CR_INSTRETH;
+}
+
+// MFCR/MTCR with a control register that doesn't exist, or MTCR to a
+// read-only one
+static bool cpu_cr_is_illegal(const cpu_instruction_t* in) {
+	if (in->opcode != CPU_OP_MFCR && in->opcode != CPU_OP_MTCR) return false;
+	if (in->imm >= CPU_CR_COUNT) return true;
+	return in->opcode == CPU_OP_MTCR && cpu_cr_is_counter(in->imm);
+}
+
+// supervisor-only instructions
+static bool cpu_is_privileged(const cpu_instruction_t* in) {
+	switch (in->opcode) {
+		case CPU_OP_HLT:
+		case CPU_OP_WFI:
+		case CPU_OP_IRET:
+		case CPU_OP_MTCR:
+		case CPU_OP_TLBI:
+			return true;
+		case CPU_OP_MFCR:
+			return !cpu_cr_is_counter(in->imm); // counters are for everyone
+	}
+	return false;
+}
+
+static bool cpu_user_mode(const cpu_t* cpu) {
+	return (cpu->cr[CPU_CR_STATUS] & CPU_STATUS_UM) != 0;
+}
+
 static bool cpu_writes_rd(const cpu_instruction_t* in) {
 	switch (in->format) {
 		case CPU_FORMAT_R:
@@ -194,7 +240,7 @@ static bool cpu_writes_rd(const cpu_instruction_t* in) {
 			return true;
 		case CPU_FORMAT_I:
 			return !cpu_is_store(in) && !cpu_is_branch(in)
-				   && in->opcode != CPU_OP_MTCR;
+				   && in->opcode != CPU_OP_MTCR && in->opcode != CPU_OP_TLBI;
 		default:
 			return false;
 	}
@@ -208,15 +254,49 @@ static bool cpu_reads_reg(const cpu_instruction_t* in, const uint8_t reg) {
 		   || (rd && in->rd == reg);
 }
 
-static void cpu_latch_fault(cpu_latch_t* latch, const char* reason,
+static void cpu_latch_fault(cpu_latch_t* latch, const cpu_cause_t cause,
 							const uint32_t value) {
-	latch->fault = reason;
+	latch->fault = cause;
 	latch->fault_value = value;
 }
 
+static const char* cpu_cause_name(const uint8_t cause) {
+	switch (cause) {
+		case CPU_CAUSE_INTERRUPT:
+			return "interrupt";
+		case CPU_CAUSE_ILLEGAL_INSTRUCTION:
+			return "illegal instruction";
+		case CPU_CAUSE_MISALIGNED_FETCH:
+			return "misaligned PC";
+		case CPU_CAUSE_MISALIGNED_LOAD:
+			return "misaligned load";
+		case CPU_CAUSE_MISALIGNED_STORE:
+			return "misaligned store";
+		case CPU_CAUSE_FETCH_BUS_ERROR:
+			return "instruction fetch bus error";
+		case CPU_CAUSE_LOAD_BUS_ERROR:
+			return "load bus error";
+		case CPU_CAUSE_STORE_BUS_ERROR:
+			return "store bus error";
+		case CPU_CAUSE_FETCH_PAGE_FAULT:
+			return "instruction fetch page fault";
+		case CPU_CAUSE_LOAD_PAGE_FAULT:
+			return "load page fault";
+		case CPU_CAUSE_STORE_PAGE_FAULT:
+			return "store page fault";
+		case CPU_CAUSE_PRIVILEGED_INSTRUCTION:
+			return "privileged instruction";
+		case CPU_CAUSE_SYSCALL:
+			return "syscall";
+	}
+	return "unknown fault";
+}
+
 // Stops the CPU, leaving pc as the architectural PC.
-static void cpu_halt(cpu_t* cpu, const uint32_t pc) {
+// fault is the cpu_cause_t that couldn't be handled, 0 for HLT.
+static void cpu_halt(cpu_t* cpu, const uint32_t pc, const uint8_t fault) {
 	cpu->halted = true;
+	cpu->halt_fault = fault;
 	cpu->waiting = false;
 	cpu->pc = pc;
 	memset(&cpu->pipeline, 0, sizeof(cpu->pipeline));
@@ -229,11 +309,52 @@ static void cpu_wait(cpu_t* cpu, const uint32_t pc) {
 	memset(&cpu->pipeline, 0, sizeof(cpu->pipeline));
 }
 
+// Squashes everything in flight and fetches again from pc.
+static void cpu_refetch(cpu_t* cpu, const uint32_t pc) {
+	cpu->pc = pc;
+	memset(&cpu->pipeline, 0, sizeof(cpu->pipeline));
+}
+
+// Enters the handler in supervisor mode:
+// EPC = epc, PIE = IE, PUM = UM, IE = UM = 0, pc = IVEC.
+static void cpu_trap(cpu_t* cpu, const cpu_cause_t cause, const uint32_t epc) {
+	const uint32_t status = cpu->cr[CPU_CR_STATUS];
+	uint32_t next = 0;
+	if (status & CPU_STATUS_IE) next |= CPU_STATUS_PIE;
+	if (status & CPU_STATUS_UM) next |= CPU_STATUS_PUM;
+	cpu->cr[CPU_CR_STATUS] = next;
+	cpu->cr[CPU_CR_CAUSE] = cause;
+	cpu->cr[CPU_CR_EPC] = epc;
+	cpu_refetch(cpu, cpu->cr[CPU_CR_IVEC]);
+}
+
+static uint32_t cpu_read_cr(const cpu_t* cpu, const uint32_t cr) {
+	switch (cr) {
+		case CPU_CR_PTBR:
+			return cpu->mmu->ptbr;
+		case CPU_CR_CYCLE:
+			return (uint32_t)cpu->cycles;
+		case CPU_CR_CYCLEH:
+			return (uint32_t)(cpu->cycles >> 32);
+		case CPU_CR_INSTRET:
+			return (uint32_t)cpu->retired;
+		case CPU_CR_INSTRETH:
+			return (uint32_t)(cpu->retired >> 32);
+	}
+	return cpu->cr[cr];
+}
+
 static void cpu_write_cr(cpu_t* cpu, const uint32_t cr, const uint32_t value) {
-	if (cr == CPU_CR_STATUS) {
-		cpu->cr[cr] = value & CPU_STATUS_MASK;
-	} else {
-		cpu->cr[cr] = value;
+	switch (cr) {
+		case CPU_CR_STATUS:
+			cpu->cr[cr] = value & CPU_STATUS_MASK;
+			break;
+		case CPU_CR_PTBR:
+			mmu_set_ptbr(cpu->mmu, value);
+			break;
+		default:
+			cpu->cr[cr] = value;
+			break;
 	}
 }
 
@@ -263,10 +384,17 @@ static void cpu_stage_if(cpu_t* cpu, cpu_latch_t* out) {
 	out->pc = cpu->pc;
 
 	uint32_t raw = 0;
+	uint32_t physical = 0;
 	if (cpu->pc & 3) {
-		cpu_latch_fault(out, "misaligned PC", cpu->pc);
-	} else if (cpu->bus.read(cpu->bus.ctx, cpu->pc, 4, &raw)) {
-		cpu_latch_fault(out, "instruction fetch bus error", cpu->pc);
+		cpu_latch_fault(out, CPU_CAUSE_MISALIGNED_FETCH, cpu->pc);
+	} else if (mmu_translate(cpu->mmu,
+							 cpu->pc,
+							 MMU_ACCESS_EXECUTE,
+							 cpu_user_mode(cpu),
+							 &physical)) {
+		cpu_latch_fault(out, CPU_CAUSE_FETCH_PAGE_FAULT, cpu->pc);
+	} else if (cpu->bus.read(cpu->bus.ctx, physical, 4, &raw)) {
+		cpu_latch_fault(out, CPU_CAUSE_FETCH_BUS_ERROR, cpu->pc);
 	}
 	out->in.raw = raw;
 
@@ -302,11 +430,12 @@ static bool cpu_stage_id(cpu_t* cpu, cpu_latch_t* out) {
 	out->a = cpu->gpr[in.rs1];
 	out->b = cpu->gpr[in.rs2];
 	out->d = cpu->gpr[in.rd];
-	if (in.format == CPU_FORMAT_INVALID)
-		cpu_latch_fault(out, "illegal instruction", in.raw);
-	else if ((in.opcode == CPU_OP_MFCR || in.opcode == CPU_OP_MTCR)
-			 && in.imm >= CPU_CR_COUNT)
-		cpu_latch_fault(out, "illegal control register", in.imm);
+	if (in.format == CPU_FORMAT_INVALID || cpu_cr_is_illegal(&in))
+		cpu_latch_fault(out, CPU_CAUSE_ILLEGAL_INSTRUCTION, in.raw);
+	else if (cpu_is_privileged(&in) && cpu_user_mode(cpu))
+		cpu_latch_fault(out, CPU_CAUSE_PRIVILEGED_INSTRUCTION, in.raw);
+	else if (in.opcode == CPU_OP_SYSCALL)
+		cpu_latch_fault(out, CPU_CAUSE_SYSCALL, 0);
 	return false;
 }
 
@@ -460,15 +589,12 @@ static bool cpu_stage_ex(cpu_t* cpu, cpu_latch_t* out, uint32_t* target) {
 
 		// control registers, no older instruction is in flight
 		case CPU_OP_MFCR:
-			r = cpu->cr[imm];
+			r = cpu_read_cr(cpu, imm);
 			break;
 		case CPU_OP_MTCR:
-			r = a; // written in WB
+		case CPU_OP_TLBI:
+			r = a; // used in WB
 			break;
-		case CPU_OP_IRET: {
-			taken = true;
-			next_pc = cpu->cr[CPU_CR_EPC];
-		} break;
 	}
 
 	out->a = a;
@@ -507,23 +633,38 @@ static void cpu_stage_mem(cpu_t* cpu, cpu_latch_t* out) {
 			return; // no memory access
 	}
 
+	const bool store = cpu_is_store(in);
 	if (address & (size - 1)) {
-		const bool store = cpu_is_store(in);
-		cpu_latch_fault(
-			out, store ? "misaligned store" : "misaligned load", address);
+		cpu_latch_fault(out,
+						store ? CPU_CAUSE_MISALIGNED_STORE
+							  : CPU_CAUSE_MISALIGNED_LOAD,
+						address);
 		return;
 	}
 
-	if (cpu_is_store(in)) {
+	uint32_t physical = 0;
+	if (mmu_translate(cpu->mmu,
+					  address,
+					  store ? MMU_ACCESS_WRITE : MMU_ACCESS_READ,
+					  cpu_user_mode(cpu),
+					  &physical)) {
+		cpu_latch_fault(out,
+						store ? CPU_CAUSE_STORE_PAGE_FAULT
+							  : CPU_CAUSE_LOAD_PAGE_FAULT,
+						address);
+		return;
+	}
+
+	if (store) {
 		const uint32_t mask = size == 4 ? UINT32_MAX : (1u << (size * 8)) - 1;
-		if (cpu->bus.write(cpu->bus.ctx, address, size, mem->d & mask))
-			cpu_latch_fault(out, "store bus error", address);
+		if (cpu->bus.write(cpu->bus.ctx, physical, size, mem->d & mask))
+			cpu_latch_fault(out, CPU_CAUSE_STORE_BUS_ERROR, address);
 		return;
 	}
 
 	uint32_t value = 0;
-	if (cpu->bus.read(cpu->bus.ctx, address, size, &value)) {
-		cpu_latch_fault(out, "load bus error", address);
+	if (cpu->bus.read(cpu->bus.ctx, physical, size, &value)) {
+		cpu_latch_fault(out, CPU_CAUSE_LOAD_BUS_ERROR, address);
 		return;
 	}
 
@@ -540,17 +681,26 @@ static void cpu_stage_mem(cpu_t* cpu, cpu_latch_t* out) {
 	}
 }
 
-// returns true when the pipeline was flushed (halted or waiting)
+// returns true when the pipeline was flushed (halted, waiting, trapped or
+// refetching)
 static bool cpu_stage_wb(cpu_t* cpu) {
 	const cpu_latch_t* wb = &cpu->pipeline.mem_wb;
 	if (!wb->valid) return false;
 
 	if (wb->fault) {
-		warning("CPU fault at 0x%08X: %s (0x%08X)",
-				(unsigned)wb->pc,
-				wb->fault,
-				(unsigned)wb->fault_value);
-		cpu_halt(cpu, wb->pc);
+		// a supervisor fault with IE clear can't be handled (e.g. inside
+		// the handler); user mode always traps to the supervisor
+		const uint32_t status = cpu->cr[CPU_CR_STATUS];
+		if (!(status & (CPU_STATUS_IE | CPU_STATUS_UM))) {
+			warning("CPU fault at 0x%08X: %s (0x%08X)",
+					(unsigned)wb->pc,
+					cpu_cause_name(wb->fault),
+					(unsigned)wb->fault_value);
+			cpu_halt(cpu, wb->pc, wb->fault);
+			return true;
+		}
+		cpu->cr[CPU_CR_BADADDR] = wb->fault_value;
+		cpu_trap(cpu, (cpu_cause_t)wb->fault, wb->pc);
 		return true;
 	}
 
@@ -560,19 +710,32 @@ static bool cpu_stage_wb(cpu_t* cpu) {
 
 	switch (wb->in.opcode) {
 		case CPU_OP_HLT:
-			cpu_halt(cpu, wb->pc + 4);
+			cpu_halt(cpu, wb->pc + 4, 0);
 			return true;
 		case CPU_OP_WFI:
 			cpu_wait(cpu, wb->pc + 4);
 			return true;
 		case CPU_OP_MTCR:
 			cpu_write_cr(cpu, wb->in.imm, wb->result);
+			if (wb->in.imm == CPU_CR_STATUS || wb->in.imm == CPU_CR_PTBR) {
+				cpu_refetch(cpu, wb->pc + 4);
+				return true;
+			}
 			break;
+		case CPU_OP_TLBI:
+			mmu_invalidate(cpu->mmu, wb->result);
+			cpu_refetch(cpu, wb->pc + 4);
+			return true;
 		case CPU_OP_IRET: {
-			uint32_t status = cpu->cr[CPU_CR_STATUS] & ~CPU_STATUS_IE;
+			// IE = PIE, UM = PUM
+			uint32_t status = cpu->cr[CPU_CR_STATUS];
+			status &= ~(CPU_STATUS_IE | CPU_STATUS_UM);
 			if (status & CPU_STATUS_PIE) status |= CPU_STATUS_IE;
+			if (status & CPU_STATUS_PUM) status |= CPU_STATUS_UM;
 			cpu->cr[CPU_CR_STATUS] = status;
-		} break;
+			cpu_refetch(cpu, cpu->cr[CPU_CR_EPC]);
+			return true;
+		}
 	}
 	return false;
 }
@@ -589,15 +752,8 @@ static uint32_t cpu_next_pc(const cpu_t* cpu) {
 // Called after WB: squashes everything still in flight and jumps to IVEC.
 // returns true when the interrupt was taken
 static bool cpu_interrupt(cpu_t* cpu) {
-	uint32_t status = cpu->cr[CPU_CR_STATUS];
-	if (!cpu->irq || !(status & CPU_STATUS_IE)) return false;
-
-	cpu->cr[CPU_CR_EPC] = cpu_next_pc(cpu);
-	status = (status & ~CPU_STATUS_IE) | CPU_STATUS_PIE;
-	cpu->cr[CPU_CR_STATUS] = status;
-
-	memset(&cpu->pipeline, 0, sizeof(cpu->pipeline));
-	cpu->pc = cpu->cr[CPU_CR_IVEC];
+	if (!cpu->irq || !(cpu->cr[CPU_CR_STATUS] & CPU_STATUS_IE)) return false;
+	cpu_trap(cpu, CPU_CAUSE_INTERRUPT, cpu_next_pc(cpu));
 	return true;
 }
 

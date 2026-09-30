@@ -8,6 +8,32 @@ WRM.081632 – is a 32-bit, RISC based, little-endian CPU architecture.
 dd if=/dev/zero of=firmware.rom  bs=1m  count=32
 ```
 
+## Running
+
+```sh
+python3 tools/asm.py firmware/main.asm -o firmware.rom
+bin/wrm081632 [--rom PATH] [--headless]
+```
+
+| Option        | Description                                              |
+|---------------|----------------------------------------------------------|
+| `--rom PATH`  | firmware image, `firmware.rom` by default                |
+| `--headless`  | no window; the UART console still uses stdin and stdout |
+| `-h, --help`  | show the options                                         |
+
+The emulator quits when the guest powers the machine off through the
+power controller (see [docs/SPECIFICATION.md](docs/SPECIFICATION.md#power-controller));
+the exit code written there becomes the process exit status. In headless
+mode it also quits when the CPU halts:
+
+| Exit status | Reason                                                   |
+|-------------|----------------------------------------------------------|
+| guest's     | power off                                                |
+| `0`         | `HLT` (headless only)                                    |
+| `1`         | a fault the CPU couldn't handle (headless only, reported on stderr), or an emulator error |
+
+With a window, a halted machine keeps the window open.
+
 ## Web (Emscripten)
 
 ```sh

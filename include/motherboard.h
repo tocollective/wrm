@@ -6,6 +6,8 @@
 #include "cpu.h"
 #include "devices/keyboard.h"
 #include "devices/pic.h"
+#include "devices/pit.h"
+#include "devices/power.h"
 #include "devices/uart.h"
 #include "ram.h"
 #include "rom.h"
@@ -20,11 +22,14 @@
 #define MB_PIC_BASE 0xFD000000
 #define MB_KEYBOARD_BASE 0xFD001000
 #define MB_UART_BASE 0xFD002000
+#define MB_PIT_BASE 0xFD003000
+#define MB_POWER_BASE 0xFD004000
 #define MB_ROM_BASE 0xFE000000 // ROM_MAX_SIZE bytes up to 0xFFFFFFFF
 
 // IRQ lines (see docs/SPECIFICATION.md)
 #define MB_IRQ_KEYBOARD 0
 #define MB_IRQ_UART 1
+#define MB_IRQ_PIT 2
 
 typedef struct ram_slot {
 	ram_t* ram;
@@ -39,9 +44,16 @@ typedef struct motherboard {
 	pic_t* pic;
 	keyboard_t* keyboard;
 	uart_t* uart;
+	pit_t* pit;
+	power_t* power;
 } motherboard_t;
 
 motherboard_t* motherboard_create(void);
 void motherboard_destroy(motherboard_t* mb);
+
+// Resets the CPU and every device; RAM keeps its contents.
+void motherboard_reset(motherboard_t* mb);
+// Advances the machine by one clock tick.
+void motherboard_tick(motherboard_t* mb);
 
 #endif // WRM_MOTHERBOARD_H

@@ -78,6 +78,12 @@ static bool motherboard_io_read(motherboard_t* mb, const uint32_t address,
 		case MB_UART_BASE:
 			fail = uart_read(mb->uart, offset, size, value);
 			break;
+		case MB_PIT_BASE:
+			fail = pit_read(mb->pit, offset, size, value);
+			break;
+		case MB_POWER_BASE:
+			fail = power_read(mb->power, offset, size, value);
+			break;
 	}
 	if (!fail) *value &= motherboard_io_mask(size);
 	return fail;
@@ -97,6 +103,10 @@ static bool motherboard_io_write(motherboard_t* mb, const uint32_t address,
 			return keyboard_write(mb->keyboard, offset, size, value);
 		case MB_UART_BASE:
 			return uart_write(mb->uart, offset, size, value);
+		case MB_PIT_BASE:
+			return pit_write(mb->pit, offset, size, value);
+		case MB_POWER_BASE:
+			return power_write(mb->power, offset, size, value);
 	}
 	return true;
 }
@@ -188,6 +198,9 @@ motherboard_t* motherboard_create(void) {
 	mb->pic = pic_create();
 	mb->keyboard = keyboard_create(mb->pic, MB_IRQ_KEYBOARD);
 	mb->uart = uart_create(mb->pic, MB_IRQ_UART);
+	// the timer counts clock ticks
+	mb->pit = pit_create(mb->pic, MB_IRQ_PIT, (uint32_t)mb->clock->rate);
+	mb->power = power_create();
 
 	for (int i = 0; i < RAM_SLOT_COUNT; i++) {
 		mb->ram_slot[i].ram = NULL;
@@ -207,6 +220,16 @@ motherboard_t* motherboard_create(void) {
 
 void motherboard_destroy(motherboard_t* mb) {
 	if (!mb) return;
+	if (mb->power) {
+		power_destroy(mb->power);
+		mb->power = NULL;
+	}
+
+	if (mb->pit) {
+		pit_destroy(mb->pit);
+		mb->pit = NULL;
+	}
+
 	if (mb->uart) {
 		uart_destroy(mb->uart);
 		mb->uart = NULL;
@@ -247,4 +270,24 @@ void motherboard_destroy(motherboard_t* mb) {
 
 	free(mb);
 	mb = NULL;
+}
+
+void motherboard_reset(motherboard_t* mb) {
+	if (!mb) return;
+	cpu_reset(mb->cpu);
+	keyboard_reset(mb->keyboard);
+	uart_reset(mb->uart);
+	pit_reset(mb->pit);
+	power_reset(mb->power);
+	pic_reset(mb->pic);
+}
+
+void motherboard_tick(motherboard_t* mb) {
+	if (!mb) return;
+	pit_tick(mb->pit);
+	cpu_set_irq(mb->cpu, pic_irq(mb->pic));
+	cpu_update(mb->cpu);
+
+	// requested by a store the CPU has just made
+	if (mb->power->request == POWER_REQUEST_RESET) motherboard_reset(mb);
 }

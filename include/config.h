@@ -12,8 +12,12 @@ typedef struct config {
 	bool make_dump;
 	int window_scale;
 	bool step_mode;
+	bool headless; // no window: runs until the machine powers off or halts
 } config_t;
 
 config_t* config_get(void);
+// Applies the command line; prints the usage and exits on --help or an
+// unknown option.
+void config_parse(int argc, char* argv[]);
 
 #endif // WRM_CONFIG_H

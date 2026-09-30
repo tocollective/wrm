@@ -8,11 +8,16 @@
 | `0xFD000000`–`0xFD000FFF` | PIC                                     |
 | `0xFD001000`–`0xFD001FFF` | Keyboard                                |
 | `0xFD002000`–`0xFD002FFF` | UART                                    |
+| `0xFD003000`–`0xFD003FFF` | Timer                                   |
+| `0xFD004000`–`0xFD004FFF` | Power controller                        |
 | `0xFE000000`–`0xFFFFFFFF` | ROM (32MB, read-only)                   |
 
 Addresses between the end of RAM and `0xFD000000` are unmapped, as are
 unused pages of the I/O region (`0xFD000000`–`0xFDFFFFFF`).
 RAM slots are laid out in slot order; empty slots take no address space.
+
+These are physical addresses. While the MMU is on, software sees virtual
+addresses (see [INSTRUCTIONS.md](INSTRUCTIONS.md#memory-management)).
 
 ## Devices
 
@@ -42,6 +47,7 @@ with `ENABLE` left at 0.
 |-----|----------|-------------------------|
 | 0   | Keyboard | event FIFO is not empty |
 | 1   | UART     | RX FIFO is not empty    |
+| 2   | Timer    | `STATUS.EXPIRED` is set |
 
 ### Keyboard
 
@@ -74,15 +80,67 @@ feeds as many bytes as the FIFO can take, so piped input is not lost.
 TX never blocks, so TX ready is always set. The RX overflow bit is cleared
 when `STATUS` is read.
 
+### Timer
+
+A free-running 64-bit counter and a down-counter that raises IRQ 2. Both
+advance once per system clock tick.
+
+| Offset | Register    | Access | Description                                   |
+|--------|-------------|--------|-----------------------------------------------|
+| `0x00` | `COUNT_LO`  | R      | ticks since reset, low 32 bits                |
+| `0x04` | `COUNT_HI`  | R      | ticks since reset, high 32 bits               |
+| `0x08` | `FREQUENCY` | R      | ticks per second (the clock rate)             |
+| `0x0C` | `RELOAD`    | RW     | period in ticks                               |
+| `0x10` | `VALUE`     | R      | ticks left until the timer expires            |
+| `0x14` | `CONTROL`   | RW     | bit 0 = enable, bit 1 = periodic (0 = one-shot) |
+| `0x18` | `STATUS`    | RW     | bit 0 = expired; writing 1 clears it          |
+
+Writing `CONTROL` loads `VALUE` from `RELOAD`, so it (re)starts the
+countdown. While enabled, `VALUE` goes down by one every tick; when it
+reaches 0 the timer expires: `STATUS.EXPIRED` is set, and either `VALUE`
+is reloaded from `RELOAD` (periodic) or the enable bit is cleared
+(one-shot). A timer with `RELOAD` = N expires every N ticks; `RELOAD` = 0
+acts as 1.
+
+`STATUS.EXPIRED` stays set, and the IRQ line asserted, until software
+writes 1 to it; expiries in between are not counted. Clearing the enable
+bit does not clear `EXPIRED`.
+
+`COUNT` can't be read in one access. To get a consistent value, read
+`COUNT_HI`, `COUNT_LO`, then `COUNT_HI` again, and retry if the two high
+halves differ.
+
+### Power controller
+
+Lets software turn the machine off or reset it. The request takes effect
+at the end of the clock tick in which the store completes; the
+instructions after the store never run.
+
+| Offset | Register | Access | Description                                        |
+|--------|----------|--------|----------------------------------------------------|
+| `0x00` | `OFF`    | W      | power off; the low 8 bits are the exit code        |
+| `0x04` | `RESET`  | W      | reset the machine, the value is ignored            |
+
+Both registers read as `0`. On power off the emulator quits with the exit
+code as its process status (see [README](../README.md#running)). Reset is
+described [below](#reset).
+
 ## Reset
 
 On reset all registers are zero and `pc = 0xFE000000`, so execution starts
-at the first byte of the firmware image.
+at the first byte of the firmware image. The CPU is in supervisor mode,
+the MMU is off and its TLB empty. `CYCLE` and `INSTRET` start from zero.
+
+The power controller's `RESET` does the same at run time: the CPU and all
+devices return to their reset state (FIFOs are emptied, the PIC `ENABLE`
+mask, the timer and its `COUNT` are cleared). RAM keeps its contents.
 
 ## Clock
 
-The system clock runs at 24 MHz by default (`clock_rate` in the config).
-The CPU advances its pipeline by one stage per tick.
+The system clock runs at 48 MHz by default (`clock_rate` in the config).
+On every tick the timer advances first, then the CPU samples the IRQ line
+and advances its pipeline by one stage. Nothing runs once the CPU has
+halted or the machine is powered off.
 
 ## Pipeline
 
@@ -90,11 +148,11 @@ The CPU uses the classic five-stage RISC pipeline, one stage per clock cycle:
 
 | Stage | Work                                                        |
 |-------|-------------------------------------------------------------|
-| IF    | fetch the word at `pc`, `pc += 4`                           |
+| IF    | translate `pc`, fetch the word, `pc += 4`                   |
 | ID    | decode, read registers, detect load-use hazards             |
 | EX    | ALU, effective address, branch/jump resolution              |
-| MEM   | loads and stores                                            |
-| WB    | write `rd`, retire, raise faults, `HLT`                     |
+| MEM   | translate the address, loads and stores                     |
+| WB    | write `rd`, retire, raise faults, `HLT`, `IRET`, `MTCR`, `TLBI` |
 
 The pipeline is invisible to software: there are no delay slots, and
 results are always seen by the next instruction.
@@ -112,6 +170,12 @@ results are always seen by the next instruction.
 - **Faults** are precise: they are raised when the faulting instruction
   reaches WB, after all older instructions have completed and before any
   younger one has written memory or registers.
+- **Mode and translation changes:** `MTCR STATUS`, `MTCR PTBR` and `TLBI`
+  squash the younger instructions in flight when they retire and refetch
+  them, so these see the new mode and translation. `IRET` jumps to `EPC`
+  when it retires (4-cycle penalty) rather than in EX.
+- **TLB misses** are walked in the same cycle; the walk takes no extra
+  cycles.
 
 Timing: an instruction takes 5 cycles to go through the pipeline; the
 throughput is up to one instruction per cycle.

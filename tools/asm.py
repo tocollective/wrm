@@ -15,7 +15,9 @@ syntax:
   ; comment  # comment  // comment
 
   registers: r0-r31, zero (= r0), ra (= r31)
-  control registers: status, epc, ivec, scratch, cr0-cr3 or a number
+  control registers: status, epc, ivec, scratch, cause, badaddr, ptbr,
+                     cycle, cycleh, instret, instreth (read-only),
+                     cr0-cr10 or a number
 
   expressions: C operators | ^ & << >> + - * / % ~ and parentheses,
     numbers 42 0x2A 0b101010 0o52 'c', $ = address of the current line,
@@ -26,6 +28,7 @@ syntax:
     LW rd, imm(rs1)           SW rd, imm(rs1)         LW rd, (rs1)
     BEQ rd, rs1, target       JAL [rd,] target        JALR rd, rs1[, imm]
     MFCR rd, cr               MTCR cr, rs1            JALR rd, imm(rs1)
+    TLBI rs1
   branch and JAL targets are addresses (labels), not offsets.
 
 pseudo-instructions:
@@ -110,8 +113,10 @@ def check_range(v, lo, hi, what):
 REGS = {f"r{i}": i for i in range(32)}
 REGS.update(zero=0, ra=31)
 
-CREGS = {f"cr{i}": i for i in range(4)}
-CREGS.update(status=0, epc=1, ivec=2, scratch=3)
+CREGS = {f"cr{i}": i for i in range(11)}
+CREGS.update(status=0, epc=1, ivec=2, scratch=3, cause=4, badaddr=5, ptbr=6,
+             cycle=7, cycleh=8, instret=9, instreth=10)
+CREGS_READONLY = {7, 8, 9, 10}  # MTCR to them is an illegal instruction
 
 
 # -- lexing ---------------------------------------------------------------
@@ -447,7 +452,15 @@ def enc_mfcr(a, st, pc):
 
 def enc_mtcr(a, st, pc):
 	cr, rs1 = a.nargs(st, 2)
-	return [enc_i(0x05, 0, a.reg(rs1), a.creg(st, cr, pc))]
+	n = a.creg(st, cr, pc)
+	if n in CREGS_READONLY:
+		raise AsmError(f"control register {cr.strip()} is read-only")
+	return [enc_i(0x05, 0, a.reg(rs1), n)]
+
+
+def enc_tlbi(a, st, pc):
+	rs1, = a.nargs(st, 1)
+	return [enc_i(0x06, 0, a.reg(rs1), 0)]
 
 
 def pseudo_rr(build):
@@ -515,10 +528,12 @@ def enc_la(a, st, pc):
 
 def define_instructions():
 	ins = INSTRUCTIONS
-	for name, op in (("hlt", 0x00), ("nop", 0x01), ("wfi", 0x02), ("iret", 0x03)):
+	for name, op in (("hlt", 0x00), ("nop", 0x01), ("wfi", 0x02), ("iret", 0x03),
+					 ("syscall", 0x07)):
 		ins[name] = (4, fmt_n(op))
 	ins["mfcr"] = (4, enc_mfcr)
 	ins["mtcr"] = (4, enc_mtcr)
+	ins["tlbi"] = (4, enc_tlbi)
 
 	for i, name in enumerate(("add", "sub", "and", "or", "xor", "shl", "shr", "sar",
 							  "slt", "sltu", "mul", "div", "divu", "rem", "remu")):

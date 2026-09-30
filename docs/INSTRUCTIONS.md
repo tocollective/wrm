@@ -7,7 +7,26 @@ The opcode is always the lowest byte.
 
 - `r0`–`r31` — 32-bit general purpose registers, `r0` always reads as zero.
 - `pc` — program counter, reset value `0xFE000000` (start of ROM).
-- `cr0`–`cr3` — control registers, see [Interrupts](#interrupts).
+- `cr0`–`cr10` — control registers, see [Control registers](#control-registers).
+
+## Privilege modes
+
+The CPU runs either in **supervisor** or in **user** mode, selected by
+`STATUS.UM`. It starts in supervisor mode after reset.
+
+User mode can't:
+
+- execute `HLT`, `WFI`, `IRET`, `MFCR`, `MTCR` and `TLBI` — they raise a
+  privileged instruction fault; `MFCR` of the
+  [counters](#counters) is the exception,
+- access pages without the `U` bit while the MMU is on (page fault).
+
+User code enters the supervisor only through the handler: with `SYSCALL`,
+a fault or an interrupt. The supervisor enters user mode by setting
+`PUM` and `EPC` and executing `IRET`.
+
+While the MMU is off, user mode has access to all of physical memory, so
+the MMU has to be on to protect the supervisor.
 
 ## Formats
 
@@ -31,15 +50,19 @@ and `SARI`, where it is zero-extended. Shift amounts use the low 5 bits.
 
 | Opcode | Mnemonic        | Format | Operation                              |
 |--------|-----------------|--------|----------------------------------------|
-| `0x00` | `HLT`           | N      | halt the CPU                           |
+| `0x00` | `HLT`           | N      | halt the CPU (S)                       |
 | `0x01` | `NOP`           | N      | do nothing                             |
-| `0x02` | `WFI`           | N      | wait for interrupt                     |
-| `0x03` | `IRET`          | N      | `pc = EPC`, `IE = PIE`                 |
-| `0x04` | `MFCR rd, cr`   | I      | `rd = cr[imm14]`                       |
-| `0x05` | `MTCR cr, rs1`  | I      | `cr[imm14] = rs1` (`rd` is reserved)   |
+| `0x02` | `WFI`           | N      | wait for interrupt (S)                 |
+| `0x03` | `IRET`          | N      | `pc = EPC`, `IE = PIE`, `UM = PUM` (S) |
+| `0x04` | `MFCR rd, cr`   | I      | `rd = cr[imm14]` (S, except counters)  |
+| `0x05` | `MTCR cr, rs1`  | I      | `cr[imm14] = rs1` (`rd` is reserved) (S) |
+| `0x06` | `TLBI rs1`      | I      | drop the TLB entry of the page at `rs1` (`rd`, `imm14` are reserved) (S) |
+| `0x07` | `SYSCALL`       | N      | enter the handler with `CAUSE` = 12    |
 
-`MFCR`/`MTCR` with a control register number that doesn't exist is an
-illegal instruction.
+(S) — supervisor only, see [Privilege modes](#privilege-modes).
+
+`MFCR`/`MTCR` with a control register number that doesn't exist, and
+`MTCR` to a read-only one, is an illegal instruction.
 
 ### Register ALU
 
@@ -135,10 +158,17 @@ address of the branch itself (range ±32KB).
 
 | Number | Name      | Reset | Description                                  |
 |--------|-----------|-------|----------------------------------------------|
-| `0`    | `STATUS`  | `0`   | bit 0 = `IE` (interrupts enabled), bit 1 = `PIE` (previous `IE`); other bits read as zero |
+| `0`    | `STATUS`  | `0`   | bit 0 = `IE` (interrupts enabled), bit 1 = `PIE` (previous `IE`), bit 2 = `UM` (user mode), bit 3 = `PUM` (previous `UM`); other bits read as zero |
 | `1`    | `EPC`     | `0`   | address `IRET` returns to                    |
 | `2`    | `IVEC`    | `0`   | interrupt handler address                    |
 | `3`    | `SCRATCH` | `0`   | free for software, e.g. to save a register in the handler |
+| `4`    | `CAUSE`   | `0`   | why the handler was entered, see [Exceptions](#exceptions) |
+| `5`    | `BADADDR` | `0`   | faulting address or instruction word          |
+| `6`    | `PTBR`    | `0`   | page table base, see [Memory management](#memory-management) |
+| `7`    | `CYCLE`   | `0`   | clock cycles since reset, low 32 bits (read-only) |
+| `8`    | `CYCLEH`  | `0`   | clock cycles since reset, high 32 bits (read-only) |
+| `9`    | `INSTRET` | `0`   | instructions retired since reset, low 32 bits (read-only) |
+| `10`   | `INSTRETH`| `0`   | instructions retired since reset, high 32 bits (read-only) |
 
 ### Taking an interrupt
 
@@ -148,7 +178,12 @@ the CPU finishes the current instruction and then:
 
 1. `EPC` = address of the next instruction that has not executed yet,
 2. `PIE` = `IE`, `IE` = 0,
-3. `pc` = `IVEC`.
+3. `PUM` = `UM`, `UM` = 0 (supervisor mode),
+4. `CAUSE` = 0,
+5. `pc` = `IVEC`.
+
+Interrupts and [exceptions](#exceptions) share the handler; it tells them
+apart by `CAUSE`.
 
 The handler finds the source by reading the PIC `CLAIM` register and must
 clear the condition in the device before `IRET`, otherwise the line stays
@@ -170,8 +205,138 @@ so they always see the effect of preceding `MTCR`s. `MTCR` takes effect when
 it completes: an interrupt can arrive right after `MTCR STATUS` sets `IE`,
 but never after an `MTCR` that clears it.
 
-## Faults
+A mode change takes effect for the next instruction: `IRET` jumps to `EPC`
+only when it completes, and `MTCR STATUS` refetches the instructions after
+it. Writing `UM` with `MTCR` switches to user mode directly, continuing
+after the `MTCR`.
 
-Illegal opcode, misaligned fetch/load/store, access to unmapped memory and
-writes to ROM halt the CPU. `pc` is left pointing at the faulting instruction.
-Faults are not interrupts: they can't be handled and ignore `IE`.
+### Counters
+
+`CYCLE`/`CYCLEH` and `INSTRET`/`INSTRETH` are two 64-bit counters split
+into halves. They are read-only and, unlike the other control registers,
+can be read with `MFCR` in user mode too.
+
+- `CYCLE` counts clock cycles, including the ones spent in `WFI`. It
+  stops while the CPU is halted.
+- `INSTRET` counts completed instructions. Instructions that fault
+  (including `SYSCALL`) and instructions squashed in the pipeline are not
+  counted; interrupts are not instructions.
+
+`MFCR` waits for the older instructions like for any control register, so
+`MFCR rd, instret` returns the number of instructions completed before it.
+A 64-bit value takes three reads; retry if the high half changed:
+
+```
+again:  mfcr r2, cycleh
+        mfcr r1, cycle
+        mfcr r3, cycleh
+        bne r2, r3, again
+```
+
+## Exceptions
+
+A fault is raised when the faulting instruction would complete; the
+instructions before it have completed, the ones after it have no effect.
+
+The CPU enters the handler in supervisor mode like for an interrupt,
+except:
+
+1. `EPC` = address of the faulting instruction,
+2. `PIE` = `IE`, `IE` = 0,
+3. `PUM` = `UM`, `UM` = 0,
+4. `CAUSE` = fault code, `BADADDR` = see the table,
+5. `pc` = `IVEC`.
+
+`IRET` retries the faulting instruction; to skip it (e.g. after emulating
+it, or to return from `SYSCALL`) the handler adds 4 to `EPC` first.
+
+A fault in user mode is always handled, whatever `IE` is. In supervisor
+mode with `IE` clear — at reset, inside the handler, or when software
+cleared it — a fault can't be handled: it halts the CPU with `pc` left
+pointing at the faulting instruction.
+
+| `CAUSE` | Fault                   | `BADADDR`                         |
+|---------|-------------------------|-----------------------------------|
+| `0`     | interrupt (not a fault) | unchanged                         |
+| `1`     | illegal instruction: unknown opcode or control register, `MTCR` to a read-only one | instruction word |
+| `2`     | misaligned fetch        | `pc`                              |
+| `3`     | misaligned load         | virtual address                   |
+| `4`     | misaligned store        | virtual address                   |
+| `5`     | fetch bus error         | `pc`                              |
+| `6`     | load bus error          | virtual address                   |
+| `7`     | store bus error, including writes to ROM | virtual address  |
+| `8`     | fetch page fault        | `pc`                              |
+| `9`     | load page fault         | virtual address                   |
+| `10`    | store page fault        | virtual address                   |
+| `11`    | privileged instruction in user mode | instruction word      |
+| `12`    | `SYSCALL`               | `0`                               |
+
+Bus errors are accesses to unmapped physical memory (see
+[SPECIFICATION.md](SPECIFICATION.md#memory-map)).
+
+## Memory management
+
+The MMU translates every virtual address (fetches, loads and stores) to a
+physical one with a two-level page table. Pages are 4KB; a directory entry
+can also map a 4MB superpage.
+
+Translation is off after reset: virtual = physical. It is controlled by
+`PTBR`:
+
+```
+PTBR  31                        12 11          1   0
+     | directory physical address |  reserved   | EN |
+```
+
+- `EN` — translation on,
+- the directory is one 4KB page of 1024 entries, aligned to 4KB.
+
+Reserved bits read as zero. Translation affects the handler too: `IVEC`,
+`EPC` and `BADADDR` hold virtual addresses.
+
+### Page tables
+
+```
+Virtual address  31        22 21        12 11            0
+                | dir index  | table index |    offset    |
+
+Entry            31                     12 11  5  4   3   2   1   0
+                |  physical page address  | rsvd | U | X | W | R | V |
+```
+
+1. The directory entry is read from `PTBR.base + dir index * 4`.
+2. If it has `V` = 0, it is a page fault.
+3. If any of `R`, `W`, `X` is set, it maps a 4MB superpage: the physical
+   address is `entry[31:22]` + `vaddr[21:0]`. Bits 21–12 of the entry
+   must be zero, otherwise it is a page fault.
+4. Otherwise it points to a page table at `entry[31:12]`; the page table
+   entry is read from `table + table index * 4`.
+5. If it has `V` = 0, or none of `R`, `W`, `X` set, it is a page fault.
+   The physical address is `entry[31:12]` + `vaddr[11:0]`.
+
+A fetch needs `X`, a load needs `R`, a store needs `W`, otherwise it is a
+page fault. In user mode the page also needs `U`; supervisor mode can
+access every page. `U` is only checked in the entry that maps the page
+(a superpage directory entry or a page table entry). Entries are read from physical memory and never written by the
+CPU. Page tables must be in RAM (reading a device register as an entry
+has its side effects). An entry that can't be read (unmapped physical
+address) is a page fault.
+
+Devices are only reachable through a mapping of their physical pages, so
+software usually maps the I/O region and the ROM too, e.g. with
+superpages.
+
+### TLB
+
+The CPU caches translations in a TLB. After changing an entry, software
+must drop the stale translation:
+
+- `TLBI rs1` drops the translation of the 4KB page containing `rs1`;
+- writing `PTBR` (even with the same value) drops all of them — needed
+  after changing a directory entry, since a superpage is cached one 4KB
+  page at a time.
+
+Both take effect for the next instruction: `MTCR PTBR` and `TLBI` refetch
+the instructions after them. Entries with `V` = 0 are never cached, so
+making an entry valid needs no `TLBI`. The number of TLB entries is not
+part of the architecture.

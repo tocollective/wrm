@@ -5,8 +5,9 @@
 
 typedef struct application {
 	bool running;
+	int exit_code; // process exit status once the app stops running
 	machine_t* machine;
-	display_t* display;
+	display_t* display; // NULL in headless mode
 } application_t;
 
 application_t* application_create(int argc, char* argv[]);
