@@ -7,6 +7,7 @@ The opcode is always the lowest byte.
 
 - `r0`–`r31` — 32-bit general purpose registers, `r0` always reads as zero.
 - `pc` — program counter, reset value `0xFE000000` (start of ROM).
+- `cr0`–`cr3` — control registers, see [Interrupts](#interrupts).
 
 ## Formats
 
@@ -28,10 +29,17 @@ and `SARI`, where it is zero-extended. Shift amounts use the low 5 bits.
 
 ### System
 
-| Opcode | Mnemonic | Format | Operation     |
-|--------|----------|--------|---------------|
-| `0x00` | `HLT`    | N      | halt the CPU  |
-| `0x01` | `NOP`    | N      | do nothing    |
+| Opcode | Mnemonic        | Format | Operation                              |
+|--------|-----------------|--------|----------------------------------------|
+| `0x00` | `HLT`           | N      | halt the CPU                           |
+| `0x01` | `NOP`           | N      | do nothing                             |
+| `0x02` | `WFI`           | N      | wait for interrupt                     |
+| `0x03` | `IRET`          | N      | `pc = EPC`, `IE = PIE`                 |
+| `0x04` | `MFCR rd, cr`   | I      | `rd = cr[imm14]`                       |
+| `0x05` | `MTCR cr, rs1`  | I      | `cr[imm14] = rs1` (`rd` is reserved)   |
+
+`MFCR`/`MTCR` with a control register number that doesn't exist is an
+illegal instruction.
 
 ### Register ALU
 
@@ -121,7 +129,49 @@ address of the branch itself (range ±32KB).
 
 `JAL r0, off` is an unconditional jump, `JALR r0, r31, 0` is a return.
 
+## Interrupts
+
+### Control registers
+
+| Number | Name      | Reset | Description                                  |
+|--------|-----------|-------|----------------------------------------------|
+| `0`    | `STATUS`  | `0`   | bit 0 = `IE` (interrupts enabled), bit 1 = `PIE` (previous `IE`); other bits read as zero |
+| `1`    | `EPC`     | `0`   | address `IRET` returns to                    |
+| `2`    | `IVEC`    | `0`   | interrupt handler address                    |
+| `3`    | `SCRATCH` | `0`   | free for software, e.g. to save a register in the handler |
+
+### Taking an interrupt
+
+The CPU has one level-triggered IRQ input driven by the PIC (see
+[SPECIFICATION.md](SPECIFICATION.md)). When it is asserted and `IE` is set,
+the CPU finishes the current instruction and then:
+
+1. `EPC` = address of the next instruction that has not executed yet,
+2. `PIE` = `IE`, `IE` = 0,
+3. `pc` = `IVEC`.
+
+The handler finds the source by reading the PIC `CLAIM` register and must
+clear the condition in the device before `IRET`, otherwise the line stays
+asserted and the interrupt is taken again right after `IRET`.
+
+A handler that sets `IE` to allow nested interrupts has to save `EPC` first
+and clear `IE` again before restoring `EPC` and executing `IRET`.
+
+### WFI
+
+`WFI` stops fetching until the IRQ line is asserted. If `IE` is set, the
+interrupt is taken with `EPC` pointing after the `WFI`; otherwise execution
+simply continues with the next instruction.
+
+### Control register access
+
+`MFCR`, `MTCR` and `IRET` wait until all older instructions have finished,
+so they always see the effect of preceding `MTCR`s. `MTCR` takes effect when
+it completes: an interrupt can arrive right after `MTCR STATUS` sets `IE`,
+but never after an `MTCR` that clears it.
+
 ## Faults
 
 Illegal opcode, misaligned fetch/load/store, access to unmapped memory and
 writes to ROM halt the CPU. `pc` is left pointing at the faulting instruction.
+Faults are not interrupts: they can't be handled and ignore `IE`.

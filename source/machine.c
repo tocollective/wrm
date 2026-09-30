@@ -22,6 +22,7 @@ void machine_update(machine_t* machine) {
 	motherboard_t* mb = machine->motherboard;
 	const uint64_t ticks = clock_update(mb->clock);
 	for (uint64_t i = 0; i < ticks && !mb->cpu->halted; i++) {
+		cpu_set_irq(mb->cpu, pic_irq(mb->pic));
 		cpu_update(mb->cpu);
 	}
 }

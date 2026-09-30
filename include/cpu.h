@@ -8,10 +8,27 @@
 #define CPU_GPR_ZERO 0
 #define CPU_PC_START 0xFE000000 // reset vector: start of ROM (MB_ROM_BASE)
 
+// Control registers, accessed with MFCR/MTCR (see docs/INSTRUCTIONS.md)
+typedef enum cpu_cr {
+	CPU_CR_STATUS = 0,
+	CPU_CR_EPC = 1, // where IRET returns to
+	CPU_CR_IVEC = 2, // interrupt handler address
+	CPU_CR_SCRATCH = 3, // free for the handler
+	CPU_CR_COUNT,
+} cpu_cr_t;
+
+#define CPU_STATUS_IE 0x01 // interrupts enabled
+#define CPU_STATUS_PIE 0x02 // IE before the interrupt was taken
+#define CPU_STATUS_MASK (CPU_STATUS_IE | CPU_STATUS_PIE)
+
 // See docs/INSTRUCTIONS.md
 typedef enum cpu_opcode {
 	CPU_OP_HLT = 0x00,
 	CPU_OP_NOP = 0x01,
+	CPU_OP_WFI = 0x02,
+	CPU_OP_IRET = 0x03,
+	CPU_OP_MFCR = 0x04, // I-format
+	CPU_OP_MTCR = 0x05, // I-format
 
 	// R-format ALU
 	CPU_OP_ADD = 0x10,
@@ -108,8 +125,11 @@ typedef struct cpu_pipeline {
 
 typedef struct cpu {
 	uint32_t gpr[CPU_GPR_COUNT]; // general purpose registers
-	uint32_t pc; // fetch address; architectural PC once halted
+	uint32_t pc; // fetch address; architectural PC once halted or waiting
+	uint32_t cr[CPU_CR_COUNT]; // control registers
 	bool halted;
+	bool waiting; // WFI: sleeping until the IRQ line is asserted
+	bool irq; // IRQ input line, driven by the PIC
 	uint64_t cycles; // clock cycles
 	uint64_t retired; // instructions completed in WB
 	cpu_pipeline_t pipeline;
@@ -121,6 +141,7 @@ void cpu_destroy(cpu_t* cpu);
 
 void cpu_reset(cpu_t* cpu);
 void cpu_update(cpu_t* cpu); // advances the pipeline by one clock cycle
+void cpu_set_irq(cpu_t* cpu, const bool level);
 
 cpu_instruction_t cpu_decode(const uint32_t raw);
 

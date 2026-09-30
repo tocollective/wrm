@@ -16,6 +16,11 @@
 // - Branches are predicted not taken and resolved in EX; a taken branch
 //   squashes the two younger instructions in IF and ID.
 // - Faults travel down the pipeline and are raised in WB (precise).
+// - Interrupts are taken between two instructions: after WB has retired,
+//   the younger ones still in flight are squashed and refetched on IRET.
+// - MFCR, MTCR and IRET wait in ID until the older instructions have left
+//   EX and MEM, so control registers are read in EX and written in WB
+//   without forwarding.
 
 static uint32_t sign_extend(const uint32_t value, const int bits) {
 	const uint32_t sign = 1u << (bits - 1);
@@ -47,8 +52,11 @@ void cpu_reset(cpu_t* cpu) {
 	if (!cpu) return;
 	memset(cpu->gpr, 0, sizeof(cpu->gpr));
 	memset(&cpu->pipeline, 0, sizeof(cpu->pipeline));
+	memset(cpu->cr, 0, sizeof(cpu->cr));
 	cpu->pc = CPU_PC_START;
 	cpu->halted = false;
+	cpu->waiting = false;
+	cpu->irq = false;
 	cpu->cycles = 0;
 	cpu->retired = 0;
 }
@@ -57,6 +65,8 @@ static cpu_format_t cpu_opcode_format(const uint8_t opcode) {
 	switch (opcode) {
 		case CPU_OP_HLT:
 		case CPU_OP_NOP:
+		case CPU_OP_WFI:
+		case CPU_OP_IRET:
 			return CPU_FORMAT_N;
 
 		case CPU_OP_ADD:
@@ -85,6 +95,8 @@ static cpu_format_t cpu_opcode_format(const uint8_t opcode) {
 		case CPU_OP_SARI:
 		case CPU_OP_SLTI:
 		case CPU_OP_SLTIU:
+		case CPU_OP_MFCR:
+		case CPU_OP_MTCR:
 		case CPU_OP_LB:
 		case CPU_OP_LBU:
 		case CPU_OP_LH:
@@ -169,13 +181,20 @@ static bool cpu_is_branch(const cpu_instruction_t* in) {
 	return in->opcode >= CPU_OP_BEQ && in->opcode <= CPU_OP_BGEU;
 }
 
+// instructions that touch control registers
+static bool cpu_is_serializing(const cpu_instruction_t* in) {
+	return in->opcode == CPU_OP_MFCR || in->opcode == CPU_OP_MTCR
+		   || in->opcode == CPU_OP_IRET;
+}
+
 static bool cpu_writes_rd(const cpu_instruction_t* in) {
 	switch (in->format) {
 		case CPU_FORMAT_R:
 		case CPU_FORMAT_U:
 			return true;
 		case CPU_FORMAT_I:
-			return !cpu_is_store(in) && !cpu_is_branch(in);
+			return !cpu_is_store(in) && !cpu_is_branch(in)
+				   && in->opcode != CPU_OP_MTCR;
 		default:
 			return false;
 	}
@@ -198,8 +217,24 @@ static void cpu_latch_fault(cpu_latch_t* latch, const char* reason,
 // Stops the CPU, leaving pc as the architectural PC.
 static void cpu_halt(cpu_t* cpu, const uint32_t pc) {
 	cpu->halted = true;
+	cpu->waiting = false;
 	cpu->pc = pc;
 	memset(&cpu->pipeline, 0, sizeof(cpu->pipeline));
+}
+
+// Sleeps until the IRQ line is asserted, then resumes at pc.
+static void cpu_wait(cpu_t* cpu, const uint32_t pc) {
+	cpu->waiting = true;
+	cpu->pc = pc;
+	memset(&cpu->pipeline, 0, sizeof(cpu->pipeline));
+}
+
+static void cpu_write_cr(cpu_t* cpu, const uint32_t cr, const uint32_t value) {
+	if (cr == CPU_CR_STATUS) {
+		cpu->cr[cr] = value & CPU_STATUS_MASK;
+	} else {
+		cpu->cr[cr] = value;
+	}
 }
 
 // Returns the newest in-flight value of reg, falling back to value
@@ -256,6 +291,12 @@ static bool cpu_stage_id(cpu_t* cpu, cpu_latch_t* out) {
 		&& ex->in.rd != CPU_GPR_ZERO && cpu_reads_reg(&in, ex->in.rd))
 		return true;
 
+	// control registers: wait until the older instructions leave EX and
+	// MEM (the one in WB has already retired this cycle)
+	if (cpu_is_serializing(&in)
+		&& (ex->valid || cpu->pipeline.ex_mem.valid))
+		return true;
+
 	*out = *id;
 	out->in = in;
 	out->a = cpu->gpr[in.rs1];
@@ -263,6 +304,9 @@ static bool cpu_stage_id(cpu_t* cpu, cpu_latch_t* out) {
 	out->d = cpu->gpr[in.rd];
 	if (in.format == CPU_FORMAT_INVALID)
 		cpu_latch_fault(out, "illegal instruction", in.raw);
+	else if ((in.opcode == CPU_OP_MFCR || in.opcode == CPU_OP_MTCR)
+			 && in.imm >= CPU_CR_COUNT)
+		cpu_latch_fault(out, "illegal control register", in.imm);
 	return false;
 }
 
@@ -413,6 +457,18 @@ static bool cpu_stage_ex(cpu_t* cpu, cpu_latch_t* out, uint32_t* target) {
 			taken = true;
 			next_pc = (a + imm) & ~3u;
 		} break;
+
+		// control registers, no older instruction is in flight
+		case CPU_OP_MFCR:
+			r = cpu->cr[imm];
+			break;
+		case CPU_OP_MTCR:
+			r = a; // written in WB
+			break;
+		case CPU_OP_IRET: {
+			taken = true;
+			next_pc = cpu->cr[CPU_CR_EPC];
+		} break;
 	}
 
 	out->a = a;
@@ -484,7 +540,7 @@ static void cpu_stage_mem(cpu_t* cpu, cpu_latch_t* out) {
 	}
 }
 
-// returns true when the CPU has halted
+// returns true when the pipeline was flushed (halted or waiting)
 static bool cpu_stage_wb(cpu_t* cpu) {
 	const cpu_latch_t* wb = &cpu->pipeline.mem_wb;
 	if (!wb->valid) return false;
@@ -502,20 +558,67 @@ static bool cpu_stage_wb(cpu_t* cpu) {
 		cpu->gpr[wb->in.rd] = wb->result;
 	cpu->retired++;
 
-	if (wb->in.opcode == CPU_OP_HLT) {
-		cpu_halt(cpu, wb->pc + 4);
-		return true;
+	switch (wb->in.opcode) {
+		case CPU_OP_HLT:
+			cpu_halt(cpu, wb->pc + 4);
+			return true;
+		case CPU_OP_WFI:
+			cpu_wait(cpu, wb->pc + 4);
+			return true;
+		case CPU_OP_MTCR:
+			cpu_write_cr(cpu, wb->in.imm, wb->result);
+			break;
+		case CPU_OP_IRET: {
+			uint32_t status = cpu->cr[CPU_CR_STATUS] & ~CPU_STATUS_IE;
+			if (status & CPU_STATUS_PIE) status |= CPU_STATUS_IE;
+			cpu->cr[CPU_CR_STATUS] = status;
+		} break;
 	}
 	return false;
+}
+
+// Address of the oldest instruction that has not retired yet.
+static uint32_t cpu_next_pc(const cpu_t* cpu) {
+	const cpu_pipeline_t* p = &cpu->pipeline;
+	if (p->ex_mem.valid) return p->ex_mem.pc;
+	if (p->id_ex.valid) return p->id_ex.pc;
+	if (p->if_id.valid) return p->if_id.pc;
+	return cpu->pc;
+}
+
+// Called after WB: squashes everything still in flight and jumps to IVEC.
+// returns true when the interrupt was taken
+static bool cpu_interrupt(cpu_t* cpu) {
+	uint32_t status = cpu->cr[CPU_CR_STATUS];
+	if (!cpu->irq || !(status & CPU_STATUS_IE)) return false;
+
+	cpu->cr[CPU_CR_EPC] = cpu_next_pc(cpu);
+	status = (status & ~CPU_STATUS_IE) | CPU_STATUS_PIE;
+	cpu->cr[CPU_CR_STATUS] = status;
+
+	memset(&cpu->pipeline, 0, sizeof(cpu->pipeline));
+	cpu->pc = cpu->cr[CPU_CR_IVEC];
+	return true;
+}
+
+void cpu_set_irq(cpu_t* cpu, const bool level) {
+	if (!cpu) return;
+	cpu->irq = level;
 }
 
 void cpu_update(cpu_t* cpu) {
 	if (!cpu || cpu->halted) return;
 	cpu->cycles++;
 
+	if (cpu->waiting) {
+		if (!cpu->irq) return;
+		cpu->waiting = false; // resumes at pc, or takes the interrupt below
+	}
+
 	cpu_pipeline_t next = { 0 }; // bubbles unless a stage fills them
 
 	if (cpu_stage_wb(cpu)) return;
+	if (cpu_interrupt(cpu)) return;
 	cpu_stage_mem(cpu, &next.mem_wb);
 
 	uint32_t target = 0;

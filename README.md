@@ -1,5 +1,7 @@
 # WRM.081632
 
+<img src="./images/cpu.png" width="256"/>
+
 WRM.081632 – is a 32-bit, RISC based, little-endian CPU architecture.
 
 ```sh
@@ -8,6 +10,8 @@ dd if=/dev/zero of=firmware.rom  bs=1m  count=32
 
 # Useful links
 
+[Pentium](https://en.wikipedia.org/wiki/Pentium_(original))
+[xremu](https://github.com/xrarch/xremu/)
 [fox32](https://codeberg.org/fox32-arch/fox32/)
 [fox32 hardware reference](https://host12prog.github.io/fox32hw-reference/)
 [Aphelion ISA](https://codeberg.org/orbitsystems/aphelion/src/branch/main/spec/Aphelion%20ISA.pdf)
