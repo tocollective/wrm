@@ -19,5 +19,9 @@ void machine_destroy(machine_t* machine) {
 void machine_update(machine_t* machine) {
 	if (!machine) return;
 
-	cpu_update(machine->motherboard->cpu);
+	motherboard_t* mb = machine->motherboard;
+	const uint64_t ticks = clock_update(mb->clock);
+	for (uint64_t i = 0; i < ticks && !mb->cpu->halted; i++) {
+		cpu_update(mb->cpu);
+	}
 }

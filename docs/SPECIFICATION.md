@@ -15,6 +15,11 @@ RAM slots are laid out in slot order; empty slots take no address space.
 On reset all registers are zero and `pc = 0xFE000000`, so execution starts
 at the first byte of the firmware image.
 
+## Clock
+
+The system clock runs at 24 MHz by default (`clock_rate` in the config).
+The CPU advances its pipeline by one stage per tick.
+
 ## Pipeline
 
 The CPU uses the classic five-stage RISC pipeline, one stage per clock cycle:

@@ -123,6 +123,8 @@ motherboard_t* motherboard_create(void) {
 	motherboard_t* mb = (motherboard_t*)calloc(1, sizeof(motherboard_t));
 	if (!mb) error("Failed to allocate Motherboard!");
 
+	mb->clock = clock_create(cfg->clock_rate);
+
 	const bus_t bus = {
 		.ctx = mb,
 		.read = motherboard_bus_read,
@@ -164,6 +166,11 @@ void motherboard_destroy(motherboard_t* mb) {
 	if (mb->cpu) {
 		cpu_destroy(mb->cpu);
 		mb->cpu = NULL;
+	}
+
+	if (mb->clock) {
+		clock_destroy(mb->clock);
+		mb->clock = NULL;
 	}
 
 	free(mb);
