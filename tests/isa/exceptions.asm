@@ -364,10 +364,6 @@ rom_word:
 ; every opcode that is not in the instruction set, with reserved bits set;
 ; each is followed by a RET
 illegal_opcodes:
-	.dw 0x5A5A5A08
-	ret
-	.dw 0x5A5A5A09
-	ret
 	.dw 0x5A5A5A0A
 	ret
 	.dw 0x5A5A5A0B
@@ -380,13 +376,7 @@ illegal_opcodes:
 	ret
 	.dw 0x5A5A5A0F
 	ret
-	.dw 0x5A5A5A1F
-	ret
 	.dw 0x5A5A5A21
-	ret
-	.dw 0x5A5A5A2A
-	ret
-	.dw 0x5A5A5A2B
 	ret
 	.dw 0x5A5A5A2C
 	ret
@@ -429,10 +419,6 @@ illegal_opcodes:
 	.dw 0x5A5A5A46
 	ret
 	.dw 0x5A5A5A47
-	ret
-	.dw 0x5A5A5A4B
-	ret
-	.dw 0x5A5A5A4C
 	ret
 	.dw 0x5A5A5A4D
 	ret

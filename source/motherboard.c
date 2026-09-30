@@ -181,8 +181,11 @@ static bool motherboard_bus_write(void* ctx, const uint32_t address,
 	motherboard_t* mb = ctx;
 
 	if (address >= MB_ROM_BASE) return true; // ROM is read-only
-	if (address >= MB_IO_BASE)
-		return motherboard_io_write(mb, address, size, value);
+	if (address >= MB_IO_BASE) {
+		const bool failed = motherboard_io_write(mb, address, size, value);
+		if (!failed) cpu_invalidate_reservation(mb->cpu, address, size);
+		return failed;
+	}
 
 	size_t offset = 0;
 	ram_t* ram = motherboard_find_ram(mb, address, &offset);
@@ -190,12 +193,15 @@ static bool motherboard_bus_write(void* ctx, const uint32_t address,
 	switch (size) {
 		case 1:
 			ram_poke8(ram, offset, value);
+			cpu_invalidate_reservation(mb->cpu, address, size);
 			return false;
 		case 2:
 			ram_poke16(ram, offset, value);
+			cpu_invalidate_reservation(mb->cpu, address, size);
 			return false;
 		case 4:
 			ram_poke32(ram, offset, value);
+			cpu_invalidate_reservation(mb->cpu, address, size);
 			return false;
 	}
 	return true;

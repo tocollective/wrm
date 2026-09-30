@@ -80,6 +80,7 @@ void cpu_reset(cpu_t* cpu) {
 	cpu->irq = false;
 	cpu->cycles = 0;
 	cpu->retired = 0;
+	cpu->reservation_valid = false;
 }
 
 static cpu_format_t cpu_opcode_format(const uint8_t opcode) {
@@ -89,6 +90,8 @@ static cpu_format_t cpu_opcode_format(const uint8_t opcode) {
 		case CPU_OP_WFI:
 		case CPU_OP_IRET:
 		case CPU_OP_SYSCALL:
+		case CPU_OP_FENCE:
+		case CPU_OP_BREAK:
 			return CPU_FORMAT_N;
 
 		case CPU_OP_ADD:
@@ -106,6 +109,11 @@ static cpu_format_t cpu_opcode_format(const uint8_t opcode) {
 		case CPU_OP_DIVU:
 		case CPU_OP_REM:
 		case CPU_OP_REMU:
+		case CPU_OP_MULH:
+		case CPU_OP_MULHU:
+		case CPU_OP_MULHSU:
+		case CPU_OP_LL:
+		case CPU_OP_SC:
 			return CPU_FORMAT_R;
 
 		case CPU_OP_ADDI:
@@ -192,12 +200,18 @@ cpu_instruction_t cpu_decode(const uint32_t raw) {
 	return in;
 }
 
-static bool cpu_is_load(const cpu_instruction_t* in) {
-	return in->opcode >= CPU_OP_LB && in->opcode <= CPU_OP_LW;
+// These instructions produce rd in MEM, too late for EX/MEM forwarding.
+static bool cpu_result_in_mem(const cpu_instruction_t* in) {
+	return (in->opcode >= CPU_OP_LB && in->opcode <= CPU_OP_LW)
+		   || in->opcode == CPU_OP_LL || in->opcode == CPU_OP_SC;
 }
 
 static bool cpu_is_store(const cpu_instruction_t* in) {
 	return in->opcode >= CPU_OP_SB && in->opcode <= CPU_OP_SW;
+}
+
+static bool cpu_is_atomic_write(const cpu_instruction_t* in) {
+	return in->opcode == CPU_OP_SC;
 }
 
 static bool cpu_is_branch(const cpu_instruction_t* in) {
@@ -217,6 +231,8 @@ static uint8_t cpu_access_size(const cpu_instruction_t* in) {
 			return 2;
 		case CPU_OP_LW:
 		case CPU_OP_SW:
+		case CPU_OP_LL:
+		case CPU_OP_SC:
 			return 4;
 	}
 	return 0;
@@ -319,6 +335,8 @@ const char* cpu_cause_name(const uint8_t cause) {
 			return "privileged instruction";
 		case CPU_CAUSE_SYSCALL:
 			return "syscall";
+		case CPU_CAUSE_BREAK:
+			return "breakpoint";
 	}
 	return "unknown fault";
 }
@@ -351,6 +369,7 @@ static void cpu_refetch(cpu_t* cpu, const uint32_t pc) {
 // EPC = epc, PIE = IE, PUM = UM, IE = UM = 0, EXL = 1, pc = IVEC.
 // Never called with EXL set, so IRET restores it by clearing it.
 static void cpu_trap(cpu_t* cpu, const cpu_cause_t cause, const uint32_t epc) {
+	cpu->reservation_valid = false;
 	const uint32_t status = cpu->cr[CPU_CR_STATUS];
 	uint32_t next = CPU_STATUS_EXL;
 	if (status & CPU_STATUS_IE) next |= CPU_STATUS_PIE;
@@ -470,6 +489,7 @@ static void cpu_write_cr(cpu_t* cpu, const uint32_t cr, const uint32_t value) {
 			cpu->cr[cr] = value & CPU_STATUS_MASK;
 			break;
 		case CPU_CR_PTBR:
+			cpu->reservation_valid = false;
 			mmu_set_ptbr(cpu->mmu, value);
 			break;
 		default:
@@ -484,8 +504,8 @@ static uint32_t cpu_forward(const cpu_t* cpu, const uint8_t reg,
 							const uint32_t value) {
 	if (reg == CPU_GPR_ZERO) return 0;
 
-	// Never a load here: the load-use stall keeps a dependent instruction
-	// out of EX until the load has reached WB.
+	// A MEM-stage result cannot be here: the dependency stall keeps its
+	// consumer out of EX until the producer has reached WB.
 	const cpu_latch_t* mem = &cpu->pipeline.ex_mem;
 	if (mem->valid && !mem->fault && cpu_writes_rd(&mem->in)
 		&& mem->in.rd == reg)
@@ -533,9 +553,9 @@ static bool cpu_stage_id(cpu_t* cpu, cpu_latch_t* out) {
 
 	const cpu_instruction_t in = cpu_decode(id->in.raw);
 
-	// load-use hazard: wait until the load leaves MEM
+	// MEM-result dependency: wait until the producer leaves MEM
 	const cpu_latch_t* ex = &cpu->pipeline.id_ex;
-	if (ex->valid && !ex->fault && cpu_is_load(&ex->in)
+	if (ex->valid && !ex->fault && cpu_result_in_mem(&ex->in)
 		&& ex->in.rd != CPU_GPR_ZERO && cpu_reads_reg(&in, ex->in.rd))
 		return true;
 
@@ -556,6 +576,10 @@ static bool cpu_stage_id(cpu_t* cpu, cpu_latch_t* out) {
 		cpu_latch_fault(out, CPU_CAUSE_PRIVILEGED_INSTRUCTION, in.raw);
 	else if (in.opcode == CPU_OP_SYSCALL)
 		cpu_latch_fault(out, CPU_CAUSE_SYSCALL, 0);
+	else if (in.opcode == CPU_OP_BREAK)
+		cpu_latch_fault(out, CPU_CAUSE_BREAK, 0);
+	else if (in.opcode == CPU_OP_LL && in.rs2 != 0)
+		cpu_latch_fault(out, CPU_CAUSE_ILLEGAL_INSTRUCTION, in.raw);
 	return false;
 }
 
@@ -608,6 +632,17 @@ static bool cpu_stage_ex(cpu_t* cpu, cpu_latch_t* out, uint32_t* target) {
 			break;
 		case CPU_OP_MUL:
 			r = a * b;
+			break;
+		case CPU_OP_MULH:
+			r = (uint32_t)(((uint64_t)a * b) >> 32)
+				- ((a >> 31) ? b : 0) - ((b >> 31) ? a : 0);
+			break;
+		case CPU_OP_MULHU:
+			r = (uint32_t)(((uint64_t)a * (uint64_t)b) >> 32);
+			break;
+		case CPU_OP_MULHSU:
+			r = (uint32_t)(((uint64_t)a * b) >> 32)
+				- ((a >> 31) ? b : 0);
 			break;
 		case CPU_OP_DIV: {
 			if (b == 0)
@@ -675,7 +710,9 @@ static bool cpu_stage_ex(cpu_t* cpu, cpu_latch_t* out, uint32_t* target) {
 		case CPU_OP_SB:
 		case CPU_OP_SH:
 		case CPU_OP_SW:
-			r = a + imm;
+		case CPU_OP_LL:
+		case CPU_OP_SC:
+			r = a + ((in->format == CPU_FORMAT_R) ? 0 : imm);
 			break;
 
 		case CPU_OP_BEQ:
@@ -736,7 +773,7 @@ static void cpu_stage_mem(cpu_t* cpu, cpu_latch_t* out) {
 	const uint8_t size = cpu_access_size(in);
 	if (!size) return; // no memory access
 
-	const bool store = cpu_is_store(in);
+	const bool store = cpu_is_store(in) || cpu_is_atomic_write(in);
 	if (address & (size - 1)) {
 		cpu_latch_fault(out,
 						store ? CPU_CAUSE_MISALIGNED_STORE
@@ -746,7 +783,7 @@ static void cpu_stage_mem(cpu_t* cpu, cpu_latch_t* out) {
 	}
 
 	uint32_t physical = 0;
-	if (mmu_translate(cpu->mmu,
+	if ((in->opcode == CPU_OP_SC ? mmu_translate_probe : mmu_translate)(cpu->mmu,
 					  address,
 					  store ? MMU_ACCESS_WRITE : MMU_ACCESS_READ,
 					  cpu_user_mode(cpu),
@@ -758,6 +795,20 @@ static void cpu_stage_mem(cpu_t* cpu, cpu_latch_t* out) {
 		return;
 	}
 
+	if (in->opcode == CPU_OP_SC) {
+		const bool success = cpu->reservation_valid
+			&& cpu->reservation_address == physical;
+		cpu->reservation_valid = false;
+		out->result = success ? 0 : 1;
+		if (success) {
+			if (mmu_translate(cpu->mmu, address, MMU_ACCESS_WRITE,
+							  cpu_user_mode(cpu), &physical))
+				cpu_latch_fault(out, CPU_CAUSE_STORE_PAGE_FAULT, address);
+			else if (cpu->bus.write(cpu->bus.ctx, physical, 4, mem->b))
+				cpu_latch_fault(out, CPU_CAUSE_STORE_BUS_ERROR, address);
+		}
+		return;
+	}
 	if (store) {
 		const uint32_t mask = cpu_size_mask(size);
 		if (cpu->bus.write(cpu->bus.ctx, physical, size, mem->d & mask))
@@ -769,6 +820,10 @@ static void cpu_stage_mem(cpu_t* cpu, cpu_latch_t* out) {
 	if (cpu->bus.read(cpu->bus.ctx, physical, size, &value)) {
 		cpu_latch_fault(out, CPU_CAUSE_LOAD_BUS_ERROR, address);
 		return;
+	}
+	if (in->opcode == CPU_OP_LL) {
+		cpu->reservation_address = physical;
+		cpu->reservation_valid = true;
 	}
 
 	switch (in->opcode) {
@@ -826,6 +881,7 @@ static bool cpu_stage_wb(cpu_t* cpu) {
 			}
 			break;
 		case CPU_OP_TLBI:
+			cpu->reservation_valid = false;
 			mmu_invalidate(cpu->mmu, wb->result);
 			cpu_refetch(cpu, wb->pc + 4);
 			return true;
@@ -867,6 +923,16 @@ static bool cpu_interrupt(cpu_t* cpu) {
 void cpu_set_irq(cpu_t* cpu, const bool level) {
 	if (!cpu) return;
 	cpu->irq = level;
+}
+
+void cpu_invalidate_reservation(cpu_t* cpu, const uint32_t physical,
+								const uint8_t size) {
+	if (!cpu || !cpu->reservation_valid) return;
+	const uint64_t first = physical;
+	const uint64_t last = first + size - 1;
+	const uint64_t reserved = cpu->reservation_address;
+	if (first <= reserved + 3 && last >= reserved)
+		cpu->reservation_valid = false;
 }
 
 void cpu_update(cpu_t* cpu) {

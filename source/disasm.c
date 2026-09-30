@@ -8,12 +8,15 @@ static const char* const disasm_mnemonics[256] = {
 	[CPU_OP_HLT] = "hlt",     [CPU_OP_NOP] = "nop",     [CPU_OP_WFI] = "wfi",
 	[CPU_OP_IRET] = "iret",   [CPU_OP_MFCR] = "mfcr",   [CPU_OP_MTCR] = "mtcr",
 	[CPU_OP_TLBI] = "tlbi",   [CPU_OP_SYSCALL] = "syscall",
+	[CPU_OP_FENCE] = "fence", [CPU_OP_BREAK] = "break",
 
 	[CPU_OP_ADD] = "add",     [CPU_OP_SUB] = "sub",     [CPU_OP_AND] = "and",
 	[CPU_OP_OR] = "or",       [CPU_OP_XOR] = "xor",     [CPU_OP_SHL] = "shl",
 	[CPU_OP_SHR] = "shr",     [CPU_OP_SAR] = "sar",     [CPU_OP_SLT] = "slt",
 	[CPU_OP_SLTU] = "sltu",   [CPU_OP_MUL] = "mul",     [CPU_OP_DIV] = "div",
 	[CPU_OP_DIVU] = "divu",   [CPU_OP_REM] = "rem",     [CPU_OP_REMU] = "remu",
+	[CPU_OP_MULH] = "mulh",   [CPU_OP_MULHU] = "mulhu",
+	[CPU_OP_MULHSU] = "mulhsu",
 
 	[CPU_OP_ADDI] = "addi",   [CPU_OP_ANDI] = "andi",   [CPU_OP_ORI] = "ori",
 	[CPU_OP_XORI] = "xori",   [CPU_OP_SHLI] = "shli",   [CPU_OP_SHRI] = "shri",
@@ -24,6 +27,7 @@ static const char* const disasm_mnemonics[256] = {
 	[CPU_OP_LB] = "lb",       [CPU_OP_LBU] = "lbu",     [CPU_OP_LH] = "lh",
 	[CPU_OP_LHU] = "lhu",     [CPU_OP_LW] = "lw",       [CPU_OP_SB] = "sb",
 	[CPU_OP_SH] = "sh",       [CPU_OP_SW] = "sw",
+	[CPU_OP_LL] = "ll",       [CPU_OP_SC] = "sc",
 
 	[CPU_OP_BEQ] = "beq",     [CPU_OP_BNE] = "bne",     [CPU_OP_BLT] = "blt",
 	[CPU_OP_BGE] = "bge",     [CPU_OP_BLTU] = "bltu",   [CPU_OP_BGEU] = "bgeu",
@@ -58,7 +62,8 @@ static bool disasm_is_encodable(const cpu_instruction_t* in) {
 		case CPU_FORMAT_N:
 			return !(in->raw & 0xFFFFFF00u);
 		case CPU_FORMAT_R:
-			return !(in->raw & 0xFF800000u);
+			return !(in->raw & 0xFF800000u)
+				   && (in->opcode != CPU_OP_LL || !in->rs2);
 		default:
 			break;
 	}
@@ -100,6 +105,12 @@ void disasm_instruction(const uint32_t raw, const uint32_t pc, char* out,
 			return;
 		case CPU_OP_TLBI:
 			snprintf(out, size, "%s r%u", name, rs1);
+			return;
+		case CPU_OP_LL:
+			snprintf(out, size, "%s r%u, (r%u)", name, rd, rs1);
+			return;
+		case CPU_OP_SC:
+			snprintf(out, size, "%s r%u, r%u, (r%u)", name, rd, rs2, rs1);
 			return;
 
 		case CPU_OP_ANDI:

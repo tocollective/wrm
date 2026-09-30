@@ -28,7 +28,7 @@ syntax:
     LW rd, imm(rs1)           SW rd, imm(rs1)         LW rd, (rs1)
     BEQ rd, rs1, target       JAL [rd,] target        JALR rd, rs1[, imm]
     MFCR rd, cr               MTCR cr, rs1            JALR rd, imm(rs1)
-    TLBI rs1
+    TLBI rs1                  LL rd, (rs1)           SC rd, rs2, (rs1)
   branch and JAL targets are addresses (labels), not offsets.
 
 pseudo-instructions:
@@ -375,6 +375,19 @@ def fmt_r(op):
 	return enc
 
 
+def fmt_atomic(op, load=False):
+	def enc(a, st, pc):
+		args = a.nargs(st, 2 if load else 3)
+		rd = a.reg(args[0])
+		value = 0 if load else a.reg(args[1])
+		mem = args[1] if load else args[2]
+		match = re.fullmatch(r"\s*\(\s*([A-Za-z][\w]*)\s*\)\s*", mem)
+		if not match:
+			raise AsmError("atomic address must be (rs1)")
+		return [enc_r(op, rd, a.reg(match.group(1)), value)]
+	return enc
+
+
 def fmt_alu_i(op, kind):
 	def enc(a, st, pc):
 		rd, rs1, imm = a.nargs(st, 3)
@@ -529,7 +542,7 @@ def enc_la(a, st, pc):
 def define_instructions():
 	ins = INSTRUCTIONS
 	for name, op in (("hlt", 0x00), ("nop", 0x01), ("wfi", 0x02), ("iret", 0x03),
-					 ("syscall", 0x07)):
+					 ("syscall", 0x07), ("fence", 0x08), ("break", 0x09)):
 		ins[name] = (4, fmt_n(op))
 	ins["mfcr"] = (4, enc_mfcr)
 	ins["mtcr"] = (4, enc_mtcr)
@@ -538,6 +551,8 @@ def define_instructions():
 	for i, name in enumerate(("add", "sub", "and", "or", "xor", "shl", "shr", "sar",
 							  "slt", "sltu", "mul", "div", "divu", "rem", "remu")):
 		ins[name] = (4, fmt_r(0x10 + i))
+	for name, op in (("mulh", 0x1F), ("mulhu", 0x2A), ("mulhsu", 0x2B)):
+		ins[name] = (4, fmt_r(op))
 
 	for name, op, kind in (("addi", 0x20, "signed"), ("andi", 0x22, "unsigned"),
 						   ("ori", 0x23, "unsigned"), ("xori", 0x24, "unsigned"),
@@ -552,6 +567,8 @@ def define_instructions():
 	for name, op in (("lb", 0x40), ("lbu", 0x41), ("lh", 0x42), ("lhu", 0x43), ("lw", 0x44),
 					 ("sb", 0x48), ("sh", 0x49), ("sw", 0x4A)):
 		ins[name] = (4, fmt_mem(op))
+	for name, op in (("ll", 0x4B), ("sc", 0x4C)):
+		ins[name] = (4, fmt_atomic(op, name == "ll"))
 
 	for i, name in enumerate(("beq", "bne", "blt", "bge", "bltu", "bgeu")):
 		ins[name] = (4, fmt_branch(0x50 + i))

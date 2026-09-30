@@ -53,6 +53,7 @@ typedef enum cpu_cause {
 	CPU_CAUSE_STORE_PAGE_FAULT = 10,
 	CPU_CAUSE_PRIVILEGED_INSTRUCTION = 11, // supervisor only, run in user mode
 	CPU_CAUSE_SYSCALL = 12,
+	CPU_CAUSE_BREAK = 13,
 } cpu_cause_t;
 
 // See docs/INSTRUCTIONS.md
@@ -65,6 +66,8 @@ typedef enum cpu_opcode {
 	CPU_OP_MTCR = 0x05, // I-format, supervisor
 	CPU_OP_TLBI = 0x06, // I-format, only rs1, supervisor
 	CPU_OP_SYSCALL = 0x07,
+	CPU_OP_FENCE = 0x08,
+	CPU_OP_BREAK = 0x09,
 
 	// R-format ALU
 	CPU_OP_ADD = 0x10,
@@ -82,6 +85,9 @@ typedef enum cpu_opcode {
 	CPU_OP_DIVU = 0x1C,
 	CPU_OP_REM = 0x1D,
 	CPU_OP_REMU = 0x1E,
+	CPU_OP_MULH = 0x1F,
+	CPU_OP_MULHU = 0x2A,
+	CPU_OP_MULHSU = 0x2B,
 
 	// I-format ALU
 	CPU_OP_ADDI = 0x20,
@@ -109,6 +115,8 @@ typedef enum cpu_opcode {
 	CPU_OP_SB = 0x48,
 	CPU_OP_SH = 0x49,
 	CPU_OP_SW = 0x4A,
+	CPU_OP_LL = 0x4B, // R-format: rd = *(rs1), rs2 must be zero
+	CPU_OP_SC = 0x4C, // R-format: *(rs1) = rs2, rd = 0 on success
 
 	// branches (I-format, compares rd with rs1)
 	CPU_OP_BEQ = 0x50,
@@ -169,6 +177,8 @@ typedef struct cpu {
 	bool irq; // IRQ input line, driven by the PIC
 	uint64_t cycles; // clock cycles, CYCLE/CYCLEH
 	uint64_t retired; // instructions completed in WB, INSTRET/INSTRETH
+	bool reservation_valid;
+	uint32_t reservation_address; // physical word reserved by LL
 	cpu_pipeline_t pipeline;
 	mmu_t* mmu; // translates every fetch, load and store
 	bus_t bus; // physical memory
@@ -181,6 +191,8 @@ void cpu_destroy(cpu_t* cpu);
 void cpu_reset(cpu_t* cpu);
 void cpu_update(cpu_t* cpu); // advances the pipeline by one clock cycle
 void cpu_set_irq(cpu_t* cpu, const bool level);
+void cpu_invalidate_reservation(cpu_t* cpu, uint32_t physical,
+							uint8_t size);
 
 cpu_instruction_t cpu_decode(const uint32_t raw);
 const char* cpu_cause_name(const uint8_t cause);

@@ -79,14 +79,20 @@ STATUS_PUM      = 1 << 3            ; user mode after IRET
 STATUS_EXL      = 1 << 4            ; in the handler: set on entry and at reset
 
 CAUSE_SYSCALL   = 12
+CAUSE_BREAK     = 13
 
 ; MMU (docs/INSTRUCTIONS.md#memory-management)
 PTBR_EN         = 1 << 0
+PTBR_ASID_SHIFT = 4
+PTBR_ASID_MASK  = 0xFF << PTBR_ASID_SHIFT
 PTE_V           = 1 << 0
 PTE_R           = 1 << 1
 PTE_W           = 1 << 2
 PTE_X           = 1 << 3
 PTE_U           = 1 << 4
+PTE_A           = 1 << 5
+PTE_D           = 1 << 6
+PTE_G           = 1 << 7
 PAGE_SIZE       = 0x1000
 SUPERPAGE_SIZE  = 0x400000
 DIR_IO          = (PIC >> 22) * 4       ; directory entry offsets

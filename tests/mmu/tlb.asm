@@ -9,9 +9,8 @@
 	.include "../common/harness.asm"
 	.include "../common/mmu.asm"
 
-; The page the TLBI and PTBR checks use. In the emulator's TLB (64 entries,
-; direct-mapped) no code or data page of this test shares its slot, so a
-; missing TLBI would leave the stale translation visible.
+; The page the TLBI and PTBR checks use. Few other pages are active here, so
+; a missing TLBI would leave the stale translation visible.
 VA_TLB          = VA_T + 0x5000
 MANY_VA         = 0x01000000        ; 128 pages through TABLE3...
 MANY_PA         = 0x00040000        ; ...onto 128 physical pages

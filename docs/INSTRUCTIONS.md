@@ -58,6 +58,8 @@ and `SARI`, where it is zero-extended. Shift amounts use the low 5 bits.
 | `0x05` | `MTCR cr, rs1`  | I      | `cr[imm14] = rs1` (`rd` is reserved) (S) |
 | `0x06` | `TLBI rs1`      | I      | drop the TLB entry of the page at `rs1` (`rd`, `imm14` are reserved) (S) |
 | `0x07` | `SYSCALL`       | N      | enter the handler with `CAUSE` = 12    |
+| `0x08` | `FENCE`         | N      | order memory operations                 |
+| `0x09` | `BREAK`         | N      | enter the handler with `CAUSE` = 13    |
 
 (S) — supervisor only, see [Privilege modes](#privilege-modes).
 
@@ -86,6 +88,9 @@ see [ABI.md](ABI.md#system-calls).
 | `0x1C` | `DIVU rd, rs1, rs2`| `rd = rs1 / rs2` (unsigned)     |
 | `0x1D` | `REM rd, rs1, rs2` | `rd = rs1 % rs2` (signed)       |
 | `0x1E` | `REMU rd, rs1, rs2`| `rd = rs1 % rs2` (unsigned)     |
+| `0x1F` | `MULH rd, rs1, rs2` | high 32 bits, signed × signed  |
+| `0x2A` | `MULHU rd, rs1, rs2` | high 32 bits, unsigned × unsigned |
+| `0x2B` | `MULHSU rd, rs1, rs2` | high 32 bits, signed × unsigned |
 
 Division by zero does not trap: `DIV`/`DIVU` return `0xFFFFFFFF`,
 `REM`/`REMU` return `rs1`. `DIV 0x80000000, -1` returns `0x80000000`,
@@ -131,6 +136,25 @@ Stores use `rd` as the source register.
 | `0x48` | `SB rd, imm(rs1)`   | store low byte of `rd`             |
 | `0x49` | `SH rd, imm(rs1)`   | store low half-word of `rd`        |
 | `0x4A` | `SW rd, imm(rs1)`   | store `rd`                         |
+
+### Atomic word operations
+
+All atomic addresses are `rs1` (no offset) and must be word aligned.
+`LL rd, (rs1)` (`0x4B`) reads a word and reserves its physical address.
+`SC rd, rs2, (rs1)` (`0x4C`) stores `rs2` only if that physical word remains
+reserved, writing `0` to `rd` on success or `1` on failure. `SC` always
+clears the reservation and checks alignment and write permission even on
+failure. A failed `SC` does not set the PTE dirty bit.
+
+`LL`/`SC` loops can implement swap, fetch-add and compare-and-swap.
+CPU instructions and DMA ticks cannot interleave with a successful `SC`.
+Atomic operations on device registers have device-specific side effects
+and should be avoided.
+
+Any CPU or DMA write overlapping the reserved physical word, a trap,
+`MTCR PTBR`, `TLBI`, or a reset clears the reservation. `FENCE` orders
+earlier memory operations before later ones; this single-core machine
+already executes them in order.
 
 ### Branches
 
@@ -291,6 +315,10 @@ between the two.
 | `10`    | store page fault        | virtual address                   |
 | `11`    | privileged instruction in user mode | instruction word      |
 | `12`    | `SYSCALL`               | `0`                               |
+| `13`    | `BREAK`                 | `0`                               |
+
+`BREAK` is an unprivileged software breakpoint. Its exception points `EPC`
+at the `BREAK` instruction; the handler can advance `EPC` by 4 to skip it.
 
 Bus errors are accesses to unmapped physical memory (see
 [SPECIFICATION.md](SPECIFICATION.md#memory-map)). Code can only run from
@@ -309,11 +337,12 @@ Translation is off after reset: virtual = physical. It is controlled by
 `PTBR`:
 
 ```
-PTBR  31                        12 11          1   0
-     | directory physical address |  reserved   | EN |
+PTBR  31                        12 11       4 3  1   0
+     | directory physical address |   ASID   | rsvd | EN |
 ```
 
 - `EN` — translation on,
+- `ASID` — 8-bit address-space identifier,
 - the directory is one 4KB page of 1024 entries, aligned to 4KB.
 
 Reserved bits read as zero. Translation affects the handler too: `IVEC`,
@@ -325,8 +354,8 @@ Reserved bits read as zero. Translation affects the handler too: `IVEC`,
 Virtual address  31        22 21        12 11            0
                 | dir index  | table index |    offset    |
 
-Entry            31                     12 11  5  4   3   2   1   0
-                |  physical page address  | rsvd | U | X | W | R | V |
+Entry            31                     12 11  8  7  6  5  4 3 2 1 0
+                |  physical page address  | rsvd | G | D | A | U X W R V |
 ```
 
 1. The directory entry is read from `PTBR.base + dir index * 4`.
@@ -342,8 +371,13 @@ Entry            31                     12 11  5  4   3   2   1   0
 A fetch needs `X`, a load needs `R`, a store needs `W`, otherwise it is a
 page fault. In user mode the page also needs `U`; supervisor mode can
 access every page. `U` is only checked in the entry that maps the page
-(a superpage directory entry or a page table entry). Entries are read from physical memory and never written by the
-CPU. Page tables must be in RAM or ROM. An entry that can't be read
+(a superpage directory entry or a page table entry). On a permitted
+translation, the MMU sets `A` in the leaf PTE and sets `D` for a write.
+It writes the PTE back to physical memory, so leaf page tables must be in
+RAM unless their `A`/`D` bits were preset. A writeback failure is a page
+fault. The MMU may set `A` on a speculative instruction fetch. `G` marks
+a mapping shared across ASIDs; on a non-leaf directory entry it applies to
+all pages in that table. An entry that can't be read
 (unmapped physical address, or an address in the I/O region — the walk
 never reads a device register) is a page fault.
 
@@ -356,10 +390,14 @@ superpages.
 The CPU caches translations in a TLB. After changing an entry, software
 must drop the stale translation:
 
-- `TLBI rs1` drops the translation of the 4KB page containing `rs1`;
-- writing `PTBR` (even with the same value) drops all of them — needed
-  after changing a directory entry, since a superpage is cached one 4KB
-  page at a time.
+- `TLBI rs1` drops the translation of the 4KB page containing `rs1` for
+  the current ASID, including a matching global translation;
+- writing `PTBR` with the current ASID refreshes that ASID's non-global
+  translations. Switching to another ASID retains cached entries from the
+  previous context. `G` entries remain cached until `TLBI` or reset.
+
+Software must invalidate entries after changing page tables, including
+global mappings and ASIDs reused for different address spaces.
 
 Both take effect for the next instruction: `MTCR PTBR` and `TLBI` refetch
 the instructions after them. Entries with `V` = 0 are never cached, so

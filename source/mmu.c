@@ -13,86 +13,146 @@ mmu_t* mmu_create(const bus_t bus) {
 void mmu_destroy(mmu_t* mmu) {
 	if (!mmu) return;
 	free(mmu);
-	mmu = NULL;
 }
 
 void mmu_reset(mmu_t* mmu) {
 	if (!mmu) return;
-	mmu_set_ptbr(mmu, 0);
+	mmu->ptbr = 0;
+	mmu_flush(mmu);
 }
 
 void mmu_set_ptbr(mmu_t* mmu, const uint32_t value) {
 	if (!mmu) return;
-	mmu->ptbr = value & MMU_PTBR_MASK;
-	mmu_flush(mmu);
+	const uint32_t next = value & MMU_PTBR_MASK;
+	const uint8_t old_asid = (uint8_t)((mmu->ptbr & MMU_PTBR_ASID) >> 4);
+	const uint8_t new_asid = (uint8_t)((next & MMU_PTBR_ASID) >> 4);
+	// Reusing an ASID explicitly refreshes that context. Switching to a
+	// different ASID leaves its cached translations available on return.
+	if (old_asid == new_asid)
+		for (size_t i = 0; i < MMU_TLB_SIZE; i++)
+			if (!mmu->tlb[i].global && mmu->tlb[i].asid == new_asid)
+				mmu->tlb[i].valid = false;
+	mmu->ptbr = next;
 }
 
 void mmu_flush(mmu_t* mmu) {
 	if (!mmu) return;
 	memset(mmu->tlb, 0, sizeof(mmu->tlb));
+	mmu->next_victim = 0;
 }
 
 void mmu_invalidate(mmu_t* mmu, const uint32_t address) {
 	if (!mmu) return;
 	const uint32_t vpn = address >> MMU_PAGE_SHIFT;
-	mmu_tlb_entry_t* entry = &mmu->tlb[vpn % MMU_TLB_SIZE];
-	if (entry->vpn == vpn) entry->valid = false;
+	const uint8_t asid = (uint8_t)((mmu->ptbr & MMU_PTBR_ASID) >> 4);
+	for (size_t i = 0; i < MMU_TLB_SIZE; i++) {
+		mmu_tlb_entry_t* entry = &mmu->tlb[i];
+		if (entry->valid && entry->vpn == vpn
+			&& (entry->global || entry->asid == asid))
+			entry->valid = false;
+	}
 }
 
-// returns true when the entry can't be read; entries in the I/O region
-// can't, so a walk never touches a device
-static bool mmu_read_entry(mmu_t* mmu, const uint32_t table,
-						   const uint32_t index, uint32_t* entry) {
-	return mmu->bus.fetch(mmu->bus.ctx, table + index * 4, 4, entry);
+// Page table walks never read device registers.
+static bool mmu_read_entry(mmu_t* mmu, const uint32_t address,
+						   uint32_t* entry) {
+	return mmu->bus.fetch(mmu->bus.ctx, address, 4, entry);
 }
 
-// Walks the page tables for address and fills the TLB entry;
-// returns true on page fault, leaving the entry untouched.
 static bool mmu_walk(mmu_t* mmu, const uint32_t address,
 					 mmu_tlb_entry_t* entry) {
 	const uint32_t dir = mmu->ptbr & MMU_PTBR_BASE;
 	const uint32_t dir_index = address >> MMU_SUPERPAGE_SHIFT;
 	const uint32_t table_index = (address >> MMU_PAGE_SHIFT) & MMU_INDEX_MASK;
-
+	uint32_t pte_address = dir + dir_index * 4;
 	uint32_t pte = 0;
-	if (mmu_read_entry(mmu, dir, dir_index, &pte)) return true;
-	if (!(pte & MMU_PTE_V)) return true;
+	if (mmu_read_entry(mmu, pte_address, &pte) || !(pte & MMU_PTE_V))
+		return true;
 
-	uint32_t frame = 0;
+	const bool directory_global = (pte & MMU_PTE_G) != 0;
+	uint32_t frame;
 	if (pte & MMU_PTE_RWX) {
-		// 4MB superpage, must be aligned to 4MB
 		if (pte & MMU_SUPERPAGE_MASK & MMU_PTE_FRAME) return true;
 		frame = (pte & ~MMU_SUPERPAGE_MASK) | (address & MMU_SUPERPAGE_MASK);
 	} else {
-		const uint32_t table = pte & MMU_PTE_FRAME;
-		if (mmu_read_entry(mmu, table, table_index, &pte)) return true;
-		if (!(pte & MMU_PTE_V) || !(pte & MMU_PTE_RWX)) return true;
+		pte_address = (pte & MMU_PTE_FRAME) + table_index * 4;
+		if (mmu_read_entry(mmu, pte_address, &pte)
+			|| !(pte & MMU_PTE_V) || !(pte & MMU_PTE_RWX))
+			return true;
 		frame = pte;
 	}
 
-	entry->valid = true;
-	entry->vpn = address >> MMU_PAGE_SHIFT;
-	entry->ppn = frame >> MMU_PAGE_SHIFT;
-	entry->flags = pte & (MMU_PTE_RWX | MMU_PTE_U);
+	*entry = (mmu_tlb_entry_t){
+		.valid = true,
+		.vpn = address >> MMU_PAGE_SHIFT,
+		.ppn = frame >> MMU_PAGE_SHIFT,
+		.flags = pte & (MMU_PTE_RWX | MMU_PTE_U | MMU_PTE_A | MMU_PTE_D),
+		.asid = (uint8_t)((mmu->ptbr & MMU_PTBR_ASID) >> 4),
+		.global = directory_global || (pte & MMU_PTE_G) != 0,
+		.pte_address = pte_address,
+	};
 	return false;
 }
 
-bool mmu_translate(mmu_t* mmu, const uint32_t address,
-				   const mmu_access_t access, const bool user,
-				   uint32_t* physical) {
+static bool mmu_translate_impl(mmu_t* mmu, const uint32_t address,
+							   const mmu_access_t access, const bool user,
+							   const bool dirty, uint32_t* physical) {
 	if (!(mmu->ptbr & MMU_PTBR_ENABLE)) {
 		*physical = address;
 		return false;
 	}
 
 	const uint32_t vpn = address >> MMU_PAGE_SHIFT;
-	mmu_tlb_entry_t* entry = &mmu->tlb[vpn % MMU_TLB_SIZE];
-	if (!entry->valid || entry->vpn != vpn) {
-		if (mmu_walk(mmu, address, entry)) return true;
+	const uint8_t asid = (uint8_t)((mmu->ptbr & MMU_PTBR_ASID) >> 4);
+	mmu_tlb_entry_t* entry = NULL;
+	for (size_t i = 0; i < MMU_TLB_SIZE; i++) {
+		mmu_tlb_entry_t* candidate = &mmu->tlb[i];
+		if (candidate->valid && candidate->vpn == vpn
+			&& (candidate->global || candidate->asid == asid)) {
+			entry = candidate;
+			break;
+		}
+	}
+	if (!entry) {
+		for (size_t i = 0; i < MMU_TLB_SIZE; i++)
+			if (!mmu->tlb[i].valid) {
+				entry = &mmu->tlb[i];
+				break;
+			}
+		if (!entry) {
+			entry = &mmu->tlb[mmu->next_victim];
+			mmu->next_victim = (mmu->next_victim + 1) % MMU_TLB_SIZE;
+		}
+		mmu_tlb_entry_t walked;
+		if (mmu_walk(mmu, address, &walked)) return true;
+		*entry = walked;
 	}
 
-	if (!(entry->flags & access)) return true;
+	if ((entry->flags & access) != access) return true;
 	if (user && !(entry->flags & MMU_PTE_U)) return true;
+
+	const uint8_t needed = MMU_PTE_A
+		| ((dirty && (access & MMU_ACCESS_WRITE)) ? MMU_PTE_D : 0);
+	if ((entry->flags & needed) != needed) {
+		uint32_t pte = 0;
+		if (mmu_read_entry(mmu, entry->pte_address, &pte)
+			|| mmu->bus.write(mmu->bus.ctx, entry->pte_address, 4,
+							  pte | needed))
+			return true;
+		entry->flags |= needed;
+	}
 	*physical = (entry->ppn << MMU_PAGE_SHIFT) | (address & MMU_PAGE_MASK);
 	return false;
+}
+
+bool mmu_translate(mmu_t* mmu, const uint32_t address,
+				   const mmu_access_t access, const bool user,
+				   uint32_t* physical) {
+	return mmu_translate_impl(mmu, address, access, user, true, physical);
+}
+
+bool mmu_translate_probe(mmu_t* mmu, const uint32_t address,
+						 const mmu_access_t access, const bool user,
+						 uint32_t* physical) {
+	return mmu_translate_impl(mmu, address, access, user, false, physical);
 }

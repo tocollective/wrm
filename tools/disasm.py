@@ -18,10 +18,13 @@ sys.dont_write_bytecode = True  # no __pycache__ next to asm.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from asm import CREGS, CREGS_READONLY, ROM_BASE, auto_int  # noqa: E402
 
-N = {0x00: "hlt", 0x01: "nop", 0x02: "wfi", 0x03: "iret", 0x07: "syscall"}
+N = {0x00: "hlt", 0x01: "nop", 0x02: "wfi", 0x03: "iret", 0x07: "syscall",
+	 0x08: "fence", 0x09: "break"}
 R = {0x10 + i: name for i, name in enumerate((
 	"add", "sub", "and", "or", "xor", "shl", "shr", "sar",
 	"slt", "sltu", "mul", "div", "divu", "rem", "remu"))}
+R.update({0x1F: "mulh", 0x2A: "mulhu", 0x2B: "mulhsu"})
+ATOMIC = {0x4B: "ll", 0x4C: "sc"}
 I_SIGNED = {0x20: "addi", 0x28: "slti", 0x29: "sltiu"}
 I_UNSIGNED = {0x22: "andi", 0x23: "ori", 0x24: "xori"}
 I_SHIFT = {0x25: "shli", 0x26: "shri", 0x27: "sari"}
@@ -55,6 +58,10 @@ def disassemble(word, pc):
 		return N[op]
 	if op in R and not word >> 23:
 		return f"{R[op]} r{rd}, r{rs1}, r{rs2}"
+	if op in ATOMIC and not word >> 23 and (op != 0x4B or rs2 == 0):
+		if op == 0x4B:
+			return f"ll r{rd}, (r{rs1})"
+		return f"{ATOMIC[op]} r{rd}, r{rs2}, (r{rs1})"
 	if op in I_SIGNED:
 		return f"{I_SIGNED[op]} r{rd}, r{rs1}, {simm}"
 	if op in I_UNSIGNED:
