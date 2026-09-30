@@ -6,9 +6,10 @@
 ;
 ;  A tour of the machine: every instruction group, the UART, the keyboard,
 ;  the PIC, polling, WFI, interrupts, the MMU and user mode, the timer and
-;  the cycle counters, power off, plus most assembler features
-;  (constants, local labels, expressions, pseudo-instructions, directives).
-;  All output goes to the UART, i.e. to the host's stdout.
+;  the cycle counters, the video modes, power off, plus most assembler
+;  features (constants, local labels, expressions, pseudo-instructions,
+;  directives). The demos' output goes to the UART, i.e. to the host's
+;  stdout; the screen shows a short banner and the video modes.
 ;
 ;  Build:  python3 tools/asm.py firmware/main.asm -o firmware.rom
 ;
@@ -18,6 +19,8 @@
 ;    boot.asm         boot from disk
 ;    demos/*.asm      one demo each, with its own strings and data
 ;    lib.asm          UART output and helpers (puts, show, memcpy, ...)
+;    video.asm        video card setup, text, the screen console
+;    font.asm         the 8x16 font, loaded into VRAM by video_init
 ;
 ;  Register conventions: the ABI (docs/ABI.md), in short
 ;    r1-r8     arguments, r1 = return value
@@ -44,7 +47,12 @@ reset:
 	li r1, UART
 	li r2, UART_FLUSH
 	sw r2, UART_CONTROL(r1)     ; drop anything received before reset
+	call video_init             ; a boot image gets the screen console too
+	la r1, s_con_banner
+	call con_puts
 	call boot                   ; returns if there is nothing to boot
+	la r1, s_con_demos
+	call con_puts
 
 	la r1, s_banner
 	call puts
@@ -61,6 +69,7 @@ reset:
 	call demo_interrupts
 	call demo_mmu
 	call demo_timer
+	call demo_video
 
 	la r1, s_bye
 	call puts
@@ -76,8 +85,11 @@ reset:
 	.include "demos/interrupts.asm"
 	.include "demos/mmu.asm"
 	.include "demos/timer.asm"
+	.include "demos/video.asm"
 	.include "boot.asm"
 	.include "lib.asm"
+	.include "video.asm"
+	.include "font.asm"
 
 ; ---- data -----------------------------------------------------------------
 
@@ -87,6 +99,8 @@ s_banner:
 	.asciz "========================\n"
 s_rom_size:     .asciz "firmware size, bytes"
 s_bye:          .asciz "\nbye\n"
+s_con_banner:   .asciz "WRM.081632 firmware\n\n"
+s_con_demos:    .asciz "No boot image on disk 0: running the demos.\nTheir output goes to the UART console.\n"
 
 ; image trailer: a small header-like block built from data directives
 	.align 16

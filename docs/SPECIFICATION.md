@@ -12,6 +12,7 @@
 | `0xFD004000`–`0xFD004FFF` | Power controller                        |
 | `0xFD005000`–`0xFD005FFF` | Disk 0                                  |
 | `0xFD006000`–`0xFD006FFF` | Disk 1                                  |
+| `0xFD007000`–`0xFD007FFF` | Video card                              |
 | `0xFE000000`–`0xFFFFFFFF` | ROM (32MB, read-only)                   |
 
 Addresses between the end of RAM and `0xFD000000` are unmapped, as are
@@ -55,6 +56,7 @@ with `ENABLE` left at 0.
 | 2   | Timer    | `STATUS.EXPIRED` is set |
 | 3   | Disk 0   | `STATUS.DONE` is set    |
 | 4   | Disk 1   | `STATUS.DONE` is set    |
+| 5   | Video    | `STATUS.DONE` or `STATUS.VBLANK` is set and enabled in `CONTROL` |
 
 ### Keyboard
 
@@ -189,6 +191,147 @@ The image size is taken in whole sectors, and extra bytes at the end are
 not reachable. An image that the host can't write is attached read-only.
 Writes reach the host file as each sector completes.
 
+### Video card
+
+A graphics card with 4MB of its own video memory (VRAM) and a 2D drawing
+engine. VRAM is not in the address space: the CPU draws with engine
+commands and moves data between memory and VRAM by DMA. Once per frame
+the card shows the visible frame, a part of VRAM, in the emulator's
+window. There is no text mode; text is drawn from a font in VRAM with
+`EXPAND` (see [Text](#text)).
+
+| Offset | Register        | Access | Description                                   |
+|--------|-----------------|--------|-----------------------------------------------|
+| `0x00` | `STATUS`        | RW     | bit 0 = busy, bit 1 = done, bit 2 = error, bit 3 = VBLANK; writing 1 to bit 1 or 3 clears it |
+| `0x04` | `CONTROL`       | RW     | bit 0 = display on, bit 1 = IRQ on `DONE`, bit 2 = IRQ on `VBLANK` |
+| `0x08` | `MODE`          | RW     | bits 0–1 = resolution, bits 4–6 = depth       |
+| `0x0C` | `WIDTH`         | R      | of the mode, in pixels                        |
+| `0x10` | `HEIGHT`        | R      | of the mode, in pixels                        |
+| `0x14` | `BPP`           | R      | bits per pixel of the mode                    |
+| `0x18` | `PITCH`         | R      | bytes per line of the visible frame, `WIDTH` × `BPP` / 8 |
+| `0x1C` | `VRAM_SIZE`     | R      | `0x00400000`                                  |
+| `0x20` | `START`         | RW     | VRAM offset of the visible frame              |
+| `0x24` | `FRAME`         | R      | frames since reset                            |
+| `0x28` | `PALETTE_INDEX` | RW     | palette entry that `PALETTE_DATA` accesses, 0–255 |
+| `0x2C` | `PALETTE_DATA`  | RW     | the entry, `0x00RRGGBB`; a write moves `PALETTE_INDEX` to the next entry |
+| `0x40` | `COMMAND`       | W      | starts an engine command                      |
+| `0x44` | `ERROR`         | R      | why the last command failed, `0` if it didn't |
+| `0x48` | `DST_BASE`      | RW     | destination surface: VRAM offset of its first line |
+| `0x4C` | `DST_PITCH`     | RW     | destination surface: bytes per line           |
+| `0x50` | `DST_XY`        | RW     | destination pixel: bits 0–15 = x, bits 16–31 = y |
+| `0x54` | `SRC_BASE`      | RW     | source surface: VRAM offset of its first line |
+| `0x58` | `SRC_PITCH`     | RW     | source surface: bytes per line                |
+| `0x5C` | `SRC_XY`        | RW     | source pixel: bits 0–15 = x, bits 16–31 = y   |
+| `0x60` | `SIZE`          | RW     | rectangle: bits 0–15 = width, bits 16–31 = height, in pixels |
+| `0x64` | `FG`            | RW     | pixel value of `FILL`, and of 1 bits in `EXPAND` |
+| `0x68` | `BG`            | RW     | pixel value of 0 bits in `EXPAND`             |
+| `0x6C` | `ADDRESS`       | RW     | physical address of the next DMA word         |
+| `0x70` | `COUNT`         | RW     | bytes left to move by DMA                     |
+
+#### Modes
+
+`MODE` is a resolution and a depth; every pairing is valid.
+
+| Resolution | Size      |   | Depth | Bits per pixel | Pixel value               |
+|------------|-----------|---|-------|----------------|---------------------------|
+| `0`        | 320×240   |   | `0`   | 1              | palette entry 0–1         |
+| `1`        | 640×480   |   | `1`   | 4              | palette entry 0–15        |
+| `2`        | 800×600   |   | `2`   | 8              | palette entry 0–255       |
+| `3`        | 1024×768  |   | `3`   | 16             | RGB565: red in bits 11–15, green 5–10, blue 0–4 |
+|            |           |   | `4`   | 32             | XRGB8888: `0x00RRGGBB`, bits 24–31 are ignored |
+
+A write of a depth above 4 or with other bits set is ignored, so `MODE`
+keeps its value. Changing the mode leaves VRAM and the palette alone;
+the engine uses the new depth at once, the display from the next frame.
+
+Pixels are stored line by line, `PITCH` bytes apart for the visible
+frame. 1 and 4 bpp pixels are packed from the most significant bits of a
+byte, so the leftmost pixel is bit 7 (1 bpp) or bits 4–7 (4 bpp). 16 and
+32 bpp pixels are little-endian. The palette has 256 entries of
+`0x00RRGGBB`; the 1, 4 and 8 bpp depths use its first 2, 16 or 256.
+
+#### Display
+
+The card counts frames: a frame lasts 1/60 s of clock ticks (the clock
+rate / 60). At the end of every frame it shows the visible frame: the
+current mode, read from VRAM at `START` with `PITCH` bytes per line and
+coloured through the palette. So everything drawn during a frame appears
+at once, and a change to `START` flips to another frame in VRAM (double
+buffering) at the end of the frame. Lines that run past the end of VRAM
+are black, and so is the whole screen while `CONTROL` bit 0 is clear.
+
+Then `FRAME` goes up by one and `STATUS.VBLANK` is set. `VBLANK` stays
+set until software writes 1 to it, so it tells that at least one frame
+has ended since then.
+
+#### Drawing engine
+
+The engine draws on surfaces: images in VRAM described by the offset of
+their first line (`*_BASE`) and the bytes per line (`*_PITCH`), which
+need not be those of the visible frame, so drawing off screen is the
+same as on screen. `*_XY` picks the top left pixel of the rectangle
+within the surface and `SIZE` its size. The pixels are in the depth of
+the current mode, except for the source of `EXPAND`, which is 1 bpp.
+
+Writing `COMMAND` clears `DONE` and `ERROR` and runs the command in its
+bits 0–7. `FILL`, `COPY` and `EXPAND` finish at once, in the same store:
+`DONE` is set when the store completes. `LOAD` and `STORE` run by DMA,
+see below.
+
+| `COMMAND` | Name     | Operation                                        |
+|-----------|----------|--------------------------------------------------|
+| `1`       | `FILL`   | the destination rectangle takes the value `FG`   |
+| `2`       | `COPY`   | the source rectangle is copied to the destination rectangle |
+| `3`       | `EXPAND` | the source rectangle, 1 bpp, is drawn at the destination: 1 bits as `FG`, 0 bits as `BG`; with bit 8 (`TRANSPARENT`) set 0 bits leave the destination alone |
+| `4`       | `LOAD`   | DMA: `COUNT` bytes from memory at `ADDRESS` to VRAM at `DST_BASE` |
+| `5`       | `STORE`  | DMA: `COUNT` bytes from VRAM at `SRC_BASE` to RAM at `ADDRESS` |
+
+`FG` and `BG` are pixel values of the mode: only their low `BPP` bits are
+used. A rectangle with a zero width or height draws nothing. A rectangle
+must lie inside its surface's lines and inside VRAM: x + width pixels must
+fit in `*_PITCH` bytes, and the end of its last line in VRAM. Otherwise
+the command fails with error 2 and draws nothing. `COPY` works like
+`memmove` when both surfaces have the same pitch: overlapping rectangles
+are copied as if through a buffer, so it can scroll. With different
+pitches the result of an overlap is undefined.
+
+`LOAD` reads RAM or ROM, so data can come straight from the firmware.
+`STORE` writes RAM only; it is the only way to read VRAM back. `ADDRESS`,
+the VRAM offset and `COUNT` must be multiples of 4, and the VRAM range
+must lie inside VRAM. A DMA command that can't run finishes at once with
+the error; `COUNT` = 0 finishes at once without one. Otherwise `BUSY` is
+set and the card moves one word per clock tick starting with the next
+tick. `ADDRESS` and the VRAM offset (`DST_BASE` for `LOAD`, `SRC_BASE`
+for `STORE`) go up by 4 and `COUNT` down by 4 with every word. When
+`COUNT` reaches 0, `BUSY` is cleared and `DONE` set. A word the DMA
+can't reach (the I/O region, ROM for `STORE`, an unmapped address) stops
+the transfer with error 3; `ADDRESS` then points at that word. The DMA
+uses physical addresses and ignores the MMU.
+
+While `BUSY` is set, writes to `COMMAND` and the engine's registers
+(`DST_*`, `SRC_*`, `SIZE`, `FG`, `BG`, `ADDRESS`, `COUNT`) are ignored.
+The other registers, the mode and the palette can be changed at any time.
+
+| `ERROR` | Reason                                                   |
+|---------|----------------------------------------------------------|
+| `1`     | unknown command                                          |
+| `2`     | a rectangle runs past its pitch or the end of VRAM, or a DMA range runs past the end of VRAM |
+| `3`     | `ADDRESS`, the VRAM offset or `COUNT` of a DMA command is not a multiple of 4, or the DMA reached memory it can't |
+
+`DONE` and `VBLANK` share IRQ line 5: it is asserted while `DONE` is set
+and `CONTROL` bit 1 is set, or `VBLANK` is set and `CONTROL` bit 2 is
+set. The handler clears the condition by writing 1 to the bit in
+`STATUS` (or, for `DONE`, by starting the next command).
+
+#### Text
+
+A font is a 1 bpp bitmap in VRAM, loaded once with `LOAD` from ROM or
+RAM (a glyph cache). With glyphs of 8×16 pixels stored one after
+another, a byte per line, character `c` is drawn by one `EXPAND` with
+`SRC_BASE` = font + 16 × `c`, `SRC_PITCH` = 1, `SRC_XY` = 0 and `SIZE` =
+8×16, in any depth. The firmware keeps its font there, see
+[State at the entry point](#state-at-the-entry-point).
+
 ## Reset
 
 On reset all registers are zero and `pc = 0xFE000000`, so execution starts
@@ -198,8 +341,10 @@ the MMU is off and its TLB empty. `CYCLE` and `INSTRET` start from zero.
 The power controller's `RESET` does the same at run time: the CPU and all
 devices return to their reset state (FIFOs are emptied, the PIC `ENABLE`
 mask, the timer and its `COUNT` are cleared, disk transfers stop and the
-disk registers are cleared). RAM and the disk images keep their contents,
-including the sectors of an interrupted write that were already written.
+disk registers are cleared, the video card stops its DMA, turns the
+display off and clears its palette and `FRAME`). RAM, VRAM and the disk
+images keep their contents, including the sectors of an interrupted
+write that were already written. VRAM is zero at power-on.
 
 ## Boot protocol
 
@@ -264,12 +409,22 @@ The boot info block describes the machine:
 - The PIC `ENABLE` mask is 0. The boot disk is idle with `DONE` clear.
   The timer is as after reset. The UART RX FIFO was flushed at reset, but
   it may hold input typed since then, as may the keyboard FIFO.
+- The video card shows the firmware's screen console: 640×480, 8 bpp,
+  `START` = 0, display on, IRQs off, the engine idle. The palette holds
+  the 16 VGA colours in entries 0–15, the xterm 6×6×6 colour cube in
+  16–231 and a grey ramp in 232–255. The firmware's font is at VRAM
+  offset `0x003FF000`: 256 glyphs of 8×16 pixels, 16 bytes each, top line
+  first, bit 7 on the left, laid out as described in [Text](#text);
+  codes `0x20`–`0xFF` follow Windows-1252, `0x00`–`0x1F` hold box drawing
+  and symbols. The rest of VRAM is unspecified.
 
 ## Clock
 
 The system clock runs at 48 MHz by default (`clock_rate` in the config).
 On every tick the timer advances first, then the disks move a word each,
-then the CPU samples the IRQ line and advances its pipeline by one stage. Nothing runs once the CPU has
+then the video card moves a DMA word and counts the tick towards the end
+of the frame, then the CPU samples the IRQ line and advances its pipeline
+by one stage. Nothing runs once the CPU has
 halted or the machine is powered off.
 
 ## Pipeline

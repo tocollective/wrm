@@ -22,7 +22,7 @@ bin/wrm081632 [--rom PATH] [--ram SIZE[,...]] [--clock HZ] [--hdd PATH]
 | `--ram SIZE[,...]` | RAM in slots 0–3, mapped back to back from address 0: `1M`, `2M`, `4M`, `8M`, `16M` or `32M` each (`--ram 4M,4M`); `1M` by default |
 | `--clock HZ`       | clock rate, with an optional `k`, `M` or `G` suffix; `48M` by default |
 | `--hdd PATH`       | disk image for disk 0; a second `--hdd` attaches disk 1 (see [Booting from disk](#booting-from-disk)) |
-| `--headless`       | no window; the UART console still uses stdin and stdout |
+| `--headless`       | no window (the video card still runs, but nothing is shown); the UART console still uses stdin and stdout |
 | `--trace[=PATH]`   | log every instruction that reaches write-back to `PATH`, or to stderr (see [Debugging](#debugging)) |
 | `--debug`          | dump the CPU state when the machine stops or the emulator quits |
 | `-h, --help`       | show the options                                         |
@@ -127,6 +127,7 @@ runs every ROM through it as a test of its own.
 | `pipeline` | forwarding and stalls, cycle timing, precise faults and interrupts |
 | `mmu`      | pages and superpages, permissions, TLB invalidation, `U`    |
 | `disk`     | the disk controller, booting from disk                      |
+| `video`    | the video card: modes, palette, drawing engine, DMA, VBLANK |
 
 A test includes `tests/common/harness.asm` and defines `test_main`. It
 sets `r28` to the number of each check and ends with `j pass`, or

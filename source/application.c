@@ -23,7 +23,11 @@ application_t* application_create(int argc, char* argv[]) {
 	application_t* app = calloc(1, sizeof(application_t));
 	app->machine = machine_create();
 	application_open_trace(app);
-	if (!config_get()->headless) app->display = display_create();
+	if (!config_get()->headless) {
+		app->display = display_create();
+		// frames are only scanned out while a display shows them
+		app->machine->motherboard->videocard->connected = true;
+	}
 	app->running = true;
 	console_open();
 	return app;
@@ -77,7 +81,7 @@ static void application_check_stopped(application_t* app) {
 bool application_update(application_t* app) {
 	application_update_console(app);
 	machine_update(app->machine);
-	display_render(app->display);
+	display_render(app->display, app->machine->motherboard->videocard);
 	application_report_stop(app);
 	application_check_stopped(app);
 	return true;

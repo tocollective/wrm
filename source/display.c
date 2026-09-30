@@ -13,12 +13,6 @@ display_t* display_create(void) {
 	display->renderer = SDL_CreateRenderer(display->window, NULL);
 	if (!display->renderer) error(SDL_GetError());
 
-	const SDL_PixelFormat format = SDL_PIXELFORMAT_ARGB8888;
-	const SDL_TextureAccess access = SDL_TEXTUREACCESS_STREAMING;
-	display->texture =
-		SDL_CreateTexture(display->renderer, format, access, 640, 480);
-	if (!display->texture) error(SDL_GetError());
-
 	return display;
 }
 
@@ -43,15 +37,49 @@ void display_destroy(display_t* display) {
 	display = NULL;
 }
 
-void display_render(display_t* display) {
+// (Re)creates the texture at the size of the video mode.
+static void display_resize(display_t* display, const int width,
+						   const int height) {
+	if (display->texture) {
+		float texture_width, texture_height;
+		SDL_GetTextureSize(display->texture, &texture_width, &texture_height);
+		if ((int)texture_width == width && (int)texture_height == height)
+			return;
+		SDL_DestroyTexture(display->texture);
+	}
+
+	const SDL_PixelFormat format = SDL_PIXELFORMAT_XRGB8888;
+	const SDL_TextureAccess access = SDL_TEXTUREACCESS_STREAMING;
+	display->texture =
+		SDL_CreateTexture(display->renderer, format, access, width, height);
+	if (!display->texture) error(SDL_GetError());
+	SDL_SetTextureScaleMode(display->texture, SDL_SCALEMODE_NEAREST);
+}
+
+// Copies a new frame of the video card into the texture.
+static void display_update(display_t* display, const videocard_t* videocard) {
+	if (!videocard || videocard->screen_updates == display->screen_updates)
+		return;
+	display->screen_updates = videocard->screen_updates;
+
+	const int width = (int)videocard->screen_width;
+	const int height = (int)videocard->screen_height;
+	display_resize(display, width, height);
+	const int pitch = width * (int)sizeof(uint32_t);
+	if (!SDL_UpdateTexture(display->texture, NULL, videocard->screen, pitch))
+		error(SDL_GetError());
+}
+
+void display_render(display_t* display, const videocard_t* videocard) {
 	if (!display) return;
+	display_update(display, videocard);
 	SDL_Renderer* renderer = display->renderer;
 	SDL_Window* window = display->window;
 	SDL_Texture* texture = display->texture;
 
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 	SDL_RenderClear(renderer);
-	{
+	if (texture) {
 		int window_width, window_height;
 		SDL_GetWindowSize(window, &window_width, &window_height);
 		float texture_width, texture_height;

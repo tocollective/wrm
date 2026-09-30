@@ -93,6 +93,9 @@ static bool motherboard_io_read(motherboard_t* mb, const uint32_t address,
 		case MB_POWER_BASE:
 			fail = power_read(mb->power, offset, size, value);
 			break;
+		case MB_VIDEO_BASE:
+			fail = videocard_read(mb->videocard, offset, size, value);
+			break;
 	}
 	if (!fail) *value &= motherboard_io_mask(size);
 	return fail;
@@ -118,6 +121,8 @@ static bool motherboard_io_write(motherboard_t* mb, const uint32_t address,
 			return pit_write(mb->pit, offset, size, value);
 		case MB_POWER_BASE:
 			return power_write(mb->power, offset, size, value);
+		case MB_VIDEO_BASE:
+			return videocard_write(mb->videocard, offset, size, value);
 	}
 	return true;
 }
@@ -222,6 +227,15 @@ static bool motherboard_dma_write(void* ctx, const uint32_t address,
 	return motherboard_bus_write(ctx, address, size, value);
 }
 
+// Video card DMA: reads RAM or ROM (e.g. the firmware's font), writes RAM
+// only; the I/O region is a bus error.
+// returns true on bus error
+static bool motherboard_video_dma_read(void* ctx, const uint32_t address,
+									   const uint8_t size, uint32_t* value) {
+	if (address >= MB_IO_BASE && address < MB_ROM_BASE) return true;
+	return motherboard_bus_read(ctx, address, size, value);
+}
+
 motherboard_t* motherboard_create(void) {
 	config_t* cfg = config_get();
 
@@ -256,6 +270,15 @@ motherboard_t* motherboard_create(void) {
 		mb->disk[i] = disk_create(
 				mb->pic, MB_IRQ_DISK0 + i, dma, cfg->hdd_path[i]);
 
+	const bus_t video_dma = {
+		.ctx = mb,
+		.read = motherboard_video_dma_read,
+		.fetch = motherboard_video_dma_read,
+		.write = motherboard_dma_write,
+	};
+	mb->videocard = videocard_create(
+			mb->pic, MB_IRQ_VIDEO, video_dma, (uint32_t)mb->clock->rate);
+
 	for (int i = 0; i < RAM_SLOT_COUNT; i++) {
 		mb->ram_slot[i].ram = NULL;
 		mb->ram_slot[i].installed = false;
@@ -277,6 +300,11 @@ motherboard_t* motherboard_create(void) {
 
 void motherboard_destroy(motherboard_t* mb) {
 	if (!mb) return;
+	if (mb->videocard) {
+		videocard_destroy(mb->videocard);
+		mb->videocard = NULL;
+	}
+
 	for (int i = 0; i < DISK_COUNT; i++) {
 		if (mb->disk[i]) {
 			disk_destroy(mb->disk[i]);
@@ -344,6 +372,7 @@ void motherboard_reset(motherboard_t* mb) {
 	pit_reset(mb->pit);
 	power_reset(mb->power);
 	for (int i = 0; i < DISK_COUNT; i++) disk_reset(mb->disk[i]);
+	videocard_reset(mb->videocard);
 	pic_reset(mb->pic);
 }
 
@@ -351,6 +380,7 @@ void motherboard_tick(motherboard_t* mb) {
 	if (!mb) return;
 	pit_tick(mb->pit);
 	for (int i = 0; i < DISK_COUNT; i++) disk_tick(mb->disk[i]);
+	videocard_tick(mb->videocard);
 	cpu_set_irq(mb->cpu, pic_irq(mb->pic));
 	cpu_update(mb->cpu);
 
