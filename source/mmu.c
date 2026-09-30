@@ -39,10 +39,11 @@ void mmu_invalidate(mmu_t* mmu, const uint32_t address) {
 	if (entry->vpn == vpn) entry->valid = false;
 }
 
-// returns true when the entry can't be read
+// returns true when the entry can't be read; entries in the I/O region
+// can't, so a walk never touches a device
 static bool mmu_read_entry(mmu_t* mmu, const uint32_t table,
 						   const uint32_t index, uint32_t* entry) {
-	return mmu->bus.read(mmu->bus.ctx, table + index * 4, 4, entry);
+	return mmu->bus.fetch(mmu->bus.ctx, table + index * 4, 4, entry);
 }
 
 // Walks the page tables for address and fills the TLB entry;

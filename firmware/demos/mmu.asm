@@ -14,9 +14,9 @@ USER_DATA       = 0x00401000        ; -> USER_DATA_PA
 USER_STACK_TOP  = USER_DATA + PAGE_SIZE
 DIR_USER        = (USER_CODE >> 22) * 4
 
-; r1 = number, r2 = argument
+; r9 = number, r1 = argument (docs/ABI.md#system-calls)
 SYS_EXIT        = 0
-SYS_PUTS        = 1                 ; r2 = zero-terminated string
+SYS_PUTS        = 1                 ; r1 = zero-terminated string
 
 demo_mmu:
 	addi r30, r30, -4
@@ -146,12 +146,12 @@ trap_handler:
 	j .skip
 
 .syscall:
-	lw r1, 0(r30)               ; user r1: number
+	lw r1, 32(r30)              ; user r9: number
 	li r2, SYS_EXIT
 	beq r1, r2, .exit
 	li r2, SYS_PUTS
 	bne r1, r2, .skip           ; unknown calls are ignored
-	lw r1, 4(r30)               ; user r2: string
+	lw r1, 0(r30)               ; user r1: string
 	call puts
 
 .skip:
@@ -175,7 +175,8 @@ trap_handler:
 	; resume demo_mmu in supervisor mode, dropping the user context
 	la r1, demo_mmu.back
 	mtcr epc, r1
-	mtcr status, r0             ; PUM = 0: IRET stays in supervisor mode
+	li r1, STATUS_EXL           ; PUM = 0: IRET stays in supervisor mode
+	mtcr status, r1
 	lw r30, VAR_KERNEL_SP(r0)
 	iret
 
@@ -188,30 +189,30 @@ USER_DELTA = USER_CODE - user_page
 
 user_entry:
 	li r30, USER_STACK_TOP      ; the stack lives in the user data page
-	li r1, SYS_PUTS
-	la r2, u_hello + USER_DELTA
+	li r9, SYS_PUTS
+	la r1, u_hello + USER_DELTA
 	syscall
 
-	li r1, SYS_PUTS
-	la r2, u_try_mfcr + USER_DELTA
+	li r9, SYS_PUTS
+	la r1, u_try_mfcr + USER_DELTA
 	syscall
 	mfcr r3, status             ; supervisor only: CAUSE = 11
 
-	li r1, SYS_PUTS
-	la r2, u_try_load + USER_DELTA
+	li r9, SYS_PUTS
+	la r1, u_try_load + USER_DELTA
 	syscall
 	lw r3, VAR_QUIT(r0)         ; RAM page without U: CAUSE = 9
 
-	li r1, SYS_PUTS
-	la r2, u_try_store + USER_DELTA
+	li r9, SYS_PUTS
+	la r1, u_try_store + USER_DELTA
 	syscall
 	li r4, USER_CODE
 	sw r3, 0(r4)                ; code page has no W: CAUSE = 10
 
-	li r1, SYS_PUTS
-	la r2, u_bye + USER_DELTA
+	li r9, SYS_PUTS
+	la r1, u_bye + USER_DELTA
 	syscall
-	li r1, SYS_EXIT
+	li r9, SYS_EXIT
 	syscall
 
 u_hello:        .asciz "user: hello from user mode\n"

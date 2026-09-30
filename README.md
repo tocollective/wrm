@@ -12,14 +12,20 @@ dd if=/dev/zero of=firmware.rom  bs=1m  count=32
 
 ```sh
 python3 tools/asm.py firmware/main.asm -o firmware.rom
-bin/wrm081632 [--rom PATH] [--headless]
+bin/wrm081632 [--rom PATH] [--ram SIZE[,...]] [--clock HZ] [--hdd PATH]
+              [--headless] [--trace[=PATH]] [--debug]
 ```
 
-| Option        | Description                                              |
-|---------------|----------------------------------------------------------|
-| `--rom PATH`  | firmware image, `firmware.rom` by default                |
-| `--headless`  | no window; the UART console still uses stdin and stdout |
-| `-h, --help`  | show the options                                         |
+| Option             | Description                                              |
+|--------------------|----------------------------------------------------------|
+| `--rom PATH`       | firmware image, `firmware.rom` by default                |
+| `--ram SIZE[,...]` | RAM in slots 0–3, mapped back to back from address 0: `1M`, `2M`, `4M`, `8M`, `16M` or `32M` each (`--ram 4M,4M`); `1M` by default |
+| `--clock HZ`       | clock rate, with an optional `k`, `M` or `G` suffix; `48M` by default |
+| `--hdd PATH`       | disk image for disk 0; a second `--hdd` attaches disk 1 (see [Booting from disk](#booting-from-disk)) |
+| `--headless`       | no window; the UART console still uses stdin and stdout |
+| `--trace[=PATH]`   | log every instruction that reaches write-back to `PATH`, or to stderr (see [Debugging](#debugging)) |
+| `--debug`          | dump the CPU state when the machine stops or the emulator quits |
+| `-h, --help`       | show the options                                         |
 
 The emulator quits when the guest powers the machine off through the
 power controller (see [docs/SPECIFICATION.md](docs/SPECIFICATION.md#power-controller));
@@ -33,6 +39,76 @@ mode it also quits when the CPU halts:
 | `1`         | a fault the CPU couldn't handle (headless only, reported on stderr), or an emulator error |
 
 With a window, a halted machine keeps the window open.
+
+## Booting from disk
+
+A disk image is a plain file of 512-byte sectors. The disk is written
+back to the file, and a file the emulator can't write is attached
+read-only.
+
+The firmware boots from disk 0 when it holds a boot image. A boot image
+starts with a small header and is loaded to `0x00010000`
+([docs/SPECIFICATION.md](docs/SPECIFICATION.md#boot-protocol)). Assembled
+at that address and padded to a whole sector, the assembler output is
+itself a bootable disk image:
+
+```sh
+python3 tools/asm.py firmware/disk/hello.asm --base 0x10000 -o hdd0.img
+bin/wrm081632 --hdd hdd0.img
+```
+
+Without a boot image, or without `--hdd`, the firmware runs its demos.
+The calling conventions for code on the machine are in
+[docs/ABI.md](docs/ABI.md).
+
+## Debugging
+
+**State dump.** When the CPU halts on a fault it couldn't handle, the
+emulator prints its state on stderr; with `--debug` it does so whenever
+the machine stops (`HLT`, power off) or the emulator quits. A halted CPU
+keeps its pipeline, so `MEM/WB` holds the instruction that stopped it:
+
+```
+CPU: halted by a fault at 0xFE000044: load page fault (0x00400000)
+  pc FE000044  cycles 1234  retired 1180  irq 0
+  r0  00000000  r1  00400000  r2  00000000  r3  00000000
+  ...
+  status   00000010  EXL
+  epc      FE000010
+  ...
+  ptbr     00010001  paging on
+  MEM/WB  FE000044  00002144  lw r1, 0(r1)                  ! load page fault (0x00400000)
+  EX/MEM  bubble
+  ...
+```
+
+**Trace.** `--trace` writes a line for every instruction that reaches
+write-back: the cycle, its address and word, the instruction, and what it
+changes — a register (`r1 = 0x...`), memory (`[0x...] = 0x...`, as wide
+as the store), a control register (`status = 0x...`) or the PC after
+`IRET` — or the fault it raises (`! cause (BADADDR)`). A taken interrupt
+gets a line of its own, at the address it returns to:
+
+```
+         5  FE000000  00101E30  lui r30, 0x00080              r30 = 0x00100000
+        10  FE00000C  00082005  mtcr ivec, r1                 ivec = 0xFE0000D0
+       812  FE000040  0200014A  sw r1, 128(r0)                [0x00000080] = 0x0000002A
+      9031  FE000120  --------                                ! interrupt
+```
+
+Squashed instructions never reach write-back, so they aren't traced.
+Tracing is slow (the host usually falls behind the clock rate, and the
+machine just runs slower) and the log grows by about 80 bytes per
+instruction, so it suits short test ROMs best.
+
+**Disassembler.** `tools/disasm.py` prints a ROM image in the same
+syntax as the trace; the output assembles back to the same bytes.
+Words the assembler can't produce (data, reserved bits set) are shown as
+`.word`, and runs of the same word are folded into `*` unless `--all`:
+
+```sh
+python3 tools/disasm.py firmware.rom [--base 0xFE000000] [--start ADDR] [-n WORDS]
+```
 
 ## Tests
 
@@ -50,12 +126,23 @@ runs every ROM through it as a test of its own.
 | `isa`      | every instruction, control registers, exceptions, user mode |
 | `pipeline` | forwarding and stalls, cycle timing, precise faults and interrupts |
 | `mmu`      | pages and superpages, permissions, TLB invalidation, `U`    |
+| `disk`     | the disk controller, booting from disk                      |
 
 A test includes `tests/common/harness.asm` and defines `test_main`. It
 sets `r28` to the number of each check and ends with `j pass`, or
 branches to `fail`, which prints the check number and `r1`–`r4` and
 powers off with the check number as the exit code. A test passes only
 if it powers off with `0` after printing `PASS`.
+
+Comment lines in a test set up the machine it runs on:
+
+| Line              | Effect                                                  |
+|-------------------|---------------------------------------------------------|
+| `; @hdd N`        | attach a disk of `N` sectors; the word at byte offset `o` of sector `s` is `s << 16 \| o / 4` |
+| `; @hdd FILE.asm` | attach a boot image assembled from `FILE.asm` (relative to the test) at `0x00010000` |
+| `; @args ARGS`    | more emulator options, e.g. `--ram 4M,2M`               |
+
+Each `@hdd` attaches the next disk, 0 and then 1.
 
 ## Web (Emscripten)
 

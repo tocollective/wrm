@@ -14,7 +14,7 @@ syntax:
   NAME = expr               constant (also .equ NAME, expr / .set NAME, expr)
   ; comment  # comment  // comment
 
-  registers: r0-r31, zero (= r0), ra (= r31)
+  registers: r0-r31, zero (= r0), fp (= r29), sp (= r30), ra (= r31)
   control registers: status, epc, ivec, scratch, cause, badaddr, ptbr,
                      cycle, cycleh, instret, instreth (read-only),
                      cr0-cr10 or a number
@@ -111,7 +111,7 @@ def check_range(v, lo, hi, what):
 
 
 REGS = {f"r{i}": i for i in range(32)}
-REGS.update(zero=0, ra=31)
+REGS.update(zero=0, fp=29, sp=30, ra=31)  # roles from docs/ABI.md
 
 CREGS = {f"cr{i}": i for i in range(11)}
 CREGS.update(status=0, epc=1, ivec=2, scratch=3, cause=4, badaddr=5, ptbr=6,

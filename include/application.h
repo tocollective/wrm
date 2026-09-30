@@ -5,9 +5,11 @@
 
 typedef struct application {
 	bool running;
+	bool stop_reported; // the machine has stopped and the state was dumped
 	int exit_code; // process exit status once the app stops running
 	machine_t* machine;
 	display_t* display; // NULL in headless mode
+	FILE* trace_file; // --trace=PATH, NULL when off or on stderr
 } application_t;
 
 application_t* application_create(int argc, char* argv[]);

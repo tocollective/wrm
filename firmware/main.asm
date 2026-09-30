@@ -1,6 +1,9 @@
 ; ============================================================================
 ;  WRM.081632 demo firmware
 ;
+;  Boots from disk 0 if it holds a boot image (--hdd, see
+;  docs/SPECIFICATION.md#boot-protocol); otherwise runs the demos.
+;
 ;  A tour of the machine: every instruction group, the UART, the keyboard,
 ;  the PIC, polling, WFI, interrupts, the MMU and user mode, the timer and
 ;  the cycle counters, power off, plus most assembler features
@@ -12,14 +15,16 @@
 ;  Files:
 ;    main.asm         reset, the order of the demos, image trailer
 ;    defs.asm         hardware constants and the RAM layout
+;    boot.asm         boot from disk
 ;    demos/*.asm      one demo each, with its own strings and data
 ;    lib.asm          UART output and helpers (puts, show, memcpy, ...)
 ;
-;  Register conventions of this program (the hardware only fixes r0 = 0):
-;    r1-r4     arguments, r1 = return value
+;  Register conventions: the ABI (docs/ABI.md), in short
+;    r1-r8     arguments, r1 = return value
 ;    r1-r9     scratch, clobbered by every call
 ;    r10-r29   preserved across calls
-;    r30       stack pointer, grows down, word aligned
+;    r30       stack pointer, grows down (the demos keep it only word
+;              aligned, the ABI wants 8 bytes)
 ;    r31 (ra)  return address, written by JAL/CALL, used by RET
 ; ============================================================================
 
@@ -39,6 +44,7 @@ reset:
 	li r1, UART
 	li r2, UART_FLUSH
 	sw r2, UART_CONTROL(r1)     ; drop anything received before reset
+	call boot                   ; returns if there is nothing to boot
 
 	la r1, s_banner
 	call puts
@@ -70,6 +76,7 @@ reset:
 	.include "demos/interrupts.asm"
 	.include "demos/mmu.asm"
 	.include "demos/timer.asm"
+	.include "boot.asm"
 	.include "lib.asm"
 
 ; ---- data -----------------------------------------------------------------

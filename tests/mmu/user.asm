@@ -134,7 +134,7 @@ check_log:
 	lw r4, 8(r10)
 	bne r4, r3, fail
 	lw r4, 12(r10)
-	li r3, STATUS_PUM
+	li r3, STATUS_PUM | STATUS_EXL
 	bne r4, r3, fail
 	addi r10, r10, 16
 	ret
@@ -162,7 +162,7 @@ user_trap:
 	bne r20, r27, .back
 	li r27, SYS_EXIT
 	bne r1, r27, .back
-	andi r27, r23, STATUS_IE | STATUS_PIE
+	andi r27, r23, STATUS_IE | STATUS_PIE | STATUS_EXL
 	mtcr status, r27            ; PUM = 0: IRET stays in supervisor mode
 	mv r26, r25
 .back:

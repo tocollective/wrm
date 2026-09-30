@@ -9,12 +9,22 @@ and uses the number of the failed check as the exit code.
 A test passes only when the emulator exits with 0 and the output has the
 PASS line: an HLT also exits with 0 in headless mode.
 
+A test can set up the machine with comment lines in its source:
+  ; @hdd N          attach a disk of N sectors in which the word at byte
+                    offset o of sector s is s << 16 | o / 4
+  ; @hdd FILE.asm   attach a boot image assembled from FILE.asm (relative
+                    to the test) at BOOT_LOAD
+  ; @args ARGS      more emulator options, e.g. --ram 4M,2M
+Each @hdd attaches the next disk, 0 then 1.
+
 usage: tests/run.py [--emulator PATH] [tests...]
 """
 
 import argparse
 import concurrent.futures
 import os
+import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -25,6 +35,10 @@ ASSEMBLER = os.path.join(ROOT, "tools", "asm.py")
 EMULATOR = os.path.join(ROOT, "bin", "wrm081632.exe" if os.name == "nt" else "wrm081632")
 
 EXIT_TRAP = 254  # tests/common/harness.asm
+SECTOR_SIZE = 512
+BOOT_LOAD = 0x00010000  # firmware/defs.asm
+
+DIRECTIVE = re.compile(r"^\s*;\s*@(\w+)\b\s*(.*?)\s*$")
 
 
 def find_tests():
@@ -43,16 +57,65 @@ def test_name(path):
 	return os.path.splitext(os.path.relpath(path, TESTS))[0].replace(os.sep, "/")
 
 
+def read_directives(path):
+	"""Returns the @hdd specs and the @args options of a test source."""
+	hdds, args = [], []
+	with open(path, encoding="utf-8") as f:
+		for line in f:
+			m = DIRECTIVE.match(line)
+			if not m:
+				continue
+			name, value = m.groups()
+			if name == "hdd":
+				hdds.append(value)
+			elif name == "args":
+				args += shlex.split(value)
+			else:
+				raise ValueError(f"unknown directive @{name}")
+	return hdds, args
+
+
+def pattern_disk(sectors):
+	words = ((s << 16) | i for s in range(sectors) for i in range(SECTOR_SIZE // 4))
+	return b"".join(w.to_bytes(4, "little") for w in words)
+
+
+def make_disk(spec, path, image):
+	"""Writes the disk image for an @hdd spec; returns an error or None."""
+	if spec.isdigit():
+		with open(image, "wb") as f:
+			f.write(pattern_disk(int(spec)))
+		return None
+	source = os.path.join(os.path.dirname(path), spec)
+	asm = subprocess.run([sys.executable, ASSEMBLER, source, "--base", hex(BOOT_LOAD),
+						  "-o", image], capture_output=True, text=True)
+	return None if asm.returncode == 0 else asm.stdout + asm.stderr
+
+
 def run_test(path, emulator, timeout, workdir):
 	"""Returns (passed, message, output)."""
-	rom = os.path.join(workdir, test_name(path).replace("/", "_") + ".rom")
+	base = os.path.join(workdir, test_name(path).replace("/", "_"))
+	rom = base + ".rom"
 	asm = subprocess.run([sys.executable, ASSEMBLER, path, "-o", rom],
 						 capture_output=True, text=True)
 	if asm.returncode != 0:
 		return False, "assembler failed", asm.stdout + asm.stderr
 
 	try:
-		run = subprocess.run([emulator, "--headless", "--rom", rom],
+		hdds, extra = read_directives(path)
+	except ValueError as e:
+		return False, str(e), ""
+	command = [emulator, "--headless", "--rom", rom]
+	for n, spec in enumerate(hdds):
+		image = f"{base}.hdd{n}.img"
+		error = make_disk(spec, path, image)
+		if error is not None:
+			return False, f"can't make the disk image for @hdd {spec}", error
+		command += ["--hdd", image]
+	command += extra
+
+	try:
+		run = subprocess.run(command,
 							 stdin=subprocess.DEVNULL, capture_output=True,
 							 timeout=timeout)
 	except subprocess.TimeoutExpired as e:

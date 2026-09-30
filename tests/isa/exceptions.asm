@@ -2,7 +2,7 @@
 ;  Exceptions: every fault cause, CAUSE, EPC, BADADDR, STATUS and IRET
 ; ============================================================================
 ; trap_record (see the harness) records each trap and skips the faulting
-; instruction, or returns to r25. Supervisor faults need IE set to be
+; instruction, or returns to r25. MTCR STATUS clears EXL, so faults are
 ; handled; nothing raises an interrupt here (the PIC ENABLE mask is 0).
 
 	.include "../common/harness.asm"
@@ -31,10 +31,10 @@ test_main:
 	li r3, 0x123456FF
 	call check_trap
 	li r28, 2
-	mfcr r4, status             ; the handler got IE = 0, PIE = 1
+	mfcr r4, status             ; the handler got IE = 0, PIE = 1, EXL = 1
 	li r3, STATUS_IE | 2
-	bne r4, r3, fail            ; IRET restored IE, PIE stays
-	li r3, 2
+	bne r4, r3, fail            ; IRET restored IE, PIE stays, EXL cleared
+	li r3, STATUS_EXL | 2
 	bne r23, r3, fail
 
 	; every opcode that is not in the instruction set, one by one
@@ -269,6 +269,16 @@ test_main:
 	li r2, 0x80000000
 	li r3, 0x80000000
 	call check_trap
+	li r28, 62                  ; code never runs from the I/O region, even
+	la r25, .fetch_back3        ; from a device's page
+	li r11, PIC
+	jr r11
+	j fail
+.fetch_back3:
+	li r1, 5
+	li r2, PIC
+	li r3, PIC
+	call check_trap
 
 	; ---- misaligned fetch: IRET to an address that is not a multiple of 4
 	li r28, 70
@@ -298,7 +308,7 @@ test_main:
 	li r3, 0
 	call check_trap
 	li r28, 81
-	li r3, 2                    ; STATUS in the handler: PIE only
+	li r3, STATUS_EXL | 2       ; STATUS in the handler: PIE and EXL
 	bne r23, r3, fail
 
 	; ---- the handler can return anywhere by writing EPC
@@ -312,6 +322,23 @@ test_main:
 	la r2, .ill2
 	li r3, 0xFF
 	call check_trap
+
+	; ---- IE only masks interrupts: a supervisor fault with IE clear is
+	; handled too
+	li r28, 95
+	mtcr status, r0
+.ill3:
+	.dw 0x000000FF
+	li r1, 1
+	la r2, .ill3
+	li r3, 0xFF
+	call check_trap
+	li r28, 96
+	li r3, STATUS_EXL           ; STATUS in the handler: EXL only
+	bne r23, r3, fail
+	li r28, 97
+	mfcr r4, status             ; IRET cleared EXL, IE stays clear
+	bnez r4, fail
 	j pass
 
 ; check_trap(r1 = CAUSE, r2 = EPC, r3 = BADADDR): exactly one trap was

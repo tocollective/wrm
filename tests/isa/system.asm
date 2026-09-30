@@ -6,9 +6,10 @@
 
 test_main:
 	; ---- reset values (the harness only wrote IVEC)
-	li r28, 1
+	li r28, 1                   ; EXL: faults halt until software clears it
 	mfcr r4, status
-	bnez r4, fail
+	li r3, STATUS_EXL
+	bne r4, r3, fail
 	li r28, 2
 	mfcr r4, epc
 	bnez r4, fail
@@ -76,15 +77,15 @@ test_main:
 	mfcr r4, 3
 	bne r4, r1, fail
 
-	; ---- STATUS: only IE, PIE, UM, PUM exist
+	; ---- STATUS: only IE, PIE, UM, PUM, EXL exist
 	li r28, 20
-	li r1, 0xFFFFFFFA           ; PIE, PUM and every undefined bit
+	li r1, 0xFFFFFFFA           ; PIE, PUM, EXL and every undefined bit
 	mtcr status, r1
 	mfcr r4, status
-	li r3, 0xA
+	li r3, 0x1A
 	bne r4, r3, fail
 	li r28, 21
-	li r1, 0xFFFFFFF0
+	li r1, 0xFFFFFFE0
 	mtcr status, r1
 	mfcr r4, status
 	bnez r4, fail

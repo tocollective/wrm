@@ -2,6 +2,8 @@
 
 #include <string.h>
 
+#include "disasm.h"
+
 // Instruction layout (little-endian, 32-bit):
 // [7:0] opcode, [12:8] rd, [17:13] rs1, [22:18] rs2
 // I-format: imm14 = [31:18], U-format: imm19 = [31:13]
@@ -17,10 +19,15 @@
 //   squashes the two younger instructions in IF and ID.
 // - Every fetch, load and store goes through the MMU. Faults (including
 //   page faults) travel down the pipeline and are raised in WB (precise):
-//   they enter the handler at IVEC, or halt when raised in supervisor
-//   mode with IE clear.
-// - Interrupts are taken between two instructions: after WB has retired,
-//   the younger ones still in flight are squashed and refetched on IRET.
+//   they enter the handler at IVEC and set STATUS.EXL, or halt when EXL is
+//   already set (a fault inside the handler, or before software cleared
+//   EXL after reset).
+// - Interrupts are taken between two instructions when IE is set and EXL
+//   clear: after WB has retired, the younger ones still in flight are
+//   squashed and refetched on IRET.
+// - Fetches use bus.fetch, which never reaches a device: IF runs ahead of
+//   branch resolution, and a fetch down the wrong path must have no side
+//   effects.
 // - MFCR, MTCR and IRET wait in ID until the older instructions have left
 //   EX and MEM, so control registers are read in EX and written in WB
 //   without forwarding.
@@ -63,6 +70,8 @@ void cpu_reset(cpu_t* cpu) {
 	memset(cpu->gpr, 0, sizeof(cpu->gpr));
 	memset(&cpu->pipeline, 0, sizeof(cpu->pipeline));
 	memset(cpu->cr, 0, sizeof(cpu->cr));
+	// no handler yet: faults halt until software clears EXL
+	cpu->cr[CPU_CR_STATUS] = CPU_STATUS_EXL;
 	mmu_reset(cpu->mmu);
 	cpu->pc = CPU_PC_START;
 	cpu->halted = false;
@@ -195,6 +204,28 @@ static bool cpu_is_branch(const cpu_instruction_t* in) {
 	return in->opcode >= CPU_OP_BEQ && in->opcode <= CPU_OP_BGEU;
 }
 
+// bytes a load or store accesses, 0 for other instructions
+static uint8_t cpu_access_size(const cpu_instruction_t* in) {
+	switch (in->opcode) {
+		case CPU_OP_LB:
+		case CPU_OP_LBU:
+		case CPU_OP_SB:
+			return 1;
+		case CPU_OP_LH:
+		case CPU_OP_LHU:
+		case CPU_OP_SH:
+			return 2;
+		case CPU_OP_LW:
+		case CPU_OP_SW:
+			return 4;
+	}
+	return 0;
+}
+
+static uint32_t cpu_size_mask(const uint8_t size) {
+	return size == 4 ? UINT32_MAX : (1u << (size * 8)) - 1;
+}
+
 // instructions that touch control registers
 static bool cpu_is_serializing(const cpu_instruction_t* in) {
 	return in->opcode == CPU_OP_MFCR || in->opcode == CPU_OP_MTCR
@@ -260,7 +291,7 @@ static void cpu_latch_fault(cpu_latch_t* latch, const cpu_cause_t cause,
 	latch->fault_value = value;
 }
 
-static const char* cpu_cause_name(const uint8_t cause) {
+const char* cpu_cause_name(const uint8_t cause) {
 	switch (cause) {
 		case CPU_CAUSE_INTERRUPT:
 			return "interrupt";
@@ -294,12 +325,13 @@ static const char* cpu_cause_name(const uint8_t cause) {
 
 // Stops the CPU, leaving pc as the architectural PC.
 // fault is the cpu_cause_t that couldn't be handled, 0 for HLT.
+// The pipeline keeps what was in flight (MEM/WB holds the instruction that
+// halted), so cpu_dump can show it; nothing runs until a reset.
 static void cpu_halt(cpu_t* cpu, const uint32_t pc, const uint8_t fault) {
 	cpu->halted = true;
 	cpu->halt_fault = fault;
 	cpu->waiting = false;
 	cpu->pc = pc;
-	memset(&cpu->pipeline, 0, sizeof(cpu->pipeline));
 }
 
 // Sleeps until the IRQ line is asserted, then resumes at pc.
@@ -316,16 +348,104 @@ static void cpu_refetch(cpu_t* cpu, const uint32_t pc) {
 }
 
 // Enters the handler in supervisor mode:
-// EPC = epc, PIE = IE, PUM = UM, IE = UM = 0, pc = IVEC.
+// EPC = epc, PIE = IE, PUM = UM, IE = UM = 0, EXL = 1, pc = IVEC.
+// Never called with EXL set, so IRET restores it by clearing it.
 static void cpu_trap(cpu_t* cpu, const cpu_cause_t cause, const uint32_t epc) {
 	const uint32_t status = cpu->cr[CPU_CR_STATUS];
-	uint32_t next = 0;
+	uint32_t next = CPU_STATUS_EXL;
 	if (status & CPU_STATUS_IE) next |= CPU_STATUS_PIE;
 	if (status & CPU_STATUS_UM) next |= CPU_STATUS_PUM;
 	cpu->cr[CPU_CR_STATUS] = next;
 	cpu->cr[CPU_CR_CAUSE] = cause;
 	cpu->cr[CPU_CR_EPC] = epc;
 	cpu_refetch(cpu, cpu->cr[CPU_CR_IVEC]);
+}
+
+// Width of the instruction column in the trace and the dump
+#define CPU_TEXT_WIDTH 28
+
+static bool cpu_is_fetch_fault(const uint8_t fault) {
+	return fault == CPU_CAUSE_MISALIGNED_FETCH
+		   || fault == CPU_CAUSE_FETCH_BUS_ERROR
+		   || fault == CPU_CAUSE_FETCH_PAGE_FAULT;
+}
+
+// Prints the address, word and instruction of a latch, then note if it
+// isn't empty. A fetch that faulted has no word.
+static void cpu_print_latch(FILE* out, const cpu_latch_t* latch,
+							const char* note) {
+	char text[DISASM_MAX_LENGTH] = "";
+	if (cpu_is_fetch_fault(latch->fault)) {
+		fprintf(out, "%08X  --------  ", (unsigned)latch->pc);
+	} else {
+		disasm_instruction(latch->in.raw, latch->pc, text, sizeof(text));
+		fprintf(out,
+				"%08X  %08X  ",
+				(unsigned)latch->pc,
+				(unsigned)latch->in.raw);
+	}
+	if (note[0])
+		fprintf(out, "%-*s  %s", CPU_TEXT_WIDTH, text, note);
+	else
+		fputs(text, out);
+}
+
+static void cpu_format_fault(const cpu_latch_t* latch, char* out,
+							 const size_t size) {
+	snprintf(out,
+			 size,
+			 "! %s (0x%08X)",
+			 cpu_cause_name(latch->fault),
+			 (unsigned)latch->fault_value);
+}
+
+// One trace line per instruction that reaches WB, before it takes effect:
+// cycle, address, word, instruction and what it changes (or its fault).
+static void cpu_trace_wb(const cpu_t* cpu, const cpu_latch_t* wb) {
+	const cpu_instruction_t* in = &wb->in;
+	char note[64] = "";
+	if (wb->fault) {
+		cpu_format_fault(wb, note, sizeof(note));
+	} else if (cpu_writes_rd(in) && in->rd != CPU_GPR_ZERO) {
+		snprintf(note,
+				 sizeof(note),
+				 "r%u = 0x%08X",
+				 (unsigned)in->rd,
+				 (unsigned)wb->result);
+	} else if (cpu_is_store(in)) {
+		const uint8_t size = cpu_access_size(in);
+		snprintf(note,
+				 sizeof(note),
+				 "[0x%08X] = 0x%0*X",
+				 (unsigned)wb->result,
+				 size * 2,
+				 (unsigned)(wb->d & cpu_size_mask(size)));
+	} else if (in->opcode == CPU_OP_MTCR) {
+		snprintf(note,
+				 sizeof(note),
+				 "%s = 0x%08X",
+				 disasm_cr_name(in->imm),
+				 (unsigned)wb->result);
+	} else if (in->opcode == CPU_OP_IRET) {
+		snprintf(note,
+				 sizeof(note),
+				 "pc = 0x%08X",
+				 (unsigned)cpu->cr[CPU_CR_EPC]);
+	}
+
+	fprintf(cpu->trace, "%10llu  ", (unsigned long long)cpu->cycles);
+	cpu_print_latch(cpu->trace, wb, note);
+	fputc('\n', cpu->trace);
+}
+
+// Trace line for an interrupt taken before the instruction at epc.
+static void cpu_trace_interrupt(const cpu_t* cpu, const uint32_t epc) {
+	fprintf(cpu->trace,
+			"%10llu  %08X  --------  %-*s  ! interrupt\n",
+			(unsigned long long)cpu->cycles,
+			(unsigned)epc,
+			CPU_TEXT_WIDTH,
+			"");
 }
 
 static uint32_t cpu_read_cr(const cpu_t* cpu, const uint32_t cr) {
@@ -393,7 +513,7 @@ static void cpu_stage_if(cpu_t* cpu, cpu_latch_t* out) {
 							 cpu_user_mode(cpu),
 							 &physical)) {
 		cpu_latch_fault(out, CPU_CAUSE_FETCH_PAGE_FAULT, cpu->pc);
-	} else if (cpu->bus.read(cpu->bus.ctx, physical, 4, &raw)) {
+	} else if (cpu->bus.fetch(cpu->bus.ctx, physical, 4, &raw)) {
 		cpu_latch_fault(out, CPU_CAUSE_FETCH_BUS_ERROR, cpu->pc);
 	}
 	out->in.raw = raw;
@@ -613,25 +733,8 @@ static void cpu_stage_mem(cpu_t* cpu, cpu_latch_t* out) {
 
 	const cpu_instruction_t* in = &mem->in;
 	const uint32_t address = mem->result;
-	uint8_t size = 0;
-	switch (in->opcode) {
-		case CPU_OP_LB:
-		case CPU_OP_LBU:
-		case CPU_OP_SB:
-			size = 1;
-			break;
-		case CPU_OP_LH:
-		case CPU_OP_LHU:
-		case CPU_OP_SH:
-			size = 2;
-			break;
-		case CPU_OP_LW:
-		case CPU_OP_SW:
-			size = 4;
-			break;
-		default:
-			return; // no memory access
-	}
+	const uint8_t size = cpu_access_size(in);
+	if (!size) return; // no memory access
 
 	const bool store = cpu_is_store(in);
 	if (address & (size - 1)) {
@@ -656,7 +759,7 @@ static void cpu_stage_mem(cpu_t* cpu, cpu_latch_t* out) {
 	}
 
 	if (store) {
-		const uint32_t mask = size == 4 ? UINT32_MAX : (1u << (size * 8)) - 1;
+		const uint32_t mask = cpu_size_mask(size);
 		if (cpu->bus.write(cpu->bus.ctx, physical, size, mem->d & mask))
 			cpu_latch_fault(out, CPU_CAUSE_STORE_BUS_ERROR, address);
 		return;
@@ -686,12 +789,12 @@ static void cpu_stage_mem(cpu_t* cpu, cpu_latch_t* out) {
 static bool cpu_stage_wb(cpu_t* cpu) {
 	const cpu_latch_t* wb = &cpu->pipeline.mem_wb;
 	if (!wb->valid) return false;
+	if (cpu->trace) cpu_trace_wb(cpu, wb);
 
 	if (wb->fault) {
-		// a supervisor fault with IE clear can't be handled (e.g. inside
-		// the handler); user mode always traps to the supervisor
-		const uint32_t status = cpu->cr[CPU_CR_STATUS];
-		if (!(status & (CPU_STATUS_IE | CPU_STATUS_UM))) {
+		// a fault with EXL set can't be handled: the handler hasn't saved
+		// EPC and the rest yet (or there is no handler after reset)
+		if (cpu->cr[CPU_CR_STATUS] & CPU_STATUS_EXL) {
 			warning("CPU fault at 0x%08X: %s (0x%08X)",
 					(unsigned)wb->pc,
 					cpu_cause_name(wb->fault),
@@ -727,9 +830,9 @@ static bool cpu_stage_wb(cpu_t* cpu) {
 			cpu_refetch(cpu, wb->pc + 4);
 			return true;
 		case CPU_OP_IRET: {
-			// IE = PIE, UM = PUM
+			// IE = PIE, UM = PUM, EXL = 0
 			uint32_t status = cpu->cr[CPU_CR_STATUS];
-			status &= ~(CPU_STATUS_IE | CPU_STATUS_UM);
+			status &= ~(CPU_STATUS_IE | CPU_STATUS_UM | CPU_STATUS_EXL);
 			if (status & CPU_STATUS_PIE) status |= CPU_STATUS_IE;
 			if (status & CPU_STATUS_PUM) status |= CPU_STATUS_UM;
 			cpu->cr[CPU_CR_STATUS] = status;
@@ -752,8 +855,12 @@ static uint32_t cpu_next_pc(const cpu_t* cpu) {
 // Called after WB: squashes everything still in flight and jumps to IVEC.
 // returns true when the interrupt was taken
 static bool cpu_interrupt(cpu_t* cpu) {
-	if (!cpu->irq || !(cpu->cr[CPU_CR_STATUS] & CPU_STATUS_IE)) return false;
-	cpu_trap(cpu, CPU_CAUSE_INTERRUPT, cpu_next_pc(cpu));
+	const uint32_t status = cpu->cr[CPU_CR_STATUS];
+	if (!cpu->irq || !(status & CPU_STATUS_IE) || (status & CPU_STATUS_EXL))
+		return false;
+	const uint32_t epc = cpu_next_pc(cpu);
+	if (cpu->trace) cpu_trace_interrupt(cpu, epc);
+	cpu_trap(cpu, CPU_CAUSE_INTERRUPT, epc);
 	return true;
 }
 
@@ -789,4 +896,78 @@ void cpu_update(cpu_t* cpu) {
 	}
 
 	cpu->pipeline = next;
+}
+
+void cpu_dump(const cpu_t* cpu, FILE* out) {
+	if (!cpu || !out) return;
+	const cpu_pipeline_t* p = &cpu->pipeline;
+
+	fputs("CPU: ", out);
+	if (cpu->halted && cpu->halt_fault) {
+		fprintf(out,
+				"halted by a fault at 0x%08X: %s (0x%08X)\n",
+				(unsigned)cpu->pc,
+				cpu_cause_name(cpu->halt_fault),
+				(unsigned)p->mem_wb.fault_value);
+	} else if (cpu->halted) {
+		fputs("halted (HLT)\n", out);
+	} else if (cpu->waiting) {
+		fputs("waiting for an interrupt (WFI)\n", out);
+	} else {
+		fputs("running\n", out);
+	}
+	fprintf(out,
+			"  pc %08X  cycles %llu  retired %llu  irq %d\n",
+			(unsigned)cpu->pc,
+			(unsigned long long)cpu->cycles,
+			(unsigned long long)cpu->retired,
+			cpu->irq ? 1 : 0);
+
+	for (int i = 0; i < CPU_GPR_COUNT; i++) {
+		fprintf(out, "  r%-2d %08X", i, (unsigned)cpu->gpr[i]);
+		if (i % 4 == 3) fputc('\n', out);
+	}
+
+	// the counters are above
+	for (uint32_t cr = 0; cr < CPU_CR_CYCLE; cr++) {
+		const uint32_t value = cpu_read_cr(cpu, cr);
+		fprintf(out, "  %-8s %08X", disasm_cr_name(cr), (unsigned)value);
+		if (cr == CPU_CR_STATUS) {
+			static const char* const flags[] = { "IE", "PIE", "UM", "PUM",
+												 "EXL" };
+			fputs(" ", out);
+			for (int bit = 0; bit < 5; bit++)
+				if (value & (1u << bit)) fprintf(out, " %s", flags[bit]);
+		} else if (cr == CPU_CR_CAUSE) {
+			fprintf(out, "  %s", cpu_cause_name(value));
+		} else if (cr == CPU_CR_PTBR) {
+			fputs(value & MMU_PTBR_ENABLE ? "  paging on" : "  paging off",
+				  out);
+		}
+		fputc('\n', out);
+	}
+
+	// oldest first
+	const struct {
+		const char* name;
+		const cpu_latch_t* latch;
+	} stages[] = {
+		{ "MEM/WB", &p->mem_wb },
+		{ "EX/MEM", &p->ex_mem },
+		{ "ID/EX", &p->id_ex },
+		{ "IF/ID", &p->if_id },
+	};
+	for (size_t i = 0; i < sizeof(stages) / sizeof(stages[0]); i++) {
+		const cpu_latch_t* latch = stages[i].latch;
+		fprintf(out, "  %-7s ", stages[i].name);
+		if (!latch->valid) {
+			fputs("bubble\n", out);
+			continue;
+		}
+		char note[64] = "";
+		if (latch->fault) cpu_format_fault(latch, note, sizeof(note));
+		cpu_print_latch(out, latch, note);
+		fputc('\n', out);
+	}
+	fflush(out);
 }

@@ -2,15 +2,14 @@
 #define WRM_CPU_H
 #include "common.h"
 
+#include <stdio.h>
+
 #include "bus.h"
 #include "mmu.h"
 
 #define CPU_GPR_COUNT 32
-#define CPU_GPR_ZERO 0
-#define CPU_GPR_RA 1 // return address
-#define CPU_GPR_SP 2 // stack pointer
-#define CPU_GPR_GP 3 // global pointer
-#define CPU_GPR_FP 4 // global pointer
+#define CPU_GPR_ZERO 0 // always reads as zero, the only role the hardware fixes
+// software roles from docs/ABI.md
 #define CPU_PC_START 0xFE000000 // reset vector: start of ROM (MB_ROM_BASE)
 
 // Control registers, accessed with MFCR/MTCR (see docs/INSTRUCTIONS.md)
@@ -34,8 +33,10 @@ typedef enum cpu_cr {
 #define CPU_STATUS_PIE 0x02 // IE before the handler was entered
 #define CPU_STATUS_UM 0x04 // user mode, 0 = supervisor
 #define CPU_STATUS_PUM 0x08 // UM before the handler was entered
+#define CPU_STATUS_EXL 0x10 // in the handler: faults halt, no interrupts
 #define CPU_STATUS_MASK                                                        \
-	(CPU_STATUS_IE | CPU_STATUS_PIE | CPU_STATUS_UM | CPU_STATUS_PUM)
+	(CPU_STATUS_IE | CPU_STATUS_PIE | CPU_STATUS_UM | CPU_STATUS_PUM           \
+	 | CPU_STATUS_EXL)
 
 // CAUSE values (see docs/INSTRUCTIONS.md#exceptions)
 typedef enum cpu_cause {
@@ -162,7 +163,7 @@ typedef struct cpu {
 	uint32_t gpr[CPU_GPR_COUNT]; // general purpose registers
 	uint32_t pc; // fetch address; architectural PC once halted or waiting
 	uint32_t cr[CPU_CR_COUNT]; // control registers
-	bool halted;
+	bool halted; // the pipeline is left as it was, for cpu_dump
 	uint8_t halt_fault; // cpu_cause_t of the fault that halted it, 0 = HLT
 	bool waiting; // WFI: sleeping until the IRQ line is asserted
 	bool irq; // IRQ input line, driven by the PIC
@@ -171,6 +172,7 @@ typedef struct cpu {
 	cpu_pipeline_t pipeline;
 	mmu_t* mmu; // translates every fetch, load and store
 	bus_t bus; // physical memory
+	FILE* trace; // log of retired instructions and traps, NULL = off
 } cpu_t;
 
 cpu_t* cpu_create(const bus_t bus);
@@ -181,5 +183,10 @@ void cpu_update(cpu_t* cpu); // advances the pipeline by one clock cycle
 void cpu_set_irq(cpu_t* cpu, const bool level);
 
 cpu_instruction_t cpu_decode(const uint32_t raw);
+const char* cpu_cause_name(const uint8_t cause);
+
+// Prints the registers, control registers, counters and what is in every
+// pipeline latch.
+void cpu_dump(const cpu_t* cpu, FILE* out);
 
 #endif // WRM_CPU_H

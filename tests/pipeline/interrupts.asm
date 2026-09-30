@@ -42,7 +42,7 @@ test_main:
 	li r28, 3
 	bnez r20, fail              ; CAUSE = 0 for interrupts
 	li r28, 4
-	li r3, STATUS_PIE
+	li r3, STATUS_PIE | STATUS_EXL
 	bne r23, r3, fail
 	li r28, 5                   ; CYCLE went on while sleeping
 	sub r4, r13, r12
@@ -221,7 +221,7 @@ test_main:
 	li r3, 1
 	bne r24, r3, fail
 	li r28, 61
-	li r3, STATUS_PUM | STATUS_PIE
+	li r3, STATUS_PUM | STATUS_PIE | STATUS_EXL
 	bne r23, r3, fail
 	li r28, 62                  ; the user loop counted on after IRET
 	beqz r5, fail
@@ -277,7 +277,7 @@ irq_handler:
 	iret
 .syscall:
 	mfcr r26, status            ; back to supervisor mode at r25
-	andi r26, r26, STATUS_IE | STATUS_PIE
+	andi r26, r26, STATUS_IE | STATUS_PIE | STATUS_EXL
 	mtcr status, r26
 	mtcr epc, r25
 	iret

@@ -53,13 +53,16 @@ and `SARI`, where it is zero-extended. Shift amounts use the low 5 bits.
 | `0x00` | `HLT`           | N      | halt the CPU (S)                       |
 | `0x01` | `NOP`           | N      | do nothing                             |
 | `0x02` | `WFI`           | N      | wait for interrupt (S)                 |
-| `0x03` | `IRET`          | N      | `pc = EPC`, `IE = PIE`, `UM = PUM` (S) |
+| `0x03` | `IRET`          | N      | `pc = EPC`, `IE = PIE`, `UM = PUM`, `EXL = 0` (S) |
 | `0x04` | `MFCR rd, cr`   | I      | `rd = cr[imm14]` (S, except counters)  |
 | `0x05` | `MTCR cr, rs1`  | I      | `cr[imm14] = rs1` (`rd` is reserved) (S) |
 | `0x06` | `TLBI rs1`      | I      | drop the TLB entry of the page at `rs1` (`rd`, `imm14` are reserved) (S) |
 | `0x07` | `SYSCALL`       | N      | enter the handler with `CAUSE` = 12    |
 
 (S) — supervisor only, see [Privilege modes](#privilege-modes).
+
+How `SYSCALL` passes its number and arguments is a software convention,
+see [ABI.md](ABI.md#system-calls).
 
 `MFCR`/`MTCR` with a control register number that doesn't exist, and
 `MTCR` to a read-only one, is an illegal instruction.
@@ -158,7 +161,7 @@ address of the branch itself (range ±32KB).
 
 | Number | Name      | Reset | Description                                  |
 |--------|-----------|-------|----------------------------------------------|
-| `0`    | `STATUS`  | `0`   | bit 0 = `IE` (interrupts enabled), bit 1 = `PIE` (previous `IE`), bit 2 = `UM` (user mode), bit 3 = `PUM` (previous `UM`); other bits read as zero |
+| `0`    | `STATUS`  | `0x10` | bit 0 = `IE` (interrupts enabled), bit 1 = `PIE` (previous `IE`), bit 2 = `UM` (user mode), bit 3 = `PUM` (previous `UM`), bit 4 = `EXL` (in the handler, see [Exceptions](#exceptions)); other bits read as zero |
 | `1`    | `EPC`     | `0`   | address `IRET` returns to                    |
 | `2`    | `IVEC`    | `0`   | interrupt handler address                    |
 | `3`    | `SCRATCH` | `0`   | free for software, e.g. to save a register in the handler |
@@ -173,14 +176,15 @@ address of the branch itself (range ±32KB).
 ### Taking an interrupt
 
 The CPU has one level-triggered IRQ input driven by the PIC (see
-[SPECIFICATION.md](SPECIFICATION.md)). When it is asserted and `IE` is set,
-the CPU finishes the current instruction and then:
+[SPECIFICATION.md](SPECIFICATION.md)). When it is asserted, `IE` is set and
+`EXL` is clear, the CPU finishes the current instruction and then:
 
 1. `EPC` = address of the next instruction that has not executed yet,
 2. `PIE` = `IE`, `IE` = 0,
 3. `PUM` = `UM`, `UM` = 0 (supervisor mode),
-4. `CAUSE` = 0,
-5. `pc` = `IVEC`.
+4. `EXL` = 1,
+5. `CAUSE` = 0,
+6. `pc` = `IVEC`.
 
 Interrupts and [exceptions](#exceptions) share the handler; it tells them
 apart by `CAUSE`.
@@ -189,21 +193,23 @@ The handler finds the source by reading the PIC `CLAIM` register and must
 clear the condition in the device before `IRET`, otherwise the line stays
 asserted and the interrupt is taken again right after `IRET`.
 
-A handler that sets `IE` to allow nested interrupts has to save `EPC` first
-and clear `IE` again before restoring `EPC` and executing `IRET`.
+A handler that allows nested interrupts saves `EPC` and `STATUS` first,
+then clears `EXL` and sets `IE`; before restoring `EPC` it clears `IE`
+again (and sets `EXL`, or restores the saved `STATUS`) and executes `IRET`.
 
 ### WFI
 
-`WFI` stops fetching until the IRQ line is asserted. If `IE` is set, the
-interrupt is taken with `EPC` pointing after the `WFI`; otherwise execution
-simply continues with the next instruction.
+`WFI` stops fetching until the IRQ line is asserted. If `IE` is set and
+`EXL` clear, the interrupt is taken with `EPC` pointing after the `WFI`;
+otherwise execution simply continues with the next instruction.
 
 ### Control register access
 
 `MFCR`, `MTCR` and `IRET` wait until all older instructions have finished,
 so they always see the effect of preceding `MTCR`s. `MTCR` takes effect when
-it completes: an interrupt can arrive right after `MTCR STATUS` sets `IE`,
-but never after an `MTCR` that clears it.
+it completes: an interrupt can arrive right after `MTCR STATUS` sets `IE`
+(or clears `EXL`), but never after an `MTCR` that clears `IE` (or sets
+`EXL`).
 
 A mode change takes effect for the next instruction: `IRET` jumps to `EPC`
 only when it completes, and `MTCR STATUS` refetches the instructions after
@@ -244,16 +250,31 @@ except:
 1. `EPC` = address of the faulting instruction,
 2. `PIE` = `IE`, `IE` = 0,
 3. `PUM` = `UM`, `UM` = 0,
-4. `CAUSE` = fault code, `BADADDR` = see the table,
-5. `pc` = `IVEC`.
+4. `EXL` = 1,
+5. `CAUSE` = fault code, `BADADDR` = see the table,
+6. `pc` = `IVEC`.
 
 `IRET` retries the faulting instruction; to skip it (e.g. after emulating
 it, or to return from `SYSCALL`) the handler adds 4 to `EPC` first.
 
-A fault in user mode is always handled, whatever `IE` is. In supervisor
-mode with `IE` clear — at reset, inside the handler, or when software
-cleared it — a fault can't be handled: it halts the CPU with `pc` left
-pointing at the faulting instruction.
+A fault is handled in both modes, whatever `IE` is: `IE` only masks
+interrupts, so the supervisor can take a page fault (e.g. while copying
+`SYSCALL` arguments from user memory) with interrupts disabled.
+
+`EXL` marks the part of the handler that can't be interrupted: the
+handler entry sets it, `IRET` clears it. While it is set, interrupts are
+not taken, and a fault can't be handled — `EPC`, `CAUSE`, `BADADDR` and
+`PIE`/`PUM` would be lost — so it halts the CPU with `pc` left pointing at
+the faulting instruction (a double fault). `EXL` is set after reset, so
+faults halt until software has set `IVEC` and cleared `EXL` (any `MTCR
+STATUS` that doesn't set bit 4, or an `IRET`).
+
+A handler that may fault itself (a `SYSCALL` handler that reads user
+memory, a page fault handler that touches pageable memory) first saves
+`EPC`, `CAUSE`, `BADADDR` and `STATUS`, then clears `EXL`; the nested fault
+enters the handler again. Before `IRET` it sets `EXL` again (or restores
+the saved `STATUS`) and then restores `EPC`, so that a fault can't come
+between the two.
 
 | `CAUSE` | Fault                   | `BADADDR`                         |
 |---------|-------------------------|-----------------------------------|
@@ -262,7 +283,7 @@ pointing at the faulting instruction.
 | `2`     | misaligned fetch        | `pc`                              |
 | `3`     | misaligned load         | virtual address                   |
 | `4`     | misaligned store        | virtual address                   |
-| `5`     | fetch bus error         | `pc`                              |
+| `5`     | fetch bus error, including fetches from the I/O region | `pc` |
 | `6`     | load bus error          | virtual address                   |
 | `7`     | store bus error, including writes to ROM | virtual address  |
 | `8`     | fetch page fault        | `pc`                              |
@@ -272,7 +293,11 @@ pointing at the faulting instruction.
 | `12`    | `SYSCALL`               | `0`                               |
 
 Bus errors are accesses to unmapped physical memory (see
-[SPECIFICATION.md](SPECIFICATION.md#memory-map)).
+[SPECIFICATION.md](SPECIFICATION.md#memory-map)). Code can only run from
+RAM and ROM: a fetch from the I/O region (`0xFD000000`–`0xFDFFFFFF`) is a
+fetch bus error and never reaches the device, even when the page is
+mapped with `X`. Since the CPU fetches ahead of branches, this keeps a
+fetch that is later squashed from reading a device register.
 
 ## Memory management
 
@@ -318,9 +343,9 @@ A fetch needs `X`, a load needs `R`, a store needs `W`, otherwise it is a
 page fault. In user mode the page also needs `U`; supervisor mode can
 access every page. `U` is only checked in the entry that maps the page
 (a superpage directory entry or a page table entry). Entries are read from physical memory and never written by the
-CPU. Page tables must be in RAM (reading a device register as an entry
-has its side effects). An entry that can't be read (unmapped physical
-address) is a page fault.
+CPU. Page tables must be in RAM or ROM. An entry that can't be read
+(unmapped physical address, or an address in the I/O region — the walk
+never reads a device register) is a page fault.
 
 Devices are only reachable through a mapping of their physical pages, so
 software usually maps the I/O region and the ROM too, e.g. with

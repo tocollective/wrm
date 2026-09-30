@@ -14,7 +14,8 @@
 ;  The rest is free for the test.
 ;
 ;  IVEC points at unexpected_trap until the test installs its own handler:
-;  a trap that reaches it fails the test with exit code 254. trap_record
+;  a trap that reaches it fails the test with exit code 254 (a fault only
+;  traps once the test has written STATUS, clearing EXL). trap_record
 ;  is a ready-made handler for tests that expect faults.
 ;
 ;  The MMU tests keep RAM, the I/O region and the ROM mapped one to one,
@@ -128,8 +129,9 @@ print_field:
 	ret
 
 ; ---- trap_record ----------------------------------------------------------------
-; A handler for tests that expect faults. Set IVEC to it and STATUS.IE (a
-; fault in supervisor mode with IE clear halts the CPU). It records the trap:
+; A handler for tests that expect faults. Set IVEC to it and write STATUS
+; (STATUS.EXL is set at reset, and a fault with EXL set halts the CPU;
+; e.g. STATUS_IE clears it). It records the trap:
 ;   r20 = CAUSE, r21 = EPC, r22 = BADADDR, r23 = STATUS on entry,
 ;   r24 += 1 (trap count)
 ; and returns to r25 if it is not zero (clearing r25), otherwise to the

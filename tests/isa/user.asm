@@ -50,7 +50,7 @@ test_main:
 
 	; the log: every privileged instruction trapped with its own word
 	li r10, LOG
-	li r5, STATUS_PUM           ; STATUS in the handler: PUM, IE = PIE = 0
+	li r5, STATUS_PUM | STATUS_EXL ; STATUS in the handler: PUM, EXL, IE = PIE = 0
 	li r28, 10
 	li r1, 11
 	la r2, u_hlt
@@ -109,7 +109,7 @@ test_main:
 	j fail
 .back2:
 	li r28, 31
-	li r5, STATUS_PUM | STATUS_PIE
+	li r5, STATUS_PUM | STATUS_PIE | STATUS_EXL
 	li r1, CAUSE_SYSCALL
 	la r2, user_exit_syscall
 	li r3, 0
@@ -133,7 +133,7 @@ test_main:
 	j fail
 .back3:
 	li r28, 41
-	li r5, STATUS_PUM
+	li r5, STATUS_PUM | STATUS_EXL
 	li r1, 11
 	la r2, .mtcr_user
 	call check_log
@@ -183,7 +183,7 @@ user_trap:
 	bne r20, r27, .back
 	li r27, SYS_EXIT
 	bne r1, r27, .back
-	andi r27, r23, STATUS_IE | STATUS_PIE
+	andi r27, r23, STATUS_IE | STATUS_PIE | STATUS_EXL
 	mtcr status, r27            ; PUM = 0: IRET stays in supervisor mode
 	mv r26, r25
 .back:

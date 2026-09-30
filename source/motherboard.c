@@ -60,6 +60,13 @@ static uint32_t motherboard_io_mask(const uint8_t size) {
 	return size == 4 ? UINT32_MAX : (1u << (size * 8)) - 1;
 }
 
+// The disk controller in the I/O page at page, NULL if it holds none.
+static disk_t* motherboard_find_disk(motherboard_t* mb, const uint32_t page) {
+	const uint32_t index = (page - MB_DISK0_BASE) / MB_IO_PAGE_SIZE;
+	if (page < MB_DISK0_BASE || index >= DISK_COUNT) return NULL;
+	return mb->disk[index];
+}
+
 // returns true on bus error
 static bool motherboard_io_read(motherboard_t* mb, const uint32_t address,
 								const uint8_t size, uint32_t* value) {
@@ -68,6 +75,8 @@ static bool motherboard_io_read(motherboard_t* mb, const uint32_t address,
 	if (offset & 3) return true;
 
 	bool fail = true;
+	disk_t* disk = motherboard_find_disk(mb, page);
+	if (disk) fail = disk_read(disk, offset, size, value);
 	switch (page) {
 		case MB_PIC_BASE:
 			fail = pic_read(mb->pic, offset, size, value);
@@ -96,6 +105,8 @@ static bool motherboard_io_write(motherboard_t* mb, const uint32_t address,
 	const uint32_t offset = address & (MB_IO_PAGE_SIZE - 1);
 	if (offset & 3) return true;
 
+	disk_t* disk = motherboard_find_disk(mb, page);
+	if (disk) return disk_write(disk, offset, size, value);
 	switch (page) {
 		case MB_PIC_BASE:
 			return pic_write(mb->pic, offset, size, value);
@@ -153,6 +164,17 @@ static bool motherboard_bus_read(void* ctx, const uint32_t address,
 	return true;
 }
 
+// Instruction fetches and page table walks: like a read, but the I/O
+// region is a bus error, so a fetch down a mispredicted path never has a
+// device's side effects (e.g. popping the UART FIFO).
+// returns true on bus error
+static bool motherboard_bus_fetch(void* ctx, const uint32_t address,
+								  const uint8_t size, uint32_t* value) {
+	if (address >= MB_IO_BASE && address - MB_IO_BASE < MB_IO_SIZE)
+		return true;
+	return motherboard_bus_read(ctx, address, size, value);
+}
+
 // returns true on bus error
 static bool motherboard_bus_write(void* ctx, const uint32_t address,
 								  const uint8_t size, const uint32_t value) {
@@ -179,6 +201,21 @@ static bool motherboard_bus_write(void* ctx, const uint32_t address,
 	return true;
 }
 
+// DMA from devices: RAM only, ROM and the I/O region are bus errors.
+// returns true on bus error
+static bool motherboard_dma_read(void* ctx, const uint32_t address,
+								 const uint8_t size, uint32_t* value) {
+	if (address >= MB_IO_BASE) return true;
+	return motherboard_bus_read(ctx, address, size, value);
+}
+
+// returns true on bus error
+static bool motherboard_dma_write(void* ctx, const uint32_t address,
+								  const uint8_t size, const uint32_t value) {
+	if (address >= MB_IO_BASE) return true;
+	return motherboard_bus_write(ctx, address, size, value);
+}
+
 motherboard_t* motherboard_create(void) {
 	config_t* cfg = config_get();
 
@@ -191,6 +228,7 @@ motherboard_t* motherboard_create(void) {
 	const bus_t bus = {
 		.ctx = mb,
 		.read = motherboard_bus_read,
+		.fetch = motherboard_bus_fetch,
 		.write = motherboard_bus_write,
 	};
 	mb->cpu = cpu_create(bus);
@@ -202,13 +240,26 @@ motherboard_t* motherboard_create(void) {
 	mb->pit = pit_create(mb->pic, MB_IRQ_PIT, (uint32_t)mb->clock->rate);
 	mb->power = power_create();
 
+	const bus_t dma = {
+		.ctx = mb,
+		.read = motherboard_dma_read,
+		.fetch = motherboard_dma_read,
+		.write = motherboard_dma_write,
+	};
+	for (int i = 0; i < DISK_COUNT; i++)
+		mb->disk[i] = disk_create(
+				mb->pic, MB_IRQ_DISK0 + i, dma, cfg->hdd_path[i]);
+
 	for (int i = 0; i < RAM_SLOT_COUNT; i++) {
 		mb->ram_slot[i].ram = NULL;
 		mb->ram_slot[i].installed = false;
 	}
 
-	if (motherboard_install_ram_slot(mb, 0, 1024 * 1024 * 1))
-		error("Failed to install RAM slot %i.", 0);
+	for (int i = 0; i < RAM_SLOT_COUNT; i++) {
+		if (!cfg->ram_size[i]) continue;
+		if (motherboard_install_ram_slot(mb, i, cfg->ram_size[i]))
+			error("Failed to install RAM slot %i.", i);
+	}
 
 	if (motherboard_ram_slots_check(mb)) error("Can't run without RAM.");
 
@@ -220,6 +271,13 @@ motherboard_t* motherboard_create(void) {
 
 void motherboard_destroy(motherboard_t* mb) {
 	if (!mb) return;
+	for (int i = 0; i < DISK_COUNT; i++) {
+		if (mb->disk[i]) {
+			disk_destroy(mb->disk[i]);
+			mb->disk[i] = NULL;
+		}
+	}
+
 	if (mb->power) {
 		power_destroy(mb->power);
 		mb->power = NULL;
@@ -279,12 +337,14 @@ void motherboard_reset(motherboard_t* mb) {
 	uart_reset(mb->uart);
 	pit_reset(mb->pit);
 	power_reset(mb->power);
+	for (int i = 0; i < DISK_COUNT; i++) disk_reset(mb->disk[i]);
 	pic_reset(mb->pic);
 }
 
 void motherboard_tick(motherboard_t* mb) {
 	if (!mb) return;
 	pit_tick(mb->pit);
+	for (int i = 0; i < DISK_COUNT; i++) disk_tick(mb->disk[i]);
 	cpu_set_irq(mb->cpu, pic_irq(mb->pic));
 	cpu_update(mb->cpu);
 

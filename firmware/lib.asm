@@ -91,7 +91,7 @@ print_int:
 
 ; show(r1 = name, r2 = value): "name      = value (0xVALUE)\n"
 show:
-	addi r30, r30, -12
+	addi r30, r30, -16
 	sw ra, 8(r30)
 	sw r2, 4(r30)
 	sw r1, 0(r30)
@@ -113,12 +113,12 @@ show:
 	la r1, s_hex_close
 	call puts
 	lw ra, 8(r30)
-	addi r30, r30, 12
+	addi r30, r30, 16
 	ret
 
 ; print_array(r1 = words, r2 = count): signed values on one line
 print_array:
-	addi r30, r30, -12
+	addi r30, r30, -16
 	sw ra, 8(r30)
 	sw r10, 4(r30)
 	sw r11, 0(r30)
@@ -139,7 +139,7 @@ print_array:
 	lw r11, 0(r30)
 	lw r10, 4(r30)
 	lw ra, 8(r30)
-	addi r30, r30, 12
+	addi r30, r30, 16
 	ret
 
 ; rdcycle() -> r1 = CYCLE, r2 = CYCLEH, both from the same moment
@@ -161,6 +161,23 @@ memcpy:
 	addi r1, r1, 4
 	bltu r2, r3, .next
 .done:
+	ret
+
+; disk_io(r1 = controller, r2 = command, r3 = first sector, r4 = count,
+;         r5 = physical RAM address) -> r1 = ERROR, 0 on success
+; Runs a DISK_READ or DISK_WRITE and waits for it by polling STATUS.
+disk_io:
+	sw r3, DISK_SECTOR(r1)
+	sw r4, DISK_COUNT(r1)
+	sw r5, DISK_ADDRESS(r1)
+	sw r2, DISK_COMMAND(r1)
+.wait:
+	lw r2, DISK_STATUS(r1)
+	andi r2, r2, DISK_DONE
+	beqz r2, .wait
+	li r2, DISK_DONE
+	sw r2, DISK_STATUS(r1)      ; acknowledge: drops the IRQ line
+	lw r1, DISK_ERROR(r1)
 	ret
 
 ; sort(r1 = words, r2 = count): bubble sort, signed, ascending

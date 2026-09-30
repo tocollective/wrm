@@ -11,6 +11,8 @@ KBD             = 0xFD001000
 UART            = 0xFD002000
 TIMER           = 0xFD003000
 POWER           = 0xFD004000
+DISK0           = 0xFD005000
+DISK1           = 0xFD006000
 
 PIC_PENDING     = 0x00
 PIC_ENABLE      = 0x04
@@ -19,6 +21,8 @@ PIC_CLAIM       = 0x0C
 IRQ_KBD         = 0
 IRQ_UART        = 1
 IRQ_TIMER       = 2
+IRQ_DISK0       = 3
+IRQ_DISK1       = 4
 
 KBD_STATUS      = 0x00
 KBD_DATA        = 0x04
@@ -48,8 +52,31 @@ TIMER_EXPIRED   = 1 << 0
 POWER_OFF       = 0x00              ; write the exit code
 POWER_RESET     = 0x04
 
+DISK_STATUS     = 0x00
+DISK_SECTORS    = 0x04
+DISK_SECTOR     = 0x08
+DISK_COUNT      = 0x0C
+DISK_ADDRESS    = 0x10
+DISK_COMMAND    = 0x14
+DISK_ERROR      = 0x18
+DISK_PRESENT    = 1 << 0            ; STATUS bits
+DISK_READONLY   = 1 << 1
+DISK_BUSY       = 1 << 2
+DISK_DONE       = 1 << 3
+DISK_FAILED     = 1 << 4
+DISK_READ       = 1                 ; commands
+DISK_WRITE      = 2
+DISK_ERR_COMMAND  = 1               ; ERROR codes
+DISK_ERR_NO_DISK  = 2
+DISK_ERR_RANGE    = 3
+DISK_ERR_ADDRESS  = 4
+DISK_ERR_READONLY = 5
+DISK_ERR_MEDIA    = 6
+SECTOR_SIZE     = 512
+
 STATUS_IE       = 1 << 0
 STATUS_PUM      = 1 << 3            ; user mode after IRET
+STATUS_EXL      = 1 << 4            ; in the handler: set on entry and at reset
 
 CAUSE_SYSCALL   = 12
 
@@ -65,13 +92,34 @@ SUPERPAGE_SIZE  = 0x400000
 DIR_IO          = (PIC >> 22) * 4       ; directory entry offsets
 DIR_ROM         = (ROM_BASE >> 22) * 4
 
+; boot protocol (docs/SPECIFICATION.md#boot-protocol)
+BOOT_MAGIC      = 0x424D5257        ; "WRMB", first word of a boot image
+BOOT_HDR_MAGIC   = 0x00             ; boot image header, at the load address
+BOOT_HDR_SECTORS = 0x04             ; image size in sectors, from sector 0
+BOOT_HDR_ENTRY   = 0x08             ; entry point, offset from BOOT_LOAD
+BOOT_HDR_FLAGS   = 0x0C             ; must be 0
+BOOT_INFO_MAGIC = 0x4F464E49        ; "INFO"
+BI_MAGIC        = 0x00              ; boot info block, r1 at the entry
+BI_SIZE         = 0x04              ; bytes of the block: later fields are new
+BI_RAM_SIZE     = 0x08
+BI_DISK         = 0x0C              ; the boot disk's controller
+BI_DISK_SECTORS = 0x10
+BI_IMAGE        = 0x14              ; = BOOT_LOAD
+BI_IMAGE_SIZE   = 0x18
+BI_CLOCK        = 0x1C              ; ticks per second
+BOOT_INFO_SIZE  = 0x20
+BOOT_INFO       = 0x00001000
+BOOT_STACK_TOP  = 0x00010000
+BOOT_LOAD       = 0x00010000
+
 ; USB HID usage IDs (page 0x07)
 HID_A           = 0x04
 HID_ESCAPE      = 0x29
 
 ; ---- RAM layout (slot 0, at least 1MB) --------------------------------------
 ; Variables sit below 8KB, so they are reached as offset(r0) with no base
-; register at all.
+; register at all. Booting from disk (BOOT_* above) uses the same RAM; the
+; demos only run if it didn't boot.
 
 VAR_IRQ_COUNT   = 0x0100
 VAR_KEY_COUNT   = 0x0104
