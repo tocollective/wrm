@@ -71,6 +71,29 @@ set_target_properties(${PROJECT_NAME} PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/bin/$<0:>"
 )
 
+# Tests: one CTest test per test ROM (tests/<group>/<name>.asm), each
+# assembled and run headless by tests/run.py
+if(NOT EMSCRIPTEN)
+    find_package(Python3 COMPONENTS Interpreter)
+    if(Python3_FOUND)
+        enable_testing()
+        file(GLOB WRM081632_TESTS CONFIGURE_DEPENDS
+            "${CMAKE_CURRENT_SOURCE_DIR}/tests/*/*.asm")
+        list(FILTER WRM081632_TESTS EXCLUDE REGEX "/tests/common/")
+        foreach(test ${WRM081632_TESTS})
+            file(RELATIVE_PATH name "${CMAKE_CURRENT_SOURCE_DIR}/tests" "${test}")
+            string(REGEX REPLACE "\\.asm$" "" name "${name}")
+            add_test(NAME ${name}
+                COMMAND "${Python3_EXECUTABLE}"
+                    "${CMAKE_CURRENT_SOURCE_DIR}/tests/run.py"
+                    --emulator "$<TARGET_FILE:${PROJECT_NAME}>"
+                    --jobs 1 "${test}")
+        endforeach()
+    else()
+        message(STATUS "Python 3 not found: tests are disabled")
+    endif()
+endif()
+
 #
 if(EMSCRIPTEN)
     # The browser has no filesystem of its own: the firmware is packed into

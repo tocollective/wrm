@@ -7,6 +7,10 @@
 
 #define CPU_GPR_COUNT 32
 #define CPU_GPR_ZERO 0
+#define CPU_GPR_RA 1 // return address
+#define CPU_GPR_SP 2 // stack pointer
+#define CPU_GPR_GP 3 // global pointer
+#define CPU_GPR_FP 4 // global pointer
 #define CPU_PC_START 0xFE000000 // reset vector: start of ROM (MB_ROM_BASE)
 
 // Control registers, accessed with MFCR/MTCR (see docs/INSTRUCTIONS.md)
@@ -30,7 +34,7 @@ typedef enum cpu_cr {
 #define CPU_STATUS_PIE 0x02 // IE before the handler was entered
 #define CPU_STATUS_UM 0x04 // user mode, 0 = supervisor
 #define CPU_STATUS_PUM 0x08 // UM before the handler was entered
-#define CPU_STATUS_MASK \
+#define CPU_STATUS_MASK                                                        \
 	(CPU_STATUS_IE | CPU_STATUS_PIE | CPU_STATUS_UM | CPU_STATUS_PUM)
 
 // CAUSE values (see docs/INSTRUCTIONS.md#exceptions)

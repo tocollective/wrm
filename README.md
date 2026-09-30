@@ -34,6 +34,29 @@ mode it also quits when the CPU halts:
 
 With a window, a halted machine keeps the window open.
 
+## Tests
+
+```sh
+python3 tests/run.py [--emulator PATH] [tests/isa/alu.asm ...]
+ctest --test-dir build --output-on-failure
+```
+
+Each `tests/<group>/<name>.asm` is a test ROM: `tests/run.py` assembles it
+and runs it with `--headless` (by default with `bin/wrm081632`); CTest
+runs every ROM through it as a test of its own.
+
+| Group      | What                                                        |
+|------------|-------------------------------------------------------------|
+| `isa`      | every instruction, control registers, exceptions, user mode |
+| `pipeline` | forwarding and stalls, cycle timing, precise faults and interrupts |
+| `mmu`      | pages and superpages, permissions, TLB invalidation, `U`    |
+
+A test includes `tests/common/harness.asm` and defines `test_main`. It
+sets `r28` to the number of each check and ends with `j pass`, or
+branches to `fail`, which prints the check number and `r1`–`r4` and
+powers off with the check number as the exit code. A test passes only
+if it powers off with `0` after printing `PASS`.
+
 ## Web (Emscripten)
 
 ```sh

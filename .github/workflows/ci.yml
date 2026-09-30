@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      # The tests run headless: on Linux SDL is built without X11/Wayland,
+      # so no desktop development packages are needed.
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          ${{ runner.os == 'Linux' && '-DSDL_UNIX_CONSOLE_BUILD=ON' || '' }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Assemble the demo firmware
+        run: python3 tools/asm.py firmware/main.asm -o build/firmware.rom
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --parallel 4
