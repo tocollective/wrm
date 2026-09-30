@@ -219,7 +219,7 @@ window. There is no text mode; text is drawn from a font in VRAM with
 | `0x48` | `DST_BASE`      | RW     | destination surface: VRAM offset of its first line |
 | `0x4C` | `DST_PITCH`     | RW     | destination surface: bytes per line           |
 | `0x50` | `DST_XY`        | RW     | destination pixel: bits 0–15 = x, bits 16–31 = y |
-| `0x54` | `SRC_BASE`      | RW     | source surface: VRAM offset of its first line |
+| `0x54` | `SRC_BASE`      | RW     | source surface: VRAM offset of its first line, or its physical address for `EXPAND` from memory |
 | `0x58` | `SRC_PITCH`     | RW     | source surface: bytes per line                |
 | `0x5C` | `SRC_XY`        | RW     | source pixel: bits 0–15 = x, bits 16–31 = y   |
 | `0x60` | `SIZE`          | RW     | rectangle: bits 0–15 = width, bits 16–31 = height, in pixels |
@@ -275,14 +275,14 @@ the current mode, except for the source of `EXPAND`, which is 1 bpp.
 
 Writing `COMMAND` clears `DONE` and `ERROR` and runs the command in its
 bits 0–7. `FILL`, `COPY` and `EXPAND` finish at once, in the same store:
-`DONE` is set when the store completes. `LOAD` and `STORE` run by DMA,
-see below.
+`DONE` is set when the store completes. `LOAD`, `STORE` and `EXPAND` from
+memory run by DMA, see below.
 
 | `COMMAND` | Name     | Operation                                        |
 |-----------|----------|--------------------------------------------------|
 | `1`       | `FILL`   | the destination rectangle takes the value `FG`   |
 | `2`       | `COPY`   | the source rectangle is copied to the destination rectangle |
-| `3`       | `EXPAND` | the source rectangle, 1 bpp, is drawn at the destination: 1 bits as `FG`, 0 bits as `BG`; with bit 8 (`TRANSPARENT`) set 0 bits leave the destination alone |
+| `3`       | `EXPAND` | the source rectangle, 1 bpp, is drawn at the destination: 1 bits as `FG`, 0 bits as `BG`; with bit 8 (`TRANSPARENT`) set 0 bits leave the destination alone; with bit 9 (`MEMORY`) set the source is in RAM or ROM (see [EXPAND from memory](#expand-from-memory)) |
 | `4`       | `LOAD`   | DMA: `COUNT` bytes from memory at `ADDRESS` to VRAM at `DST_BASE` |
 | `5`       | `STORE`  | DMA: `COUNT` bytes from VRAM at `SRC_BASE` to RAM at `ADDRESS` |
 
@@ -308,6 +308,25 @@ can't reach (the I/O region, ROM for `STORE`, an unmapped address) stops
 the transfer with error 3; `ADDRESS` then points at that word. The DMA
 uses physical addresses and ignores the MMU.
 
+#### EXPAND from memory
+
+With `COMMAND` bit 9 set, `EXPAND` reads its 1 bpp source by DMA from RAM
+or ROM, e.g. a font in the firmware, without loading it into VRAM first.
+`SRC_BASE` is then the physical address of the source's first line;
+`SRC_PITCH` and `SRC_XY` mean the same as in VRAM, and the lines can
+start at any byte and bit. The source lines must fit in `SRC_PITCH`
+(error 2); there is no other check on the source.
+
+The command sets `BUSY` and fetches the source a line at a time, starting
+with the next tick: one word per tick, all the aligned words that hold
+the line's bits (an 8-pixel line within a word takes one tick). When the
+last word of a line is in, the line is drawn at the destination. After
+the last line `BUSY` is cleared and `DONE` set. The destination uses the
+depth the mode had when the command started. A word the DMA can't reach
+(the I/O region, an unmapped address, past `0xFFFFFFFF`) stops the
+command with error 3; the lines before it stay drawn. The engine's
+registers keep their values.
+
 While `BUSY` is set, writes to `COMMAND` and the engine's registers
 (`DST_*`, `SRC_*`, `SIZE`, `FG`, `BG`, `ADDRESS`, `COUNT`) are ignored.
 The other registers, the mode and the palette can be changed at any time.
@@ -316,7 +335,7 @@ The other registers, the mode and the palette can be changed at any time.
 |---------|----------------------------------------------------------|
 | `1`     | unknown command                                          |
 | `2`     | a rectangle runs past its pitch or the end of VRAM, or a DMA range runs past the end of VRAM |
-| `3`     | `ADDRESS`, the VRAM offset or `COUNT` of a DMA command is not a multiple of 4, or the DMA reached memory it can't |
+| `3`     | `ADDRESS`, the VRAM offset or `COUNT` of `LOAD` or `STORE` is not a multiple of 4, or the DMA reached memory it can't |
 
 `DONE` and `VBLANK` share IRQ line 5: it is asserted while `DONE` is set
 and `CONTROL` bit 1 is set, or `VBLANK` is set and `CONTROL` bit 2 is
@@ -329,7 +348,8 @@ A font is a 1 bpp bitmap in VRAM, loaded once with `LOAD` from ROM or
 RAM (a glyph cache). With glyphs of 8×16 pixels stored one after
 another, a byte per line, character `c` is drawn by one `EXPAND` with
 `SRC_BASE` = font + 16 × `c`, `SRC_PITCH` = 1, `SRC_XY` = 0 and `SIZE` =
-8×16, in any depth. The firmware keeps its font there, see
+8×16, in any depth. The same `EXPAND` with `MEMORY` draws straight from a
+font in RAM or ROM, at 16 ticks a character. The firmware keeps its font there, see
 [State at the entry point](#state-at-the-entry-point).
 
 ## Reset

@@ -1,6 +1,6 @@
 ; ============================================================================
 ;  Video card: registers, modes, palette, the drawing engine in every depth,
-;  DMA from ROM and to RAM, errors, VBLANK, the IRQ line
+;  DMA from ROM and to RAM, EXPAND from memory, errors, VBLANK, the IRQ line
 ; ============================================================================
 ; VRAM is zero at power-on. The engine's results are read back with STORE.
 
@@ -273,6 +273,97 @@ test_main:
 	lw r4, BUF + 4(r0)
 	li r3, 0x33223322
 	bne r4, r3, fail
+
+	; ---- EXPAND from memory: the bitmap in ROM, 8x2 pixels as in 32-34
+	li r28, 42
+	li r1, VIDEO_640X480 | VIDEO_8BPP
+	sw r1, VIDEO_MODE(r10)
+	la r1, bitmap
+	sw r1, VIDEO_SRC_BASE(r10)
+	li r1, 1
+	sw r1, VIDEO_SRC_PITCH(r10)
+	sw r0, VIDEO_SRC_XY(r10)
+	li r1, 0x6000
+	sw r1, VIDEO_DST_BASE(r10)
+	li r1, 8
+	sw r1, VIDEO_DST_PITCH(r10)
+	sw r0, VIDEO_DST_XY(r10)
+	li r1, 2 << 16 | 8
+	sw r1, VIDEO_SIZE(r10)
+	li r1, 0x11
+	sw r1, VIDEO_FG(r10)
+	li r1, 0x22
+	sw r1, VIDEO_BG(r10)
+	li r1, VIDEO_EXPAND | VIDEO_MEMORY
+	sw r1, VIDEO_COMMAND(r10)
+	lw r4, VIDEO_STATUS(r10)    ; runs by DMA, a word per tick
+	li r3, VIDEO_BUSY
+	bne r4, r3, fail
+	li r28, 43
+	call wait_done
+	bnez r1, fail
+	li r1, 0x6000
+	li r2, 16
+	call store
+	bnez r1, fail
+	li r28, 44
+	lw r4, BUF + 0(r0)
+	li r3, 0x22112211
+	bne r4, r3, fail
+	lw r4, BUF + 4(r0)
+	li r3, 0x11221122
+	bne r4, r3, fail
+	lw r4, BUF + 8(r0)
+	li r3, 0x11112222
+	bne r4, r3, fail
+	lw r4, BUF + 12(r0)
+	li r3, 0x22221111
+	bne r4, r3, fail
+
+	li r28, 45                  ; any byte and bit, across a word boundary
+	la r1, bitmap + 3
+	sw r1, VIDEO_SRC_BASE(r10)
+	li r1, 4                    ; 0x05 0xA0 from bit 4: 0101 1010
+	sw r1, VIDEO_SRC_XY(r10)
+	li r1, 0x6010
+	sw r1, VIDEO_DST_BASE(r10)
+	li r1, 1 << 16 | 8
+	sw r1, VIDEO_SIZE(r10)
+	li r1, VIDEO_EXPAND | VIDEO_MEMORY
+	sw r1, VIDEO_COMMAND(r10)
+	call wait_done
+	bnez r1, fail
+	li r1, 0x6010
+	li r2, 8
+	call store
+	bnez r1, fail
+	li r28, 46
+	lw r4, BUF + 0(r0)
+	li r3, 0x11221122
+	bne r4, r3, fail
+	lw r4, BUF + 4(r0)
+	li r3, 0x22112211
+	bne r4, r3, fail
+
+	li r28, 47                  ; the source lines must fit the pitch
+	la r1, bitmap
+	sw r1, VIDEO_SRC_BASE(r10)
+	li r1, 1
+	sw r1, VIDEO_SRC_XY(r10)    ; 1 + 8 bits in a byte
+	li r1, VIDEO_EXPAND | VIDEO_MEMORY
+	sw r1, VIDEO_COMMAND(r10)
+	lw r4, VIDEO_ERROR(r10)
+	li r3, VIDEO_ERR_RANGE
+	bne r4, r3, fail
+	li r28, 48                  ; the I/O region is out of reach
+	li r1, UART
+	sw r1, VIDEO_SRC_BASE(r10)
+	sw r0, VIDEO_SRC_XY(r10)
+	li r1, VIDEO_EXPAND | VIDEO_MEMORY
+	sw r1, VIDEO_COMMAND(r10)
+	call wait_done
+	li r3, VIDEO_ERR_ADDRESS
+	bne r1, r3, fail
 
 	; ---- pixel packing in the other depths
 	li r28, 50                  ; 4 bpp: pixels 1-2 of 0x4000
@@ -548,4 +639,4 @@ fill_line:
 
 	.align 4
 bitmap:
-	.db 0xA5, 0x3C, 0x00, 0x00
+	.db 0xA5, 0x3C, 0x00, 0x05, 0xA0, 0x00, 0x00, 0x00

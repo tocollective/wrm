@@ -123,6 +123,7 @@ VIDEO_EXPAND    = 3
 VIDEO_LOAD      = 4
 VIDEO_STORE     = 5
 VIDEO_TRANSPARENT = 1 << 8          ; EXPAND: 0 bits are left alone
+VIDEO_MEMORY    = 1 << 9            ; EXPAND: the bitmap is in RAM or ROM
 VIDEO_ERR_COMMAND = 1               ; ERROR codes
 VIDEO_ERR_RANGE   = 2
 VIDEO_ERR_ADDRESS = 3

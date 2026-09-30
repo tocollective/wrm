@@ -66,10 +66,11 @@
 
 #define VIDEO_COMMAND_OP_MASK 0xFF
 #define VIDEO_COMMAND_TRANSPARENT 0x100 // EXPAND leaves 0 bits alone
+#define VIDEO_COMMAND_MEMORY 0x200 // EXPAND reads the bitmap from memory
 
 #define VIDEO_COMMAND_FILL 1 // rectangle of FG
 #define VIDEO_COMMAND_COPY 2 // VRAM rectangle to VRAM rectangle
-#define VIDEO_COMMAND_EXPAND 3 // 1bpp VRAM bitmap to FG/BG pixels
+#define VIDEO_COMMAND_EXPAND 3 // 1bpp bitmap to FG/BG pixels
 #define VIDEO_COMMAND_LOAD 4 // DMA: memory to VRAM
 #define VIDEO_COMMAND_STORE 5 // DMA: VRAM to RAM
 
@@ -78,6 +79,10 @@
 #define VIDEO_ERROR_RANGE 2 // runs past the pitch or the end of VRAM
 #define VIDEO_ERROR_ADDRESS 3 // unaligned DMA, or DMA outside RAM (and ROM)
 
+// EXPAND from memory fetches a line at a time: the aligned words that hold
+// up to 0xFFFF bits starting at any bit of a byte
+#define VIDEO_LINE_BUFFER_SIZE (0x10000 / 8 + 8)
+
 // Video card with its own VRAM, which the CPU can't reach: it draws through
 // the drawing engine and moves data by DMA. The frame is scanned out of
 // VRAM once per frame at VBLANK. IRQ line is asserted while DONE or VBLANK
@@ -85,7 +90,7 @@
 typedef struct videocard {
 	pic_t* pic;
 	uint8_t irq;
-	bus_t dma; // LOAD reads RAM or ROM, STORE writes RAM
+	bus_t dma; // LOAD and EXPAND read RAM or ROM, STORE writes RAM
 	uint8_t* vram;
 
 	uint32_t control;
@@ -115,6 +120,15 @@ typedef struct videocard {
 	uint32_t command; // the running one
 	bool busy;
 	bool done;
+
+	// EXPAND from memory: the source line being fetched
+	uint32_t line; // of the rectangle
+	uint32_t line_bpp; // destination depth, the one at the start
+	uint64_t line_address; // physical address of the next word
+	uint32_t line_bytes; // whole words that hold the line's bits
+	uint32_t line_fetched; // bytes of them already in the buffer
+	uint32_t line_bit; // the bit of the first pixel in the buffer
+	uint8_t line_buffer[VIDEO_LINE_BUFFER_SIZE];
 
 	// Monitor side: the last frame scanned out, XRGB8888. Only kept up to
 	// date while a display is connected.

@@ -92,6 +92,12 @@ void videocard_reset(videocard_t* videocard) {
 	videocard->command = 0;
 	videocard->busy = false;
 	videocard->done = false;
+	videocard->line = 0;
+	videocard->line_bpp = 0;
+	videocard->line_address = 0;
+	videocard->line_bytes = 0;
+	videocard->line_fetched = 0;
+	videocard->line_bit = 0;
 	videocard_update_irq(videocard);
 }
 
@@ -202,13 +208,20 @@ static uint64_t surface_bit(const surface_t* surface, const uint32_t i,
 	return line * 8 + (uint64_t)(surface->x + i) * bpp;
 }
 
+// Whether lines of w pixels from x stay within the pitch.
+static bool surface_fits_pitch(const surface_t* surface, const uint32_t w,
+							   const uint32_t bpp) {
+	const uint64_t line_bits = ((uint64_t)surface->x + w) * bpp;
+	return line_bits <= (uint64_t)surface->pitch * 8;
+}
+
 // Whether w x h pixels fit: no line runs past the pitch, and the last one
 // ends in VRAM. An empty rectangle always fits.
 static bool surface_fits(const surface_t* surface, const uint32_t w,
 						 const uint32_t h, const uint32_t bpp) {
 	if (w == 0 || h == 0) return true;
+	if (!surface_fits_pitch(surface, w, bpp)) return false;
 	const uint64_t line_bits = ((uint64_t)surface->x + w) * bpp;
-	if (line_bits > (uint64_t)surface->pitch * 8) return false;
 	const uint64_t end = (uint64_t)surface->base
 					   + ((uint64_t)surface->y + h - 1) * surface->pitch
 					   + (line_bits + 7) / 8;
@@ -261,8 +274,21 @@ static uint32_t videocard_copy(videocard_t* videocard) {
 	return VIDEO_ERROR_NONE;
 }
 
-// The source is a 1 bpp bitmap: 1 bits become FG, 0 bits BG, or are
-// skipped with TRANSPARENT.
+// A bit of the 1 bpp source of EXPAND: 1 bits become FG, 0 bits BG, or
+// are skipped with TRANSPARENT.
+static void videocard_expand_pixel(videocard_t* videocard,
+								   const surface_t* dst, const uint32_t i,
+								   const uint32_t j, const uint32_t bpp,
+								   const bool set) {
+	const bool transparent = videocard->command & VIDEO_COMMAND_TRANSPARENT;
+	if (!set && transparent) return;
+	videocard_poke(videocard,
+				   surface_bit(dst, i, j, bpp),
+				   bpp,
+				   set ? videocard->fg : videocard->bg);
+}
+
+// EXPAND from VRAM
 static uint32_t videocard_expand(videocard_t* videocard) {
 	const uint32_t bpp = videocard_bpp(videocard);
 	const uint32_t w = videocard->size & 0xFFFF;
@@ -272,16 +298,11 @@ static uint32_t videocard_expand(videocard_t* videocard) {
 	if (!surface_fits(&src, w, h, 1) || !surface_fits(&dst, w, h, bpp))
 		return VIDEO_ERROR_RANGE;
 
-	const bool transparent = videocard->command & VIDEO_COMMAND_TRANSPARENT;
 	for (uint32_t j = 0; j < h; j++) {
 		for (uint32_t i = 0; i < w; i++) {
 			const bool set = videocard_peek(
 					videocard, surface_bit(&src, i, j, 1), 1);
-			if (!set && transparent) continue;
-			videocard_poke(videocard,
-						   surface_bit(&dst, i, j, bpp),
-						   bpp,
-						   set ? videocard->fg : videocard->bg);
+			videocard_expand_pixel(videocard, &dst, i, j, bpp, set);
 		}
 	}
 	return VIDEO_ERROR_NONE;
@@ -311,7 +332,90 @@ static void videocard_start_dma(videocard_t* videocard, const bool load) {
 	}
 }
 
-// Drawing commands finish at once; LOAD and STORE run on their own.
+// ---- EXPAND from memory ----------------------------------------------------
+// SRC_BASE is a physical address. The card fetches the source a line at a
+// time, one word per tick: the aligned words that hold the line's bits.
+// When the last one is in, it draws the line.
+
+// Sets up the fetch of the current line; false if it runs past the top of
+// the address space.
+static bool videocard_line_start(videocard_t* videocard) {
+	const uint32_t w = videocard->size & 0xFFFF;
+	const surface_t src = videocard_src(videocard);
+	const uint64_t line = (uint64_t)src.base
+						+ ((uint64_t)src.y + videocard->line) * src.pitch;
+	const uint64_t first = line + src.x / 8; // bytes of the line's bits
+	const uint64_t last = line + (src.x + w - 1) / 8;
+	const uint64_t start = first & ~(uint64_t)3;
+	const uint64_t end = (last | 3) + 1;
+	if (end > (uint64_t)UINT32_MAX + 1) return false;
+
+	videocard->line_address = start;
+	videocard->line_bytes = (uint32_t)(end - start);
+	videocard->line_fetched = 0;
+	videocard->line_bit = (uint32_t)(first - start) * 8 + src.x % 8;
+	return true;
+}
+
+static void videocard_start_memory_expand(videocard_t* videocard) {
+	const uint32_t bpp = videocard_bpp(videocard);
+	const uint32_t w = videocard->size & 0xFFFF;
+	const uint32_t h = videocard->size >> 16;
+	const surface_t src = videocard_src(videocard);
+	const surface_t dst = videocard_dst(videocard);
+	if (!surface_fits_pitch(&src, w, 1) || !surface_fits(&dst, w, h, bpp))
+		videocard_finish(videocard, VIDEO_ERROR_RANGE);
+	else if (w == 0 || h == 0)
+		videocard_finish(videocard, VIDEO_ERROR_NONE);
+	else {
+		videocard->line = 0;
+		videocard->line_bpp = bpp; // a mode change doesn't reach it
+		if (!videocard_line_start(videocard)) {
+			videocard_finish(videocard, VIDEO_ERROR_ADDRESS);
+			return;
+		}
+		videocard->busy = true;
+		videocard_update_irq(videocard);
+	}
+}
+
+// one word per tick; draws the line once it is complete
+static void videocard_line_tick(videocard_t* videocard) {
+	uint32_t value = 0;
+	const uint32_t address = (uint32_t)videocard->line_address;
+	if (videocard->dma.read(videocard->dma.ctx, address, 4, &value)) {
+		videocard_finish(videocard, VIDEO_ERROR_ADDRESS);
+		return;
+	}
+	uint8_t* p = &videocard->line_buffer[videocard->line_fetched];
+	p[0] = value & 0xFF;
+	p[1] = (value >> 8) & 0xFF;
+	p[2] = (value >> 16) & 0xFF;
+	p[3] = value >> 24;
+	videocard->line_address += 4;
+	videocard->line_fetched += 4;
+	if (videocard->line_fetched < videocard->line_bytes) return;
+
+	const uint32_t w = videocard->size & 0xFFFF;
+	const uint32_t h = videocard->size >> 16;
+	const surface_t dst = videocard_dst(videocard);
+	for (uint32_t i = 0; i < w; i++) {
+		const uint32_t bit = videocard->line_bit + i;
+		const uint8_t byte = videocard->line_buffer[bit >> 3];
+		const bool set = (byte >> (7 - (bit & 7))) & 1;
+		videocard_expand_pixel(
+				videocard, &dst, i, videocard->line, videocard->line_bpp, set);
+	}
+
+	videocard->line++;
+	if (videocard->line == h)
+		videocard_finish(videocard, VIDEO_ERROR_NONE);
+	else if (!videocard_line_start(videocard))
+		videocard_finish(videocard, VIDEO_ERROR_ADDRESS);
+}
+
+// Drawing commands finish at once, except EXPAND from memory; LOAD and
+// STORE run on their own.
 static void videocard_start(videocard_t* videocard, const uint32_t command) {
 	videocard->command = command;
 	videocard->done = false;
@@ -325,7 +429,10 @@ static void videocard_start(videocard_t* videocard, const uint32_t command) {
 			videocard_finish(videocard, videocard_copy(videocard));
 			break;
 		case VIDEO_COMMAND_EXPAND:
-			videocard_finish(videocard, videocard_expand(videocard));
+			if (command & VIDEO_COMMAND_MEMORY)
+				videocard_start_memory_expand(videocard);
+			else
+				videocard_finish(videocard, videocard_expand(videocard));
 			break;
 		case VIDEO_COMMAND_LOAD:
 			videocard_start_dma(videocard, true);
@@ -420,7 +527,11 @@ static void videocard_vblank(videocard_t* videocard) {
 }
 
 void videocard_tick(videocard_t* videocard) {
-	if (videocard->busy) videocard_dma_tick(videocard);
+	const uint32_t op = videocard->command & VIDEO_COMMAND_OP_MASK;
+	if (videocard->busy && op == VIDEO_COMMAND_EXPAND)
+		videocard_line_tick(videocard);
+	else if (videocard->busy)
+		videocard_dma_tick(videocard);
 	if (++videocard->ticks < videocard->ticks_per_frame) return;
 	videocard->ticks = 0;
 	videocard_vblank(videocard);
