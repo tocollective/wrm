@@ -14,6 +14,8 @@ POWER           = 0xFD004000
 DISK0           = 0xFD005000
 DISK1           = 0xFD006000
 VIDEO           = 0xFD007000
+FLOPPY          = 0xFD008000        ; a disk controller, see DISK_* below
+BEEPER          = 0xFD009000
 
 PIC_PENDING     = 0x00
 PIC_ENABLE      = 0x04
@@ -25,6 +27,7 @@ IRQ_TIMER       = 2
 IRQ_DISK0       = 3
 IRQ_DISK1       = 4
 IRQ_VIDEO       = 5
+IRQ_FLOPPY      = 6
 
 KBD_STATUS      = 0x00
 KBD_DATA        = 0x04
@@ -66,6 +69,7 @@ DISK_READONLY   = 1 << 1
 DISK_BUSY       = 1 << 2
 DISK_DONE       = 1 << 3
 DISK_FAILED     = 1 << 4
+DISK_CHANGED    = 1 << 5            ; the floppy was inserted or ejected
 DISK_READ       = 1                 ; commands
 DISK_WRITE      = 2
 DISK_ERR_COMMAND  = 1               ; ERROR codes
@@ -128,6 +132,11 @@ VIDEO_ERR_COMMAND = 1               ; ERROR codes
 VIDEO_ERR_RANGE   = 2
 VIDEO_ERR_ADDRESS = 3
 VRAM_SIZE       = 0x400000
+
+BEEPER_CONTROL  = 0x00
+BEEPER_FREQUENCY = 0x04             ; Hz
+BEEPER_DURATION = 0x08              ; ticks, 0 = until turned off
+BEEPER_ON       = 1 << 0
 
 STATUS_IE       = 1 << 0
 STATUS_PUM      = 1 << 3            ; user mode after IRET

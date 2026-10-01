@@ -54,6 +54,31 @@ set(SDL_INSTALL OFF CACHE BOOL "" FORCE)
 
 add_subdirectory(vendor/SDL EXCLUDE_FROM_ALL)
 
+# miniaudio: sound output only, so the decoders, the node graph and the
+# engine are left out
+if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vendor/miniaudio/miniaudio.c")
+    message(FATAL_ERROR
+        "miniaudio submodule is missing. Run: git submodule update --init --recursive")
+endif()
+
+add_library(miniaudio STATIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/vendor/miniaudio/miniaudio.c")
+target_include_directories(miniaudio SYSTEM PUBLIC
+    "${CMAKE_CURRENT_SOURCE_DIR}/vendor/miniaudio")
+target_compile_definitions(miniaudio PUBLIC
+    MA_NO_DECODING
+    MA_NO_ENCODING
+    MA_NO_GENERATION
+    MA_NO_RESOURCE_MANAGER
+    MA_NO_NODE_GRAPH
+    MA_NO_ENGINE
+)
+if(NOT EMSCRIPTEN)
+    # its audio thread; on the web it plays through Web Audio instead
+    find_package(Threads REQUIRED)
+    target_link_libraries(miniaudio PUBLIC Threads::Threads ${CMAKE_DL_LIBS})
+endif()
+
 #
 add_executable(${PROJECT_NAME} ${WRM081632_SOURCES})
 
@@ -62,12 +87,14 @@ target_include_directories(${PROJECT_NAME}  PRIVATE
     "${CMAKE_CURRENT_BINARY_DIR}/generated"
 )
 
-target_link_libraries(${PROJECT_NAME} PRIVATE SDL3::SDL3)
+target_link_libraries(${PROJECT_NAME} PRIVATE SDL3::SDL3 miniaudio)
 
-# sqrtf and fmaf of the CPU's floating point are in libm on Linux
+# sqrtf and fmaf of the CPU's floating point (and miniaudio's resampler)
+# are in libm on Linux
 find_library(WRM081632_LIBM m)
 if(WRM081632_LIBM)
     target_link_libraries(${PROJECT_NAME} PRIVATE ${WRM081632_LIBM})
+    target_link_libraries(miniaudio PUBLIC ${WRM081632_LIBM})
 endif()
 
 set_target_properties(${PROJECT_NAME} PROPERTIES

@@ -1,20 +1,31 @@
 #include "devices/disk.h"
 
 static void disk_update_irq(disk_t* disk) {
-	pic_set_line(disk->pic, disk->irq, disk->done);
+	pic_set_line(disk->pic, disk->irq, disk->done || disk->changed);
 }
 
-static void disk_open(disk_t* disk, const char* path) {
+// Attaches the image at path; false (with a warning) if it can't be used.
+static bool disk_open(disk_t* disk, const char* path) {
+	disk->readonly = false;
 	disk->file = fopen(path, "r+b");
 	if (!disk->file) {
 		disk->file = fopen(path, "rb");
 		disk->readonly = true;
 	}
-	if (!disk->file) error("Failed to open the disk image %s", path);
+	if (!disk->file) {
+		disk->readonly = false;
+		warning("Failed to open the disk image %s", path);
+		return false;
+	}
 
 	long size = -1;
 	if (fseek(disk->file, 0L, SEEK_END) == 0) size = ftell(disk->file);
-	if (size < 0) error("Failed to get the size of the disk image %s", path);
+	if (size < 0) {
+		warning("Failed to get the size of the disk image %s", path);
+		fclose(disk->file);
+		disk->file = NULL;
+		return false;
+	}
 	if (size % DISK_SECTOR_SIZE)
 		warning("Disk image %s: the last %ld bytes are not a whole sector "
 				"and can't be accessed",
@@ -27,23 +38,33 @@ static void disk_open(disk_t* disk, const char* path) {
 		  path,
 		  disk->sectors,
 		  disk->readonly ? ", read-only" : "");
+	return true;
+}
+
+static void disk_close(disk_t* disk) {
+	if (disk->file) fclose(disk->file);
+	disk->file = NULL;
+	disk->readonly = false;
+	disk->sectors = 0;
 }
 
 disk_t* disk_create(pic_t* pic, const uint8_t irq, const bus_t dma,
-					const char* path) {
+					const bool removable, const char* path) {
 	disk_t* disk = (disk_t*)calloc(1, sizeof(disk_t));
 	if (!disk) error("Failed to allocate disk controller!");
 	disk->pic = pic;
 	disk->irq = irq;
 	disk->dma = dma;
-	if (path) disk_open(disk, path);
+	disk->removable = removable;
+	if (path && !disk_open(disk, path))
+		error("Failed to attach the disk image %s", path);
 	disk_reset(disk);
 	return disk;
 }
 
 void disk_destroy(disk_t* disk) {
 	if (!disk) return;
-	if (disk->file) fclose(disk->file);
+	disk_close(disk);
 	free(disk);
 	disk = NULL;
 }
@@ -58,6 +79,7 @@ void disk_reset(disk_t* disk) {
 	disk->command = 0;
 	disk->busy = false;
 	disk->done = false;
+	disk->changed = false;
 	disk->position = 0;
 	disk_update_irq(disk);
 }
@@ -68,6 +90,26 @@ static void disk_finish(disk_t* disk, const uint32_t error) {
 	disk->done = true;
 	disk->error = error;
 	disk_update_irq(disk);
+}
+
+void disk_eject(disk_t* disk) {
+	if (!disk || !disk->removable || !disk->file) return;
+	if (disk->busy) disk_finish(disk, DISK_ERROR_NO_DISK);
+	disk_close(disk);
+	disk->changed = true;
+	disk_update_irq(disk);
+	print("Disk ejected");
+}
+
+bool disk_insert(disk_t* disk, const char* path) {
+	if (!disk || !disk->removable) return false;
+	disk_eject(disk);
+	const bool inserted = disk_open(disk, path);
+	if (inserted) {
+		disk->changed = true;
+		disk_update_irq(disk);
+	}
+	return inserted;
 }
 
 // Checks the registers and starts the transfer; a command that can't run
@@ -178,7 +220,8 @@ bool disk_read(disk_t* disk, const uint32_t offset, const uint8_t size,
 				   | (disk->readonly ? DISK_STATUS_READONLY : 0)
 				   | (disk->busy ? DISK_STATUS_BUSY : 0)
 				   | (disk->done ? DISK_STATUS_DONE : 0)
-				   | (disk->error ? DISK_STATUS_ERROR : 0);
+				   | (disk->error ? DISK_STATUS_ERROR : 0)
+				   | (disk->changed ? DISK_STATUS_CHANGED : 0);
 			return false;
 		case DISK_REG_SECTORS:
 			*value = disk->sectors;
@@ -207,10 +250,9 @@ bool disk_write(disk_t* disk, const uint32_t offset, const uint8_t size,
 	(void)size;
 	switch (offset) {
 		case DISK_REG_STATUS:
-			if (value & DISK_STATUS_DONE) {
-				disk->done = false;
-				disk_update_irq(disk);
-			}
+			if (value & DISK_STATUS_DONE) disk->done = false;
+			if (value & DISK_STATUS_CHANGED) disk->changed = false;
+			disk_update_irq(disk);
 			return false;
 		case DISK_REG_SECTORS:
 		case DISK_REG_ERROR:

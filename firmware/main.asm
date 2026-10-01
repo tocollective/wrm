@@ -1,8 +1,9 @@
 ; ============================================================================
 ;  WRM.081632 demo firmware
 ;
-;  Boots from disk 0 if it holds a boot image (--hdd, see
-;  docs/SPECIFICATION.md#boot-protocol); otherwise runs the demos.
+;  Boots from the floppy or disk 0 if one holds a boot image (--floppy,
+;  --hdd, see docs/SPECIFICATION.md#boot-protocol); otherwise runs the
+;  demos.
 ;
 ;  A tour of the machine: every instruction group, the UART, the keyboard,
 ;  the PIC, polling, WFI, interrupts, the MMU and user mode, the timer and
@@ -16,7 +17,7 @@
 ;  Files:
 ;    main.asm         reset, the order of the demos, image trailer
 ;    defs.asm         hardware constants and the RAM layout
-;    boot.asm         boot from disk
+;    boot.asm         boot from the floppy or disk 0
 ;    demos/*.asm      one demo each, with its own strings and data
 ;    lib.asm          UART output and helpers (puts, show, memcpy, ...)
 ;    video.asm        video card setup, text, the screen console
@@ -49,6 +50,7 @@ reset:
 	li r1, UART
 	li r2, UART_FLUSH
 	sw r2, UART_CONTROL(r1)     ; drop anything received before reset
+	call post_beep
 	call video_init             ; a boot image gets the screen console too
 	la r1, s_con_banner
 	call con_puts
@@ -89,6 +91,21 @@ reset:
 	.include "demos/timer.asm"
 	.include "demos/video.asm"
 	.include "boot.asm"
+
+; post_beep(): a short beep at power-on, like a PC after its self-test.
+; The beeper times it by itself, so nothing waits for it to end.
+post_beep:
+	li r1, TIMER
+	lw r2, TIMER_FREQUENCY(r1)
+	li r3, 10
+	divu r2, r2, r3             ; 1/10 s of ticks
+	li r1, BEEPER
+	li r3, 1000                 ; Hz
+	sw r3, BEEPER_FREQUENCY(r1)
+	sw r2, BEEPER_DURATION(r1)
+	li r3, BEEPER_ON
+	sw r3, BEEPER_CONTROL(r1)
+	ret
 	.include "lib.asm"
 	.include "video.asm"
 	.include "font.asm"
@@ -102,7 +119,7 @@ s_banner:
 s_rom_size:     .asciz "firmware size, bytes"
 s_bye:          .asciz "\nbye\n"
 s_con_banner:   .asciz "WRM.081632 firmware\n\n"
-s_con_demos:    .asciz "No boot image on disk 0: running the demos.\nTheir output goes to the UART console.\n"
+s_con_demos:    .asciz "No boot image: running the demos.\nTheir output goes to the UART console.\n"
 
 ; image trailer: a small header-like block built from data directives
 	.align 16

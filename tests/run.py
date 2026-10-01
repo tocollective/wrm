@@ -14,6 +14,7 @@ A test can set up the machine with comment lines in its source:
                     offset o of sector s is s << 16 | o / 4
   ; @hdd FILE.asm   attach a boot image assembled from FILE.asm (relative
                     to the test) at BOOT_LOAD
+  ; @floppy SPEC    put a disk in the floppy drive, SPEC as for @hdd
   ; @args ARGS      more emulator options, e.g. --ram 4M,2M
 Each @hdd attaches the next disk, 0 then 1.
 
@@ -58,8 +59,9 @@ def test_name(path):
 
 
 def read_directives(path):
-	"""Returns the @hdd specs and the @args options of a test source."""
-	hdds, args = [], []
+	"""Returns the @hdd specs, the @floppy spec (or None) and the @args
+	options of a test source."""
+	hdds, floppy, args = [], None, []
 	with open(path, encoding="utf-8") as f:
 		for line in f:
 			m = DIRECTIVE.match(line)
@@ -68,11 +70,13 @@ def read_directives(path):
 			name, value = m.groups()
 			if name == "hdd":
 				hdds.append(value)
+			elif name == "floppy":
+				floppy = value
 			elif name == "args":
 				args += shlex.split(value)
 			else:
 				raise ValueError(f"unknown directive @{name}")
-	return hdds, args
+	return hdds, floppy, args
 
 
 def pattern_disk(sectors):
@@ -81,7 +85,8 @@ def pattern_disk(sectors):
 
 
 def make_disk(spec, path, image):
-	"""Writes the disk image for an @hdd spec; returns an error or None."""
+	"""Writes the disk image for an @hdd or @floppy spec; returns an error
+	or None."""
 	if spec.isdigit():
 		with open(image, "wb") as f:
 			f.write(pattern_disk(int(spec)))
@@ -102,7 +107,7 @@ def run_test(path, emulator, timeout, workdir):
 		return False, "assembler failed", asm.stdout + asm.stderr
 
 	try:
-		hdds, extra = read_directives(path)
+		hdds, floppy, extra = read_directives(path)
 	except ValueError as e:
 		return False, str(e), ""
 	command = [emulator, "--headless", "--rom", rom]
@@ -112,6 +117,12 @@ def run_test(path, emulator, timeout, workdir):
 		if error is not None:
 			return False, f"can't make the disk image for @hdd {spec}", error
 		command += ["--hdd", image]
+	if floppy is not None:
+		image = f"{base}.floppy.img"
+		error = make_disk(floppy, path, image)
+		if error is not None:
+			return False, f"can't make the disk image for @floppy {floppy}", error
+		command += ["--floppy", image]
 	command += extra
 
 	try:

@@ -10,7 +10,8 @@ typedef struct config {
 	const char* version;
 	const char* firm_path; // firmware
 	const char* hdd_path[CONFIG_HDD_COUNT]; // disk images, NULL = no disk
-	const char* floppy_path; // NULL = not connected
+	const char* floppy_path; // NULL = no disk in the drive
+	bool mute; // no sound output
 	uint64_t clock_rate; // Hz
 	size_t ram_size[CONFIG_RAM_SLOT_COUNT]; // bytes per slot, 0 = empty
 	bool make_dump;

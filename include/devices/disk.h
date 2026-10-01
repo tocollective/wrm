@@ -23,6 +23,7 @@
 #define DISK_STATUS_BUSY 0x04 // a transfer is running
 #define DISK_STATUS_DONE 0x08 // the last command has finished
 #define DISK_STATUS_ERROR 0x10 // ... and failed: ERROR is not 0
+#define DISK_STATUS_CHANGED 0x20 // removable: a disk was inserted or ejected
 
 #define DISK_COMMAND_READ 1 // disk to RAM
 #define DISK_COMMAND_WRITE 2 // RAM to disk
@@ -37,14 +38,18 @@
 
 // Disk controller for a host image file of 512-byte sectors. Transfers go
 // straight to RAM (DMA), one word per clock tick; SECTOR, COUNT and
-// ADDRESS advance as they go. IRQ line is asserted while STATUS.DONE is set.
+// ADDRESS advance as they go. IRQ line is asserted while STATUS.DONE or
+// STATUS.CHANGED is set. A removable drive (the floppy) can have its disk
+// swapped while the machine runs; CHANGED tells software it happened.
 typedef struct disk {
 	pic_t* pic;
 	uint8_t irq;
 	bus_t dma; // RAM only
+	bool removable;
 	FILE* file; // NULL = no disk
 	bool readonly;
 	uint32_t sectors;
+	bool changed;
 
 	uint32_t sector;
 	uint32_t count;
@@ -60,8 +65,14 @@ typedef struct disk {
 
 // path = NULL makes an empty drive
 disk_t* disk_create(pic_t* pic, const uint8_t irq, const bus_t dma,
-					const char* path);
+					const bool removable, const char* path);
 void disk_destroy(disk_t* disk);
+
+// Removable drives only: swaps the disk at run time. A running transfer
+// stops with DISK_ERROR_NO_DISK. disk_insert ejects the old disk first and
+// returns false if the image can't be opened, leaving the drive empty.
+bool disk_insert(disk_t* disk, const char* path);
+void disk_eject(disk_t* disk);
 
 // Stops a running transfer; the sectors it has written stay written.
 void disk_reset(disk_t* disk);

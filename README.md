@@ -5,6 +5,10 @@
 WRM.081632 – is a 32-bit, RISC based, little-endian CPU architecture.
 
 ```sh
+cmake --build build && ctest --test-dir build
+```
+
+```sh
 dd if=/dev/zero of=firmware.rom  bs=1m  count=32
 ```
 
@@ -13,7 +17,7 @@ dd if=/dev/zero of=firmware.rom  bs=1m  count=32
 ```sh
 python3 tools/asm.py firmware/main.asm -o firmware.rom
 bin/wrm081632 [--rom PATH] [--ram SIZE[,...]] [--clock HZ] [--hdd PATH]
-              [--headless] [--trace[=PATH]] [--debug]
+              [--floppy PATH] [--mute] [--headless] [--trace[=PATH]] [--debug]
 ```
 
 | Option             | Description                                              |
@@ -22,7 +26,9 @@ bin/wrm081632 [--rom PATH] [--ram SIZE[,...]] [--clock HZ] [--hdd PATH]
 | `--ram SIZE[,...]` | RAM in slots 0–3, mapped back to back from address 0: `1M`, `2M`, `4M`, `8M`, `16M` or `32M` each (`--ram 4M,4M`); `1M` by default |
 | `--clock HZ`       | clock rate, with an optional `k`, `M` or `G` suffix; `48M` by default |
 | `--hdd PATH`       | disk image for disk 0; a second `--hdd` attaches disk 1 (see [Booting from disk](#booting-from-disk)) |
-| `--headless`       | no window (the video card still runs, but nothing is shown); the UART console still uses stdin and stdout |
+| `--floppy PATH`    | disk image in the floppy drive; a file dropped on the window replaces it while the machine runs |
+| `--mute`           | no sound from the beeper                                  |
+| `--headless`       | no window and no sound (the video card and the beeper still run, but nothing is shown or heard); the UART console still uses stdin and stdout |
 | `--trace[=PATH]`   | log every instruction that reaches write-back to `PATH`, or to stderr (see [Debugging](#debugging)) |
 | `--debug`          | dump the CPU state when the machine stops or the emulator quits |
 | `-h, --help`       | show the options                                         |
@@ -46,8 +52,9 @@ A disk image is a plain file of 512-byte sectors. The disk is written
 back to the file, and a file the emulator can't write is attached
 read-only.
 
-The firmware boots from disk 0 when it holds a boot image. A boot image
-starts with a small header and is loaded to `0x00010000`
+The firmware boots from the floppy, or else from disk 0, when it holds a
+boot image. A boot image starts with a small header and is loaded to
+`0x00010000`
 ([docs/SPECIFICATION.md](docs/SPECIFICATION.md#boot-protocol)). Assembled
 at that address and padded to a whole sector, the assembler output is
 itself a bootable disk image:
@@ -55,9 +62,13 @@ itself a bootable disk image:
 ```sh
 python3 tools/asm.py firmware/disk/hello.asm --base 0x10000 -o hdd0.img
 bin/wrm081632 --hdd hdd0.img
+bin/wrm081632 --floppy hdd0.img     # the same image boots from the floppy
 ```
 
-Without a boot image, or without `--hdd`, the firmware runs its demos.
+Without a boot image on either drive the firmware runs its demos. The
+floppy's disk can be swapped at run time by dropping an image file on
+the window; the guest sees it in the drive's `STATUS`
+([docs/SPECIFICATION.md](docs/SPECIFICATION.md#floppy-drive)).
 The calling conventions for code on the machine are in
 [docs/ABI.md](docs/ABI.md).
 
@@ -126,8 +137,9 @@ runs every ROM through it as a test of its own.
 | `isa`      | every instruction, control registers, exceptions, user mode |
 | `pipeline` | forwarding and stalls, cycle timing, precise faults and interrupts |
 | `mmu`      | pages and superpages, permissions, TLB invalidation, `U`    |
-| `disk`     | the disk controller, booting from disk                      |
+| `disk`     | the disk controller, the floppy drive, booting from disk    |
 | `video`    | the video card: modes, palette, drawing engine, DMA, VBLANK |
+| `sound`    | the beeper's registers and `DURATION` timing                |
 
 A test includes `tests/common/harness.asm` and defines `test_main`. It
 sets `r28` to the number of each check and ends with `j pass`, or
@@ -141,6 +153,7 @@ Comment lines in a test set up the machine it runs on:
 |-------------------|---------------------------------------------------------|
 | `; @hdd N`        | attach a disk of `N` sectors; the word at byte offset `o` of sector `s` is `s << 16 \| o / 4` |
 | `; @hdd FILE.asm` | attach a boot image assembled from `FILE.asm` (relative to the test) at `0x00010000` |
+| `; @floppy SPEC`  | put a disk in the floppy drive, `N` or `FILE.asm` as for `@hdd` |
 | `; @args ARGS`    | more emulator options, e.g. `--ram 4M,2M`               |
 
 Each `@hdd` attaches the next disk, 0 and then 1.

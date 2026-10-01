@@ -27,6 +27,9 @@ application_t* application_create(int argc, char* argv[]) {
 		app->display = display_create();
 		// frames are only scanned out while a display shows them
 		app->machine->motherboard->videocard->connected = true;
+		if (!config_get()->mute) app->speaker = speaker_create();
+		// ... and samples only made while a speaker plays them
+		app->machine->motherboard->beeper->connected = app->speaker != NULL;
 	}
 	app->running = true;
 	console_open();
@@ -40,6 +43,7 @@ void application_destroy(application_t* app) {
 	// --debug: also when quitting while the machine still runs
 	if (config_get()->debug && !app->stop_reported)
 		cpu_dump(app->machine->motherboard->cpu, stderr);
+	speaker_destroy(app->speaker);
 	display_destroy(app->display);
 	machine_destroy(app->machine);
 	if (app->trace_file) fclose(app->trace_file);
@@ -82,6 +86,7 @@ bool application_update(application_t* app) {
 	application_update_console(app);
 	machine_update(app->machine);
 	display_render(app->display, app->machine->motherboard->videocard);
+	speaker_play(app->speaker, app->machine->motherboard->beeper);
 	application_report_stop(app);
 	application_check_stopped(app);
 	return true;
@@ -96,6 +101,11 @@ bool application_process_events(application_t* app, SDL_Event* event) {
 		case SDL_EVENT_WINDOW_CLOSE_REQUESTED: {
 			app->running = false;
 			return true;
+		} break;
+		case SDL_EVENT_DROP_FILE: {
+			// a disk image dropped on the window goes in the floppy drive
+			if (event->drop.data)
+				disk_insert(app->machine->motherboard->floppy, event->drop.data);
 		} break;
 		case SDL_EVENT_KEY_DOWN:
 		case SDL_EVENT_KEY_UP: {

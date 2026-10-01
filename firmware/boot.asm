@@ -1,11 +1,12 @@
 ; ============================================================================
-;  Boot from disk 0 (docs/SPECIFICATION.md#boot-protocol)
+;  Boot from the floppy or disk 0 (docs/SPECIFICATION.md#boot-protocol)
 ; ============================================================================
 
-; boot(): loads the boot image from disk 0 and jumps to it. Returns only
-; if there is nothing to boot: no disk (silently), no boot image or an
-; error (after printing why). Runs on its own stack below BOOT_LOAD, so
-; the image can't overwrite it wherever the caller's stack is.
+; boot(): loads the boot image from the first drive that holds one, the
+; floppy and then disk 0, and jumps to it. Returns only if there is
+; nothing to boot: no disks (silently), no boot image or an error (after
+; printing why, for each drive). Runs on its own stack below BOOT_LOAD,
+; so the image can't overwrite it wherever the caller's stack is.
 boot:
 	mv r9, r30
 	li r30, BOOT_STACK_TOP
@@ -15,8 +16,30 @@ boot:
 	sw r10, 12(r30)
 	sw r11, 8(r30)
 	sw r12, 4(r30)
+	sw r13, 0(r30)
 
+	li r10, FLOPPY
+	la r13, s_boot_floppy
+	call boot_disk
 	li r10, DISK0
+	la r13, s_boot_disk0
+	call boot_disk
+
+	lw r13, 0(r30)
+	lw r12, 4(r30)
+	lw r11, 8(r30)
+	lw r10, 12(r30)
+	lw ra, 16(r30)
+	lw r30, 20(r30)
+	ret
+
+; boot_disk(r10 = disk controller, r13 = its name for messages): boots
+; from that disk, or returns if it can't. Clobbers r11 and r12 too, which
+; boot saves.
+boot_disk:
+	addi r30, r30, -4
+	sw ra, 0(r30)
+
 	lw r1, DISK_STATUS(r10)
 	andi r1, r1, DISK_PRESENT
 	beqz r1, .return
@@ -101,22 +124,31 @@ boot:
 
 .disk_error:                    ; r1 = ERROR
 	mv r11, r1
-	la r1, s_boot_disk_error
-	call puts
+	la r3, s_boot_disk_error
+	call .message
 	mv r1, r11
 	call print_dec
 	li r1, '\n'
 	call putc
 	j .return
 .fail:                          ; r3 = message
-	mv r1, r3
-	call puts
+	call .message
 .return:
-	lw r12, 4(r30)
-	lw r11, 8(r30)
-	lw r10, 12(r30)
-	lw ra, 16(r30)
-	lw r30, 20(r30)
+	lw ra, 0(r30)
+	addi r30, r30, 4
+	ret
+.message:                       ; "boot: <drive>" and r3; keeps r11
+	addi r30, r30, -8
+	sw ra, 4(r30)
+	sw r3, 0(r30)
+	la r1, s_boot
+	call puts
+	mv r1, r13
+	call puts
+	lw r1, 0(r30)
+	call puts
+	lw ra, 4(r30)
+	addi r30, r30, 8
 	ret
 
 ; ram_size() -> r1 = bytes of RAM from address 0
@@ -149,9 +181,12 @@ ram_size:
 	mtcr epc, r7
 	iret
 
-s_boot_disk_error: .asciz "boot: disk 0 error "
-s_boot_no_image:   .asciz "boot: no boot image on disk 0\n"
-s_boot_bad_header: .asciz "boot: bad boot image header\n"
-s_boot_too_big:    .asciz "boot: the boot image doesn't fit in RAM\n"
+s_boot:            .asciz "boot: "
+s_boot_floppy:     .asciz "floppy"
+s_boot_disk0:      .asciz "disk 0"
+s_boot_disk_error: .asciz ": disk error "
+s_boot_no_image:   .asciz ": no boot image\n"
+s_boot_bad_header: .asciz ": bad boot image header\n"
+s_boot_too_big:    .asciz ": the boot image doesn't fit in RAM\n"
 
 	.align 4

@@ -2,6 +2,7 @@
 #define WRM_APPLICATION_H
 #include "display.h"
 #include "machine.h"
+#include "speaker.h"
 
 typedef struct application {
 	bool running;
@@ -9,6 +10,7 @@ typedef struct application {
 	int exit_code; // process exit status once the app stops running
 	machine_t* machine;
 	display_t* display; // NULL in headless mode
+	speaker_t* speaker; // NULL in headless mode, with --mute or no audio
 	FILE* trace_file; // --trace=PATH, NULL when off or on stderr
 } application_t;
 

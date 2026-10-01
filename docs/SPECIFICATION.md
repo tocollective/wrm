@@ -13,6 +13,8 @@
 | `0xFD005000`–`0xFD005FFF` | Disk 0                                  |
 | `0xFD006000`–`0xFD006FFF` | Disk 1                                  |
 | `0xFD007000`–`0xFD007FFF` | Video card                              |
+| `0xFD008000`–`0xFD008FFF` | Floppy drive                            |
+| `0xFD009000`–`0xFD009FFF` | Beeper                                  |
 | `0xFE000000`–`0xFFFFFFFF` | ROM (32MB, read-only)                   |
 
 Addresses between the end of RAM and `0xFD000000` are unmapped, as are
@@ -57,6 +59,7 @@ with `ENABLE` left at 0.
 | 3   | Disk 0   | `STATUS.DONE` is set    |
 | 4   | Disk 1   | `STATUS.DONE` is set    |
 | 5   | Video    | `STATUS.DONE` or `STATUS.VBLANK` is set and enabled in `CONTROL` |
+| 6   | Floppy   | `STATUS.DONE` or `STATUS.CHANGED` is set |
 
 ### Keyboard
 
@@ -136,15 +139,16 @@ described [below](#reset).
 
 ### Disks
 
-Two identical disk controllers, disk 0 and disk 1. Each one can hold a
-disk image, which is a host file given with `--hdd` (see
-[README](../README.md#running)). A disk is an array of 512-byte sectors.
-The controller moves them between the disk and RAM by itself (DMA), so
-the CPU only programs the transfer and waits for the end.
+Three identical disk controllers: two hard disks, disk 0 and disk 1, and
+the floppy drive. Each one can hold a disk image, which is a host file
+given with `--hdd` or `--floppy` (see [README](../README.md#running)). A
+disk is an array of 512-byte sectors. The controller moves them between
+the disk and RAM by itself (DMA), so the CPU only programs the transfer
+and waits for the end.
 
 | Offset | Register  | Access | Description                                           |
 |--------|-----------|--------|-------------------------------------------------------|
-| `0x00` | `STATUS`  | RW     | bit 0 = present, bit 1 = read-only, bit 2 = busy, bit 3 = done, bit 4 = error; writing 1 to bit 3 clears it |
+| `0x00` | `STATUS`  | RW     | bit 0 = present, bit 1 = read-only, bit 2 = busy, bit 3 = done, bit 4 = error, bit 5 = changed (floppy only); writing 1 to bit 3 or 5 clears it |
 | `0x04` | `SECTORS` | R      | disk size in sectors, `0` without a disk              |
 | `0x08` | `SECTOR`  | RW     | next sector to transfer                               |
 | `0x0C` | `COUNT`   | RW     | sectors left to transfer                              |
@@ -166,8 +170,8 @@ are ignored. A transfer can't be stopped except by a reset. When it ends,
 the registers point just past it, so reading on only takes a new `COUNT`
 and `COMMAND`.
 
-`DONE` keeps IRQ line 3 (disk 0) or 4 (disk 1) asserted until software
-writes 1 to it or starts the next command. `ERROR`, and the error bit in
+`DONE` keeps IRQ line 3 (disk 0), 4 (disk 1) or 6 (floppy) asserted
+until software writes 1 to it or starts the next command. `ERROR`, and the error bit in
 `STATUS`, stay until the next command.
 
 | `ERROR` | Reason                                                        |
@@ -190,6 +194,21 @@ leave the buffer alone until `DONE`.
 The image size is taken in whole sectors, and extra bytes at the end are
 not reachable. An image that the host can't write is attached read-only.
 Writes reach the host file as each sector completes.
+
+#### Floppy drive
+
+The floppy drive's disk is removable: the host can eject it or put in
+another one while the machine runs (a file dropped on the emulator's
+window goes in the drive). The disk can be of any size; `SECTORS` and
+the read-only bit follow the disk in the drive. Ejecting it during a
+transfer stops the transfer with error 2, as if the command had found
+no disk; the sectors already written stay written.
+
+Every insertion or ejection sets `STATUS.CHANGED`, which keeps IRQ line
+6 asserted, like `DONE`, until software writes 1 to it. It is clear
+after reset, also with a disk in the drive, so it only tells of changes
+since then. Software that caches what it read from the floppy should
+drop the cache when it sees `CHANGED`. The hard disks never set it.
 
 ### Video card
 
@@ -352,6 +371,37 @@ another, a byte per line, character `c` is drawn by one `EXPAND` with
 font in RAM or ROM, at 16 ticks a character. The firmware keeps its font there, see
 [State at the entry point](#state-at-the-entry-point).
 
+### Beeper
+
+A square wave generator for simple sounds, like the PC speaker. It
+plays one tone at a time through the host's sound output; without a
+window (`--headless`) or with `--mute` nothing is heard, but the device
+works the same.
+
+| Offset | Register    | Access | Description                                   |
+|--------|-------------|--------|-----------------------------------------------|
+| `0x00` | `CONTROL`   | RW     | bit 0 = on                                    |
+| `0x04` | `FREQUENCY` | RW     | the tone, in Hz; `0` is silence               |
+| `0x08` | `DURATION`  | RW     | ticks left to sound, `0` = until turned off   |
+
+While `CONTROL` bit 0 is set the beeper sounds the square wave of
+`FREQUENCY`; a change to it takes effect at once. Turning it on starts
+the wave from the beginning. A tone above half the clock rate is
+silence, and tones above about 20kHz are inaudible anyway.
+
+`DURATION` times a tone without the CPU: while the beeper is on and
+`DURATION` is not 0, it goes down by one every clock tick, starting with
+the next tick, and when it reaches 0 bit 0 of `CONTROL` is cleared. So
+writing `DURATION` = N and then `CONTROL` = 1 sounds the tone for N
+ticks; with `FREQUENCY` = 0 it is a pause of N ticks that software can
+poll `CONTROL` for. `DURATION` stands still while the beeper is off, and
+turning it off by hand keeps what is left of it. With `DURATION` = 0 the
+beeper sounds until software clears the bit.
+
+The output is mixed down to 48000 samples per second, each the average
+of the wave over its clock ticks. The host plays it with a delay of up
+to about 85ms. There is no IRQ line.
+
 ## Reset
 
 On reset all registers are zero and `pc = 0xFE000000`, so execution starts
@@ -362,15 +412,16 @@ The power controller's `RESET` does the same at run time: the CPU and all
 devices return to their reset state (FIFOs are emptied, the PIC `ENABLE`
 mask, the timer and its `COUNT` are cleared, disk transfers stop and the
 disk registers are cleared, the video card stops its DMA, turns the
-display off and clears its palette and `FRAME`). RAM, VRAM and the disk
-images keep their contents, including the sectors of an interrupted
+display off and clears its palette and `FRAME`, the beeper goes quiet).
+RAM, VRAM and the disk images, and the disk in the floppy drive, keep
+their contents, including the sectors of an interrupted
 write that were already written. VRAM is zero at power-on.
 
 ## Boot protocol
 
-After reset the firmware in ROM runs. The firmware in `firmware/` checks
-disk 0 for a boot image. If there is one, it loads the image and jumps to
-it; if not, it runs its demos. This section is the contract between the
+After reset the firmware in ROM runs. The firmware in `firmware/` beeps,
+then checks the floppy and then disk 0 for a boot image. It loads the
+first one it finds and jumps to it; if there is none, it runs its demos. This section is the contract between the
 firmware and the image it boots, such as an OS loader. The calling
 conventions are in [ABI.md](ABI.md).
 
@@ -389,9 +440,10 @@ The firmware loads sectors 0 to `SECTORS` − 1 to physical address
 `0x00010000`. The header comes along, so an image is assembled at
 `0x00010000` as a whole (see [README](../README.md#booting-from-disk)).
 A disk that doesn't start with `MAGIC` is not bootable. The firmware
-doesn't boot, and prints why on the UART, if the header is invalid, the
-image runs past the end of the disk or doesn't fit in RAM, or the disk
-reports an error.
+doesn't boot from a disk, and prints why on the UART, if the header is
+invalid, the image runs past the end of the disk or doesn't fit in RAM,
+or the disk reports an error; it goes on to the next drive. A drive
+without a disk is skipped silently.
 
 ### Memory
 
@@ -410,7 +462,7 @@ The boot info block describes the machine:
 | `0x00` | `MAGIC`        | `0x4F464E49` (the bytes `INFO`)                    |
 | `0x04` | `SIZE`         | size of the block in bytes, 32 here; later fields go after the ones here, so check `SIZE` before reading them |
 | `0x08` | `RAM_SIZE`     | bytes of RAM, all of it from address 0             |
-| `0x0C` | `DISK`         | physical address of the boot disk's controller     |
+| `0x0C` | `DISK`         | physical address of the boot disk's controller: the floppy's or disk 0's |
 | `0x10` | `DISK_SECTORS` | its size in sectors                                |
 | `0x14` | `IMAGE`        | load address, `0x00010000`                         |
 | `0x18` | `IMAGE_SIZE`   | bytes loaded                                       |
@@ -427,6 +479,8 @@ The boot info block describes the machine:
   `IVEC` = 0 and `PTBR` = 0, so the MMU is off. The other control
   registers are unspecified.
 - The PIC `ENABLE` mask is 0. The boot disk is idle with `DONE` clear.
+  The beeper may still be sounding the firmware's beep, for up to 1/10 s
+  of ticks.
   The timer is as after reset. The UART RX FIFO was flushed at reset, but
   it may hold input typed since then, as may the keyboard FIFO.
 - The video card shows the firmware's screen console: 640×480, 8 bpp,
@@ -441,10 +495,11 @@ The boot info block describes the machine:
 ## Clock
 
 The system clock runs at 48 MHz by default (`clock_rate` in the config).
-On every tick the timer advances first, then the disks move a word each,
-then the video card moves a DMA word and counts the tick towards the end
-of the frame, then the CPU samples the IRQ line and advances its pipeline
-by one stage. Nothing runs once the CPU has
+On every tick the timer advances first, then the hard disks move a word
+each, then the video card moves a DMA word and counts the tick towards
+the end of the frame, then the floppy moves a word, then the beeper
+advances its wave and `DURATION`, then the CPU samples the IRQ line and
+advances its pipeline by one stage. Nothing runs once the CPU has
 halted or the machine is powered off.
 
 ## Pipeline

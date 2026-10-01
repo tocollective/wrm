@@ -5,6 +5,7 @@
 #include "clock.h"
 #include "config.h"
 #include "cpu.h"
+#include "devices/beeper.h"
 #include "devices/disk.h"
 #include "devices/keyboard.h"
 #include "devices/pic.h"
@@ -30,6 +31,8 @@
 #define MB_POWER_BASE 0xFD004000
 #define MB_DISK0_BASE 0xFD005000 // disk N at MB_DISK0_BASE + N pages
 #define MB_VIDEO_BASE 0xFD007000 // after the disks
+#define MB_FLOPPY_BASE 0xFD008000
+#define MB_BEEPER_BASE 0xFD009000
 #define MB_ROM_BASE 0xFE000000 // ROM_MAX_SIZE bytes up to 0xFFFFFFFF
 
 // IRQ lines (see docs/SPECIFICATION.md)
@@ -38,6 +41,7 @@
 #define MB_IRQ_PIT 2
 #define MB_IRQ_DISK0 3 // disk N on line MB_IRQ_DISK0 + N
 #define MB_IRQ_VIDEO 5 // after the disks
+#define MB_IRQ_FLOPPY 6
 
 typedef struct ram_slot {
 	ram_t* ram;
@@ -54,8 +58,10 @@ typedef struct motherboard {
 	uart_t* uart;
 	pit_t* pit;
 	power_t* power;
-	disk_t* disk[DISK_COUNT];
+	disk_t* disk[DISK_COUNT]; // hard disks
 	videocard_t* videocard;
+	disk_t* floppy; // the same controller with a removable disk
+	beeper_t* beeper;
 } motherboard_t;
 
 motherboard_t* motherboard_create(void);

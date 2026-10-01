@@ -3,7 +3,7 @@
 ;
 ;  Build:  python3 tools/asm.py firmware/disk/hello.asm --base 0x10000 \
 ;              -o hdd0.img
-;  Run:    bin/wrm081632 --hdd hdd0.img
+;  Run:    bin/wrm081632 --hdd hdd0.img   (or --floppy hdd0.img)
 ;
 ;  The image is assembled at BOOT_LOAD, where the firmware loads it, and
 ;  starts with the boot image header (docs/SPECIFICATION.md#boot-protocol).
@@ -47,7 +47,7 @@ entry:
 
 	.include "../lib.asm"
 
-s_hello:        .asciz "\nhello from disk 0\n"
+s_hello:        .asciz "\nhello from the boot disk\n"
 s_ram:          .asciz "RAM, bytes"
 s_disk:         .asciz "boot disk controller"
 s_sectors:      .asciz "disk size, sectors"

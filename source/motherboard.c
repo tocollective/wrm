@@ -96,6 +96,12 @@ static bool motherboard_io_read(motherboard_t* mb, const uint32_t address,
 		case MB_VIDEO_BASE:
 			fail = videocard_read(mb->videocard, offset, size, value);
 			break;
+		case MB_FLOPPY_BASE:
+			fail = disk_read(mb->floppy, offset, size, value);
+			break;
+		case MB_BEEPER_BASE:
+			fail = beeper_read(mb->beeper, offset, size, value);
+			break;
 	}
 	if (!fail) *value &= motherboard_io_mask(size);
 	return fail;
@@ -123,6 +129,10 @@ static bool motherboard_io_write(motherboard_t* mb, const uint32_t address,
 			return power_write(mb->power, offset, size, value);
 		case MB_VIDEO_BASE:
 			return videocard_write(mb->videocard, offset, size, value);
+		case MB_FLOPPY_BASE:
+			return disk_write(mb->floppy, offset, size, value);
+		case MB_BEEPER_BASE:
+			return beeper_write(mb->beeper, offset, size, value);
 	}
 	return true;
 }
@@ -268,7 +278,9 @@ motherboard_t* motherboard_create(void) {
 	};
 	for (int i = 0; i < DISK_COUNT; i++)
 		mb->disk[i] = disk_create(
-				mb->pic, MB_IRQ_DISK0 + i, dma, cfg->hdd_path[i]);
+				mb->pic, MB_IRQ_DISK0 + i, dma, false, cfg->hdd_path[i]);
+	mb->floppy =
+		disk_create(mb->pic, MB_IRQ_FLOPPY, dma, true, cfg->floppy_path);
 
 	const bus_t video_dma = {
 		.ctx = mb,
@@ -278,6 +290,7 @@ motherboard_t* motherboard_create(void) {
 	};
 	mb->videocard = videocard_create(
 			mb->pic, MB_IRQ_VIDEO, video_dma, (uint32_t)mb->clock->rate);
+	mb->beeper = beeper_create((uint32_t)mb->clock->rate);
 
 	for (int i = 0; i < RAM_SLOT_COUNT; i++) {
 		mb->ram_slot[i].ram = NULL;
@@ -300,6 +313,16 @@ motherboard_t* motherboard_create(void) {
 
 void motherboard_destroy(motherboard_t* mb) {
 	if (!mb) return;
+	if (mb->beeper) {
+		beeper_destroy(mb->beeper);
+		mb->beeper = NULL;
+	}
+
+	if (mb->floppy) {
+		disk_destroy(mb->floppy);
+		mb->floppy = NULL;
+	}
+
 	if (mb->videocard) {
 		videocard_destroy(mb->videocard);
 		mb->videocard = NULL;
@@ -373,6 +396,8 @@ void motherboard_reset(motherboard_t* mb) {
 	power_reset(mb->power);
 	for (int i = 0; i < DISK_COUNT; i++) disk_reset(mb->disk[i]);
 	videocard_reset(mb->videocard);
+	disk_reset(mb->floppy);
+	beeper_reset(mb->beeper);
 	pic_reset(mb->pic);
 }
 
@@ -381,6 +406,8 @@ void motherboard_tick(motherboard_t* mb) {
 	pit_tick(mb->pit);
 	for (int i = 0; i < DISK_COUNT; i++) disk_tick(mb->disk[i]);
 	videocard_tick(mb->videocard);
+	disk_tick(mb->floppy);
+	beeper_tick(mb->beeper);
 	cpu_set_irq(mb->cpu, pic_irq(mb->pic));
 	cpu_update(mb->cpu);
 

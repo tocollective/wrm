@@ -12,7 +12,8 @@ static config_t config = {
 	.version = WRM_VERSION,
 	.firm_path = "firmware.rom",
 	.hdd_path = { NULL, NULL },
-	.floppy_path = "floppy.img",
+	.floppy_path = NULL,
+	.mute = false,
 	.clock_rate = 48000000ULL, // 48 MHz
 	.ram_size = { 1024 * 1024 }, // 1MB in slot 0
 	.make_dump = false,
@@ -38,6 +39,10 @@ static void config_usage(const char* program) {
 			"suffix (default: 48M)\n"
 			"  --hdd PATH        disk image for disk 0; a second --hdd "
 			"attaches disk 1\n"
+			"  --floppy PATH     disk image in the floppy drive; a file "
+			"dropped on the\n"
+			"                    window replaces it at run time\n"
+			"  --mute            no sound\n"
 			"  --headless        no window; exit when the machine powers off "
 			"or halts\n"
 			"  --trace[=PATH]    log every retired instruction to PATH "
@@ -148,6 +153,10 @@ void config_parse(int argc, char* argv[]) {
 			config_parse_clock(config_value(argc, argv, &i));
 		} else if (strcmp(arg, "--hdd") == 0) {
 			config_parse_hdd(config_value(argc, argv, &i));
+		} else if (strcmp(arg, "--floppy") == 0) {
+			config.floppy_path = config_value(argc, argv, &i);
+		} else if (strcmp(arg, "--mute") == 0) {
+			config.mute = true;
 		} else if (strcmp(arg, "--trace") == 0) {
 			config.trace_path = "-";
 		} else if (strncmp(arg, "--trace=", 8) == 0 && arg[8]) {
