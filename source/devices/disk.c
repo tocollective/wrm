@@ -49,13 +49,15 @@ static void disk_close(disk_t* disk) {
 }
 
 disk_t* disk_create(pic_t* pic, const uint8_t irq, const bus_t dma,
-					const bool removable, const char* path) {
+					const bool removable, const uint32_t word_ticks,
+					const char* path) {
 	disk_t* disk = (disk_t*)calloc(1, sizeof(disk_t));
 	if (!disk) error("Failed to allocate disk controller!");
 	disk->pic = pic;
 	disk->irq = irq;
 	disk->dma = dma;
 	disk->removable = removable;
+	disk->word_ticks = word_ticks ? word_ticks : 1;
 	if (path && !disk_open(disk, path))
 		error("Failed to attach the disk image %s", path);
 	disk_reset(disk);
@@ -81,6 +83,7 @@ void disk_reset(disk_t* disk) {
 	disk->done = false;
 	disk->changed = false;
 	disk->position = 0;
+	disk->wait = 0;
 	disk_update_irq(disk);
 }
 
@@ -135,6 +138,8 @@ static void disk_start(disk_t* disk, const uint32_t command) {
 		disk_finish(disk, DISK_ERROR_NONE);
 	else {
 		disk->busy = true;
+		// the first word moves word_ticks ticks from now
+		disk->wait = disk->word_ticks - 1;
 		disk_update_irq(disk);
 	}
 }
@@ -174,6 +179,11 @@ static void disk_buffer_poke32(disk_t* disk, const uint32_t value) {
 
 void disk_tick(disk_t* disk) {
 	if (!disk->busy) return;
+	if (disk->wait) {
+		disk->wait--;
+		return;
+	}
+	disk->wait = disk->word_ticks - 1;
 	const bool reading = disk->command == DISK_COMMAND_READ;
 
 	if (reading && disk->position == 0 && !disk_load_sector(disk)) {
@@ -181,7 +191,7 @@ void disk_tick(disk_t* disk) {
 		return;
 	}
 
-	// one word per tick
+	// one word
 	if (reading) {
 		const uint32_t value = disk_buffer_peek32(disk);
 		if (disk->dma.write(disk->dma.ctx, disk->address, 4, value)) {

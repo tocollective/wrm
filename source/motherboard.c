@@ -278,9 +278,17 @@ motherboard_t* motherboard_create(void) {
 	};
 	for (int i = 0; i < DISK_COUNT; i++)
 		mb->disk[i] = disk_create(
-				mb->pic, MB_IRQ_DISK0 + i, dma, false, cfg->hdd_path[i]);
-	mb->floppy =
-		disk_create(mb->pic, MB_IRQ_FLOPPY, dma, true, cfg->floppy_path);
+				mb->pic, MB_IRQ_DISK0 + i, dma, false, 1, cfg->hdd_path[i]);
+	// the floppy is slow in real time whatever the clock rate
+	const uint64_t floppy_ticks =
+		mb->clock->rate * 4 / DISK_FLOPPY_BYTES_PER_SECOND;
+	mb->floppy = disk_create(mb->pic,
+							 MB_IRQ_FLOPPY,
+							 dma,
+							 true,
+							 floppy_ticks > UINT32_MAX ? UINT32_MAX
+													   : (uint32_t)floppy_ticks,
+							 cfg->floppy_path);
 
 	const bus_t video_dma = {
 		.ctx = mb,

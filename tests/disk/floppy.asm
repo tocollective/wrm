@@ -1,6 +1,6 @@
 ; ============================================================================
-;  Floppy drive: the disk controller at FLOPPY with its own IRQ line,
-;  next to the hard disks
+;  Floppy drive: the disk controller at FLOPPY with its own IRQ line and
+;  transfer rate, next to the hard disks
 ; ============================================================================
 ; @hdd 4
 ; @floppy 16
@@ -10,6 +10,7 @@
 	.include "../common/harness.asm"
 
 BUF             = 0x1000            ; 1 sector, reached as offset(r0)
+FLOPPY_RATE     = 62500             ; bytes per second
 IRQ_FLOPPY_BIT  = 1 << IRQ_FLOPPY
 
 test_main:
@@ -30,15 +31,29 @@ test_main:
 	li r3, 4
 	bne r4, r3, fail
 
-	; ---- read sector 5
+	; ---- read sector 5: a word every W = FREQUENCY * 4 / 62500 ticks
 	li r28, 4
+	mfcr r12, cycle
 	mv r1, r10
 	li r2, DISK_READ
 	li r3, 5
 	li r4, 1
 	li r5, BUF
 	call disk_io
+	mfcr r13, cycle
 	bnez r1, fail
+	li r28, 13                  ; a sector takes 128 * W ticks
+	li r1, TIMER
+	lw r3, TIMER_FREQUENCY(r1)
+	shli r3, r3, 2
+	li r1, FLOPPY_RATE
+	divu r3, r3, r1
+	shli r3, r3, 7
+	sub r4, r13, r12
+	bltu r4, r3, fail
+	li r28, 14
+	addi r3, r3, 256
+	bgeu r4, r3, fail
 	li r28, 5
 	lw r4, BUF(r0)
 	li r3, 0x00050000

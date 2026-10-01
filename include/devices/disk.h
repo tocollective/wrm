@@ -8,6 +8,9 @@
 #include "devices/pic.h"
 
 #define DISK_SECTOR_SIZE 512
+// Transfer rate of the floppy drive, that of a 1.44MB drive (500 kbit/s);
+// the hard disks move a word every clock tick
+#define DISK_FLOPPY_BYTES_PER_SECOND 62500
 
 // Registers (offsets from the device base, see docs/SPECIFICATION.md)
 #define DISK_REG_STATUS 0x00 // R, W: 1 to DONE clears it
@@ -37,8 +40,8 @@
 #define DISK_ERROR_MEDIA 6 // the host couldn't read or write the image
 
 // Disk controller for a host image file of 512-byte sectors. Transfers go
-// straight to RAM (DMA), one word per clock tick; SECTOR, COUNT and
-// ADDRESS advance as they go. IRQ line is asserted while STATUS.DONE or
+// straight to RAM (DMA), one word every word_ticks clock ticks; SECTOR,
+// COUNT and ADDRESS advance as they go. IRQ line is asserted while STATUS.DONE or
 // STATUS.CHANGED is set. A removable drive (the floppy) can have its disk
 // swapped while the machine runs; CHANGED tells software it happened.
 typedef struct disk {
@@ -46,6 +49,7 @@ typedef struct disk {
 	uint8_t irq;
 	bus_t dma; // RAM only
 	bool removable;
+	uint32_t word_ticks; // clock ticks per word moved, at least 1
 	FILE* file; // NULL = no disk
 	bool readonly;
 	uint32_t sectors;
@@ -61,11 +65,13 @@ typedef struct disk {
 
 	uint8_t buffer[DISK_SECTOR_SIZE]; // the sector being transferred
 	uint32_t position; // bytes of it already moved
+	uint32_t wait; // ticks until the next word moves
 } disk_t;
 
-// path = NULL makes an empty drive
+// path = NULL makes an empty drive; word_ticks = 0 counts as 1
 disk_t* disk_create(pic_t* pic, const uint8_t irq, const bus_t dma,
-					const bool removable, const char* path);
+					const bool removable, const uint32_t word_ticks,
+					const char* path);
 void disk_destroy(disk_t* disk);
 
 // Removable drives only: swaps the disk at run time. A running transfer
