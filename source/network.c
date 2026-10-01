@@ -1,3 +1,6 @@
+// The host's network on a desktop; in a browser it is network_web.c.
+#ifndef __EMSCRIPTEN__
+
 #ifndef _WIN32
 #define _POSIX_C_SOURCE 200809L // sockets and getaddrinfo under strict C99
 #define _DARWIN_C_SOURCE // ... and SO_NOSIGPIPE on macOS
@@ -45,21 +48,9 @@ typedef int native_socket_t;
 #define NETWORK_SEND_FLAGS 0
 #endif
 
-bool network_can_listen(void) {
-#ifdef __EMSCRIPTEN__
-	return false; // a browser can't take connections
-#else
-	return true;
-#endif
-}
+bool network_can_listen(void) { return true; }
 
-bool network_can_udp(void) {
-#ifdef __EMSCRIPTEN__
-	return false;
-#else
-	return true;
-#endif
-}
+bool network_can_udp(void) { return true; }
 
 bool network_init(void) {
 #ifdef _WIN32
@@ -339,10 +330,7 @@ network_lookup_t* network_lookup_start(const char* name) {
 	if (!lookup) error("Failed to allocate a host name lookup!");
 	strncpy(lookup->name, name, sizeof(lookup->name) - 1);
 	SDL_SetAtomicInt(&lookup->state, LOOKUP_RUNNING);
-#ifndef __EMSCRIPTEN__
-	// a browser has no threads here, and its lookups are instant anyway
 	lookup->thread = SDL_CreateThread(network_lookup_thread, "lookup", lookup);
-#endif
 	if (!lookup->thread) {
 		lookup->addr = network_resolve(lookup->name);
 		SDL_SetAtomicInt(&lookup->state, LOOKUP_DONE);
@@ -367,3 +355,5 @@ void network_lookup_free(network_lookup_t* lookup) {
 	}
 	free(lookup);
 }
+
+#endif // __EMSCRIPTEN__

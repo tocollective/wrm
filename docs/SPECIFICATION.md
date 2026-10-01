@@ -594,9 +594,12 @@ also set in its `IRQ_MASK`, or `DNS_STATUS.done` is set with
 `DNS_CONTROL` bit 0. `PENDING` tells which; the handler writes 1 to the
 `EVENTS` bits it has handled (or to `DNS_STATUS.done`).
 
-In a browser (the web build) a connection is a WebSocket to
-`ws://ADDRESS:PORT`, which a proxy such as websockify turns into TCP;
-`LISTEN` and UDP fail with error 5, and `STATUS` bits 1 and 2 are clear.
+In a browser (the web build) connections and lookups go through the
+network proxy on the host (`tools/netproxy.py`): a connection is a
+WebSocket to `ws://PROXY/tcp/ADDR/PORT`, a lookup `GET
+http://PROXY/resolve/NAME`. Without the proxy, `CONNECT` fails with
+error 6 and lookups find nothing. `LISTEN` and UDP fail with error 5,
+and `STATUS` bits 1 and 2 are clear.
 
 ### Audio card
 

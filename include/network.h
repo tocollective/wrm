@@ -2,12 +2,14 @@
 #define WRM_NETWORK_H
 #include "common.h"
 
-// The host's network: non-blocking IPv4 sockets over BSD sockets, Winsock
-// or, in a browser, Emscripten's sockets (WebSockets underneath). The
-// network card polls them from the main loop, so nothing here waits.
+// The host's network: non-blocking IPv4 sockets over BSD sockets or
+// Winsock (network.c), or in a browser WebSockets to the network proxy
+// on the host (network_web.c, tools/netproxy.py). The network card polls
+// them from the main loop, so nothing here waits.
 // Addresses are host-order words, 127.0.0.1 = 0x7F000001.
 
-// A host socket: an int, or a Winsock SOCKET, which is pointer-sized
+// A host socket: an int, a Winsock SOCKET, which is pointer-sized, or in
+// a browser the number of a WebSocket
 typedef intptr_t network_socket_t;
 #define NETWORK_NO_SOCKET ((network_socket_t) - 1)
 
@@ -54,7 +56,7 @@ long network_send_to(const network_socket_t socket, const void* data,
 long network_receive_from(const network_socket_t socket, void* buffer,
 						  const size_t size, uint32_t* addr, uint16_t* port);
 
-// A host name lookup, run on a thread where there are threads.
+// A host name lookup, run on a thread, or by the proxy in a browser.
 typedef struct network_lookup network_lookup_t;
 
 network_lookup_t* network_lookup_start(const char* name);

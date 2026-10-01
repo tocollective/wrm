@@ -71,10 +71,17 @@ programs on the host can connect) unless `--net=ADDR` names another
 address, e.g. `--net=0.0.0.0` for all of them. See
 [docs/SPECIFICATION.md](docs/SPECIFICATION.md#network-card).
 
-In a browser a connection is a WebSocket to `ws://ADDRESS:PORT` (that
-is how Emscripten's sockets work), so it needs a proxy such as
-[websockify](https://github.com/novnc/websockify) in front of the TCP
-server; listening and UDP are not available there.
+A browser can't open TCP connections or look up host names, so the web
+build asks a proxy on the host to do it, `tools/netproxy.py` (only the
+standard library); one proxy reaches any address and port:
+
+```sh
+python3 tools/netproxy.py            # 127.0.0.1:8080
+```
+
+A page looks for it at `127.0.0.1:8080`, or where its URL says, e.g.
+`wrm081632.html?netproxy=127.0.0.1:9000`. Listening and UDP are not
+available in a browser.
 
 ## Booting from disk
 
@@ -204,6 +211,7 @@ emrun bin/wrm081632.html
 The firmware is packed into the build from `bin/firmware.rom`
 (override with `-DWRM081632_WEB_FIRMWARE=path`). The UART console has
 no input in the browser; its output goes to the page and the JS console.
+For the network, run `tools/netproxy.py` alongside (see [Network](#network)).
 
 # Useful links
 
