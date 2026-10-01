@@ -4,12 +4,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+// stdout belongs to the UART, so the emulator's own messages go to stderr.
 void print(const char* msg, ...) {
 	va_list args;
 	va_start(args, msg);
-	vfprintf(stdout, msg, args);
+	vfprintf(stderr, msg, args);
 	va_end(args);
-	fprintf(stdout, "\n");
+	fprintf(stderr, "\n");
 }
 
 void warning(const char* msg, ...) {

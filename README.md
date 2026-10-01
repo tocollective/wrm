@@ -33,6 +33,8 @@ bin/wrm081632 [--rom PATH] [--ram SIZE[,...]] [--clock HZ] [--hdd PATH]
 | `--debug`          | dump the CPU state when the machine stops or the emulator quits |
 | `-h, --help`       | show the options                                         |
 
+The UART has stdout to itself: the emulator's own messages go to stderr.
+
 The emulator quits when the guest powers the machine off through the
 power controller (see [docs/SPECIFICATION.md](docs/SPECIFICATION.md#power-controller));
 the exit code written there becomes the process exit status. In headless
