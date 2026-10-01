@@ -323,6 +323,8 @@ test_main:
 	li r28, 45                  ; any byte and bit, across a word boundary
 	la r1, bitmap + 3
 	sw r1, VIDEO_SRC_BASE(r10)
+	li r1, 2                    ; 4 + 8 bits need two bytes
+	sw r1, VIDEO_SRC_PITCH(r10)
 	li r1, 4                    ; 0x05 0xA0 from bit 4: 0101 1010
 	sw r1, VIDEO_SRC_XY(r10)
 	li r1, 0x6010
@@ -349,6 +351,7 @@ test_main:
 	la r1, bitmap
 	sw r1, VIDEO_SRC_BASE(r10)
 	li r1, 1
+	sw r1, VIDEO_SRC_PITCH(r10)
 	sw r1, VIDEO_SRC_XY(r10)    ; 1 + 8 bits in a byte
 	li r1, VIDEO_EXPAND | VIDEO_MEMORY
 	sw r1, VIDEO_COMMAND(r10)

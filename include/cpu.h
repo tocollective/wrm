@@ -129,6 +129,28 @@ typedef enum cpu_opcode {
 	// jumps
 	CPU_OP_JAL = 0x60, // U-format
 	CPU_OP_JALR = 0x61, // I-format
+
+	// floating point (R-format): IEEE 754 binary32 held in the GPRs
+	CPU_OP_FADD = 0x70,
+	CPU_OP_FSUB = 0x71,
+	CPU_OP_FMUL = 0x72,
+	CPU_OP_FDIV = 0x73,
+	CPU_OP_FSQRT = 0x74, // rs2 must be zero
+	CPU_OP_FMIN = 0x75,
+	CPU_OP_FMAX = 0x76,
+	CPU_OP_FMADD = 0x77, // rd = rd + rs1 * rs2, also reads rd
+	CPU_OP_FMSUB = 0x78, // rd = rd - rs1 * rs2, also reads rd
+	CPU_OP_FSGNJ = 0x79,
+	CPU_OP_FSGNJN = 0x7A,
+	CPU_OP_FSGNJX = 0x7B,
+	CPU_OP_FEQ = 0x80,
+	CPU_OP_FLT = 0x81,
+	CPU_OP_FLE = 0x82,
+	CPU_OP_FCLASS = 0x83, // rs2 must be zero
+	CPU_OP_FTOI = 0x84, // rs2 must be zero
+	CPU_OP_FTOU = 0x85, // rs2 must be zero
+	CPU_OP_ITOF = 0x86, // rs2 must be zero
+	CPU_OP_UTOF = 0x87, // rs2 must be zero
 } cpu_opcode_t;
 
 typedef enum cpu_format {
@@ -195,6 +217,8 @@ void cpu_invalidate_reservation(cpu_t* cpu, uint32_t physical,
 							uint8_t size);
 
 cpu_instruction_t cpu_decode(const uint32_t raw);
+// R-format instructions with a single source, whose rs2 must be zero
+bool cpu_rs2_is_reserved(const uint8_t opcode);
 const char* cpu_cause_name(const uint8_t cause);
 
 // Prints the registers, control registers, counters and what is in every

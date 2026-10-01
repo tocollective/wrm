@@ -24,6 +24,12 @@ R = {0x10 + i: name for i, name in enumerate((
 	"add", "sub", "and", "or", "xor", "shl", "shr", "sar",
 	"slt", "sltu", "mul", "div", "divu", "rem", "remu"))}
 R.update({0x1F: "mulh", 0x2A: "mulhu", 0x2B: "mulhsu"})
+R.update({0x70 + i: name for i, name in enumerate((
+	"fadd", "fsub", "fmul", "fdiv", None, "fmin", "fmax", "fmadd", "fmsub",
+	"fsgnj", "fsgnjn", "fsgnjx")) if name})
+R.update({0x80: "feq", 0x81: "flt", 0x82: "fle"})
+R1 = {0x74: "fsqrt", 0x83: "fclass", 0x84: "ftoi", 0x85: "ftou", 0x86: "itof",
+	  0x87: "utof"}  # rs2 is reserved
 ATOMIC = {0x4B: "ll", 0x4C: "sc"}
 I_SIGNED = {0x20: "addi", 0x28: "slti", 0x29: "sltiu"}
 I_UNSIGNED = {0x22: "andi", 0x23: "ori", 0x24: "xori"}
@@ -58,6 +64,8 @@ def disassemble(word, pc):
 		return N[op]
 	if op in R and not word >> 23:
 		return f"{R[op]} r{rd}, r{rs1}, r{rs2}"
+	if op in R1 and not word >> 18:
+		return f"{R1[op]} r{rd}, r{rs1}"
 	if op in ATOMIC and not word >> 23 and (op != 0x4B or rs2 == 0):
 		if op == 0x4B:
 			return f"ll r{rd}, (r{rs1})"

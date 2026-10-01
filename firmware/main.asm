@@ -25,7 +25,9 @@
 ;  Register conventions: the ABI (docs/ABI.md), in short
 ;    r1-r8     arguments, r1 = return value
 ;    r1-r9     scratch, clobbered by every call
-;    r10-r29   preserved across calls
+;    r10-r27   preserved across calls
+;    r28 (tp)  thread pointer, unused by the firmware
+;    r29 (fp)  preserved across calls
 ;    r30       stack pointer, grows down (the demos keep it only word
 ;              aligned, the ABI wants 8 bytes)
 ;    r31 (ra)  return address, written by JAL/CALL, used by RET

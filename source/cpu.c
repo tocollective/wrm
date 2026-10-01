@@ -1,5 +1,6 @@
 #include "cpu.h"
 
+#include <math.h>
 #include <string.h>
 
 #include "disasm.h"
@@ -46,6 +47,118 @@ static uint32_t shift_right_arithmetic(const uint32_t value,
 	const uint32_t s = shift & 31;
 	if (value & 0x80000000u) return (value >> s) | ~(UINT32_MAX >> s);
 	return value >> s;
+}
+
+// Floating point: IEEE 754 binary32 in the GPRs, computed with the host's
+// float, which rounds to nearest even. Every NaN result is the canonical
+// one, so the outcome doesn't depend on how the host propagates payloads.
+#define CPU_FP_NAN 0x7FC00000u
+#define CPU_FP_SIGN 0x80000000u
+
+static float fp_value(const uint32_t bits) {
+	float f;
+	memcpy(&f, &bits, sizeof(f));
+	return f;
+}
+
+static uint32_t fp_result(const float f) {
+	if (isnan(f)) return CPU_FP_NAN;
+	uint32_t bits;
+	memcpy(&bits, &f, sizeof(bits));
+	return bits;
+}
+
+static bool fp_is_nan(const uint32_t bits) {
+	return (bits & 0x7FFFFFFFu) > 0x7F800000u;
+}
+
+// FMIN/FMAX: a NaN operand is ignored, and -0 is less than +0
+static uint32_t fp_min_max(const uint32_t a, const uint32_t b,
+						   const bool max) {
+	if (fp_is_nan(a)) return fp_is_nan(b) ? CPU_FP_NAN : b;
+	if (fp_is_nan(b)) return a;
+	const float fa = fp_value(a), fb = fp_value(b);
+	if (fa == fb) return max ? a & b : a | b; // only zeros differ in bits
+	return (max ? fa > fb : fa < fb) ? a : b;
+}
+
+// FCLASS: one bit set, from 0 = -inf up to 7 = +inf, 8 = signaling NaN,
+// 9 = quiet NaN
+static uint32_t fp_class(const uint32_t bits) {
+	const bool negative = bits & CPU_FP_SIGN;
+	const uint32_t exponent = BITS(bits, 23, 8);
+	const uint32_t fraction = BITS(bits, 0, 23);
+	if (exponent == 0xFF) {
+		if (!fraction) return negative ? 1u << 0 : 1u << 7;
+		return fraction & 0x400000u ? 1u << 9 : 1u << 8;
+	}
+	if (exponent) return negative ? 1u << 1 : 1u << 6;
+	if (fraction) return negative ? 1u << 2 : 1u << 5;
+	return negative ? 1u << 3 : 1u << 4;
+}
+
+// FTOI: rounds toward zero, saturates; NaN gives INT32_MAX
+static uint32_t fp_to_int(const uint32_t bits) {
+	const float f = fp_value(bits);
+	if (isnan(f) || f >= 2147483648.0f) return INT32_MAX;
+	if (f < -2147483648.0f) return (uint32_t)INT32_MIN;
+	return (uint32_t)(int32_t)f;
+}
+
+// FTOU: rounds toward zero, saturates; NaN gives UINT32_MAX
+static uint32_t fp_to_unsigned(const uint32_t bits) {
+	const float f = fp_value(bits);
+	if (isnan(f) || f >= 4294967296.0f) return UINT32_MAX;
+	if (f <= -1.0f) return 0;
+	return (uint32_t)f;
+}
+
+static uint32_t cpu_execute_fp(const uint8_t opcode, const uint32_t a,
+							   const uint32_t b, const uint32_t d) {
+	const float fa = fp_value(a), fb = fp_value(b), fd = fp_value(d);
+	switch (opcode) {
+		case CPU_OP_FADD:
+			return fp_result(fa + fb);
+		case CPU_OP_FSUB:
+			return fp_result(fa - fb);
+		case CPU_OP_FMUL:
+			return fp_result(fa * fb);
+		case CPU_OP_FDIV:
+			return fp_result(fa / fb);
+		case CPU_OP_FSQRT:
+			return fp_result(sqrtf(fa));
+		case CPU_OP_FMIN:
+			return fp_min_max(a, b, false);
+		case CPU_OP_FMAX:
+			return fp_min_max(a, b, true);
+		case CPU_OP_FMADD: // rounded once
+			return fp_result(fmaf(fa, fb, fd));
+		case CPU_OP_FMSUB:
+			return fp_result(fmaf(-fa, fb, fd));
+		case CPU_OP_FSGNJ:
+			return (a & ~CPU_FP_SIGN) | (b & CPU_FP_SIGN);
+		case CPU_OP_FSGNJN:
+			return (a & ~CPU_FP_SIGN) | (~b & CPU_FP_SIGN);
+		case CPU_OP_FSGNJX:
+			return a ^ (b & CPU_FP_SIGN);
+		case CPU_OP_FEQ: // false when either is NaN
+			return fa == fb;
+		case CPU_OP_FLT:
+			return fa < fb;
+		case CPU_OP_FLE:
+			return fa <= fb;
+		case CPU_OP_FCLASS:
+			return fp_class(a);
+		case CPU_OP_FTOI:
+			return fp_to_int(a);
+		case CPU_OP_FTOU:
+			return fp_to_unsigned(a);
+		case CPU_OP_ITOF:
+			return fp_result((float)(int32_t)a);
+		case CPU_OP_UTOF:
+			return fp_result((float)a);
+	}
+	return 0;
 }
 
 cpu_t* cpu_create(const bus_t bus) {
@@ -114,6 +227,26 @@ static cpu_format_t cpu_opcode_format(const uint8_t opcode) {
 		case CPU_OP_MULHSU:
 		case CPU_OP_LL:
 		case CPU_OP_SC:
+		case CPU_OP_FADD:
+		case CPU_OP_FSUB:
+		case CPU_OP_FMUL:
+		case CPU_OP_FDIV:
+		case CPU_OP_FSQRT:
+		case CPU_OP_FMIN:
+		case CPU_OP_FMAX:
+		case CPU_OP_FMADD:
+		case CPU_OP_FMSUB:
+		case CPU_OP_FSGNJ:
+		case CPU_OP_FSGNJN:
+		case CPU_OP_FSGNJX:
+		case CPU_OP_FEQ:
+		case CPU_OP_FLT:
+		case CPU_OP_FLE:
+		case CPU_OP_FCLASS:
+		case CPU_OP_FTOI:
+		case CPU_OP_FTOU:
+		case CPU_OP_ITOF:
+		case CPU_OP_UTOF:
 			return CPU_FORMAT_R;
 
 		case CPU_OP_ADDI:
@@ -253,6 +386,42 @@ static bool cpu_cr_is_counter(const uint32_t cr) {
 	return cr >= CPU_CR_CYCLE && cr <= CPU_CR_INSTRETH;
 }
 
+bool cpu_rs2_is_reserved(const uint8_t opcode) {
+	switch (opcode) {
+		case CPU_OP_LL:
+		case CPU_OP_FSQRT:
+		case CPU_OP_FCLASS:
+		case CPU_OP_FTOI:
+		case CPU_OP_FTOU:
+		case CPU_OP_ITOF:
+		case CPU_OP_UTOF:
+			return true;
+	}
+	return false;
+}
+
+// reserved fields must be zero, otherwise it is an illegal instruction
+static bool cpu_has_reserved_bits(const cpu_instruction_t* in) {
+	switch (in->format) {
+		case CPU_FORMAT_N:
+			return in->raw & 0xFFFFFF00u;
+		case CPU_FORMAT_R:
+			return (in->raw & 0xFF800000u)
+				   || (cpu_rs2_is_reserved(in->opcode) && in->rs2);
+		default:
+			break;
+	}
+	switch (in->opcode) {
+		case CPU_OP_MFCR:
+			return in->rs1;
+		case CPU_OP_MTCR:
+			return in->rd;
+		case CPU_OP_TLBI:
+			return in->rd || in->imm;
+	}
+	return false;
+}
+
 // MFCR/MTCR with a control register that doesn't exist, or MTCR to a
 // read-only one
 static bool cpu_cr_is_illegal(const cpu_instruction_t* in) {
@@ -296,7 +465,8 @@ static bool cpu_writes_rd(const cpu_instruction_t* in) {
 static bool cpu_reads_reg(const cpu_instruction_t* in, const uint8_t reg) {
 	const bool rs1 = in->format == CPU_FORMAT_R || in->format == CPU_FORMAT_I;
 	const bool rs2 = in->format == CPU_FORMAT_R;
-	const bool rd = cpu_is_store(in) || cpu_is_branch(in);
+	const bool rd = cpu_is_store(in) || cpu_is_branch(in)
+					|| in->opcode == CPU_OP_FMADD || in->opcode == CPU_OP_FMSUB;
 	return (rs1 && in->rs1 == reg) || (rs2 && in->rs2 == reg)
 		   || (rd && in->rd == reg);
 }
@@ -570,7 +740,8 @@ static bool cpu_stage_id(cpu_t* cpu, cpu_latch_t* out) {
 	out->a = cpu->gpr[in.rs1];
 	out->b = cpu->gpr[in.rs2];
 	out->d = cpu->gpr[in.rd];
-	if (in.format == CPU_FORMAT_INVALID || cpu_cr_is_illegal(&in))
+	if (in.format == CPU_FORMAT_INVALID || cpu_has_reserved_bits(&in)
+		|| cpu_cr_is_illegal(&in))
 		cpu_latch_fault(out, CPU_CAUSE_ILLEGAL_INSTRUCTION, in.raw);
 	else if (cpu_is_privileged(&in) && cpu_user_mode(cpu))
 		cpu_latch_fault(out, CPU_CAUSE_PRIVILEGED_INSTRUCTION, in.raw);
@@ -751,6 +922,11 @@ static bool cpu_stage_ex(cpu_t* cpu, cpu_latch_t* out, uint32_t* target) {
 		case CPU_OP_MTCR:
 		case CPU_OP_TLBI:
 			r = a; // used in WB
+			break;
+
+		default:
+			if (in->opcode >= CPU_OP_FADD && in->opcode <= CPU_OP_UTOF)
+				r = cpu_execute_fp(in->opcode, a, b, d);
 			break;
 	}
 

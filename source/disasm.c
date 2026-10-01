@@ -33,6 +33,16 @@ static const char* const disasm_mnemonics[256] = {
 	[CPU_OP_BGE] = "bge",     [CPU_OP_BLTU] = "bltu",   [CPU_OP_BGEU] = "bgeu",
 
 	[CPU_OP_JAL] = "jal",     [CPU_OP_JALR] = "jalr",
+
+	[CPU_OP_FADD] = "fadd",   [CPU_OP_FSUB] = "fsub",   [CPU_OP_FMUL] = "fmul",
+	[CPU_OP_FDIV] = "fdiv",   [CPU_OP_FSQRT] = "fsqrt", [CPU_OP_FMIN] = "fmin",
+	[CPU_OP_FMAX] = "fmax",   [CPU_OP_FMADD] = "fmadd", [CPU_OP_FMSUB] = "fmsub",
+	[CPU_OP_FSGNJ] = "fsgnj", [CPU_OP_FSGNJN] = "fsgnjn",
+	[CPU_OP_FSGNJX] = "fsgnjx",
+	[CPU_OP_FEQ] = "feq",     [CPU_OP_FLT] = "flt",     [CPU_OP_FLE] = "fle",
+	[CPU_OP_FCLASS] = "fclass",
+	[CPU_OP_FTOI] = "ftoi",   [CPU_OP_FTOU] = "ftou",   [CPU_OP_ITOF] = "itof",
+	[CPU_OP_UTOF] = "utof",
 };
 
 static const char* const disasm_cr_names[CPU_CR_COUNT] = {
@@ -63,7 +73,7 @@ static bool disasm_is_encodable(const cpu_instruction_t* in) {
 			return !(in->raw & 0xFFFFFF00u);
 		case CPU_FORMAT_R:
 			return !(in->raw & 0xFF800000u)
-				   && (in->opcode != CPU_OP_LL || !in->rs2);
+				   && (!cpu_rs2_is_reserved(in->opcode) || !in->rs2);
 		default:
 			break;
 	}
@@ -159,7 +169,10 @@ void disasm_instruction(const uint32_t raw, const uint32_t pc, char* out,
 			snprintf(out, size, "%s", name);
 			break;
 		case CPU_FORMAT_R:
-			snprintf(out, size, "%s r%u, r%u, r%u", name, rd, rs1, rs2);
+			if (cpu_rs2_is_reserved(in.opcode)) // FSQRT, FCLASS, conversions
+				snprintf(out, size, "%s r%u, r%u", name, rd, rs1);
+			else
+				snprintf(out, size, "%s r%u, r%u, r%u", name, rd, rs1, rs2);
 			break;
 		case CPU_FORMAT_I: // ADDI, SLTI, SLTIU, JALR
 			snprintf(out, size, "%s r%u, r%u, %d", name, rd, rs1, simm);

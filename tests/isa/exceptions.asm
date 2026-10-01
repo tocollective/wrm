@@ -90,6 +90,21 @@ test_main:
 	li r3, 0x002C0005
 	call check_trap
 
+	; ---- illegal instruction: reserved bits set in a known opcode
+	li r28, 400
+	la r10, reserved_bits
+	la r11, reserved_bits_end
+.reserved:
+	addi r28, r28, 1
+	jalr ra, r10                ; each entry is the word and a RET
+	li r1, 1
+	mv r2, r10
+	lw r3, 0(r10)
+	call check_trap
+	addi r10, r10, 8
+	bltu r10, r11, .reserved
+	li r10, DATA
+
 	; ---- misaligned loads: rd is not written
 	li r28, 20
 	li r5, 0x5555
@@ -361,6 +376,49 @@ check_trap:
 rom_word:
 	.dw 0xCAFEF00D
 
+; known opcodes with a reserved field that is not zero; each is followed by
+; a RET
+reserved_bits:
+	.dw 0x00000101              ; nop, bit 8
+	ret
+	.dw 0x80000108              ; fence, bit 31
+	ret
+	.dw 0x00010007              ; syscall, bit 16
+	ret
+	.dw 0x00000109              ; break, bit 8
+	ret
+	.dw 0x00800010              ; add r0, r0, r0, bit 23
+	ret
+	.dw 0x8000002A              ; mulhu r0, r0, r0, bit 31
+	ret
+	.dw 0x0080004C              ; sc r0, r0, (r0), bit 23
+	ret
+	.dw 0x0004004B              ; ll r0, (r0), rs2 = r1
+	ret
+	.dw 0x00002004              ; mfcr r0, status, rs1 = r1
+	ret
+	.dw 0x000C0105              ; mtcr scratch, r0, rd = r1
+	ret
+	.dw 0x00000106              ; tlbi r0, rd = r1
+	ret
+	.dw 0x00040006              ; tlbi r0, imm14 = 1
+	ret
+	.dw 0x00800070              ; fadd r0, r0, r0, bit 23
+	ret
+	.dw 0x00040074              ; fsqrt r0, r0, rs2 = r1
+	ret
+	.dw 0x00040083              ; fclass r0, r0, rs2 = r1
+	ret
+	.dw 0x00040084              ; ftoi r0, r0, rs2 = r1
+	ret
+	.dw 0x00040085              ; ftou r0, r0, rs2 = r1
+	ret
+	.dw 0x00040086              ; itof r0, r0, rs2 = r1
+	ret
+	.dw 0x00040087              ; utof r0, r0, rs2 = r1
+	ret
+reserved_bits_end:
+
 ; every opcode that is not in the instruction set, with reserved bits set;
 ; each is followed by a RET
 illegal_opcodes:
@@ -474,30 +532,6 @@ illegal_opcodes:
 	ret
 	.dw 0x5A5A5A6F
 	ret
-	.dw 0x5A5A5A70
-	ret
-	.dw 0x5A5A5A71
-	ret
-	.dw 0x5A5A5A72
-	ret
-	.dw 0x5A5A5A73
-	ret
-	.dw 0x5A5A5A74
-	ret
-	.dw 0x5A5A5A75
-	ret
-	.dw 0x5A5A5A76
-	ret
-	.dw 0x5A5A5A77
-	ret
-	.dw 0x5A5A5A78
-	ret
-	.dw 0x5A5A5A79
-	ret
-	.dw 0x5A5A5A7A
-	ret
-	.dw 0x5A5A5A7B
-	ret
 	.dw 0x5A5A5A7C
 	ret
 	.dw 0x5A5A5A7D
@@ -505,22 +539,6 @@ illegal_opcodes:
 	.dw 0x5A5A5A7E
 	ret
 	.dw 0x5A5A5A7F
-	ret
-	.dw 0x5A5A5A80
-	ret
-	.dw 0x5A5A5A81
-	ret
-	.dw 0x5A5A5A82
-	ret
-	.dw 0x5A5A5A83
-	ret
-	.dw 0x5A5A5A84
-	ret
-	.dw 0x5A5A5A85
-	ret
-	.dw 0x5A5A5A86
-	ret
-	.dw 0x5A5A5A87
 	ret
 	.dw 0x5A5A5A88
 	ret

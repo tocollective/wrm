@@ -39,7 +39,14 @@ N-type  |              reserved               |  opcode  |
 ```
 
 Field positions: `opcode` [7:0], `rd` [12:8], `rs1` [17:13], `rs2` [22:18],
-`imm14` [31:18], `imm19` [31:13]. Reserved bits should be zero.
+`imm14` [31:18], `imm19` [31:13].
+
+Reserved fields must be zero; an instruction with a reserved bit set is an
+illegal instruction. They are bits [31:8] of the N-type, bits [31:23] of
+the R-type, and the fields the tables below mark as reserved: `rs2` of
+`LL` and of the [floating-point](#floating-point) instructions with one
+source, `rs1` of `MFCR`, `rd` of `MTCR`, `rd` and `imm14` of `TLBI`. This
+keeps them free for future extensions.
 
 `imm14` is sign-extended, except for `ANDI`, `ORI`, `XORI`, `SHLI`, `SHRI`
 and `SARI`, where it is zero-extended. Shift amounts use the low 5 bits.
@@ -54,7 +61,7 @@ and `SARI`, where it is zero-extended. Shift amounts use the low 5 bits.
 | `0x01` | `NOP`           | N      | do nothing                             |
 | `0x02` | `WFI`           | N      | wait for interrupt (S)                 |
 | `0x03` | `IRET`          | N      | `pc = EPC`, `IE = PIE`, `UM = PUM`, `EXL = 0` (S) |
-| `0x04` | `MFCR rd, cr`   | I      | `rd = cr[imm14]` (S, except counters)  |
+| `0x04` | `MFCR rd, cr`   | I      | `rd = cr[imm14]` (`rs1` is reserved) (S, except counters) |
 | `0x05` | `MTCR cr, rs1`  | I      | `cr[imm14] = rs1` (`rd` is reserved) (S) |
 | `0x06` | `TLBI rs1`      | I      | drop the TLB entry of the page at `rs1` (`rd`, `imm14` are reserved) (S) |
 | `0x07` | `SYSCALL`       | N      | enter the handler with `CAUSE` = 12    |
@@ -140,7 +147,8 @@ Stores use `rd` as the source register.
 ### Atomic word operations
 
 All atomic addresses are `rs1` (no offset) and must be word aligned.
-`LL rd, (rs1)` (`0x4B`) reads a word and reserves its physical address.
+`LL rd, (rs1)` (`0x4B`) reads a word and reserves its physical address
+(`rs2` is reserved).
 `SC rd, rs2, (rs1)` (`0x4C`) stores `rs2` only if that physical word remains
 reserved, writing `0` to `rd` on success or `1` on failure. `SC` always
 clears the reservation and checks alignment and write permission even on
@@ -155,6 +163,20 @@ Any CPU or DMA write overlapping the reserved physical word, a trap,
 `MTCR PTBR`, `TLBI`, or a reset clears the reservation. `FENCE` orders
 earlier memory operations before later ones; this single-core machine
 already executes them in order.
+
+### Modifying code
+
+The CPU fetches ahead, so the instructions right after a store may
+already have been fetched before the store writes memory. Code that
+writes instructions (a program loader, a debugger setting `BREAK`) must
+transfer control before executing them: a taken branch, `JAL`, `JALR`,
+`IRET`, `MTCR STATUS`, `MTCR PTBR` or `TLBI` that comes after the store
+makes every instruction executed after it come from the updated memory. The same
+holds for code written by DMA once software has seen the device finish
+(for example, by reading `DONE`) and then transfers control. Falling
+through into modified code without such an instruction may execute
+either the old or the new words. `FENCE` doesn't order instruction
+fetches.
 
 ### Branches
 
@@ -178,6 +200,72 @@ address of the branch itself (range ±32KB).
 | `0x61` | `JALR rd, rs1, imm`   | I      | `rd = pc + 4; pc = (rs1 + imm14) & ~3`     |
 
 `JAL r0, off` is an unconditional jump, `JALR r0, r31, 0` is a return.
+
+### Floating point
+
+Floating-point values are IEEE 754 binary32 (`float`) held in the general
+purpose registers; there is no separate register file. They are loaded,
+stored, moved and passed like any other word. All floating-point
+instructions are R-type and take one cycle in EX, like the integer ALU.
+
+| Opcode | Mnemonic               | Operation                                   |
+|--------|------------------------|---------------------------------------------|
+| `0x70` | `FADD rd, rs1, rs2`    | `rd = rs1 + rs2`                            |
+| `0x71` | `FSUB rd, rs1, rs2`    | `rd = rs1 - rs2`                            |
+| `0x72` | `FMUL rd, rs1, rs2`    | `rd = rs1 × rs2`                            |
+| `0x73` | `FDIV rd, rs1, rs2`    | `rd = rs1 / rs2`                            |
+| `0x74` | `FSQRT rd, rs1`        | `rd = √rs1` (`rs2` is reserved)             |
+| `0x75` | `FMIN rd, rs1, rs2`    | `rd = min(rs1, rs2)`                        |
+| `0x76` | `FMAX rd, rs1, rs2`    | `rd = max(rs1, rs2)`                        |
+| `0x77` | `FMADD rd, rs1, rs2`   | `rd = rd + rs1 × rs2`, rounded once         |
+| `0x78` | `FMSUB rd, rs1, rs2`   | `rd = rd - rs1 × rs2`, rounded once         |
+| `0x79` | `FSGNJ rd, rs1, rs2`   | `rs1` with the sign of `rs2`                |
+| `0x7A` | `FSGNJN rd, rs1, rs2`  | `rs1` with the opposite sign of `rs2`       |
+| `0x7B` | `FSGNJX rd, rs1, rs2`  | `rs1` with the sign of `rs1` xor the sign of `rs2` |
+| `0x80` | `FEQ rd, rs1, rs2`     | `rd = rs1 == rs2`                           |
+| `0x81` | `FLT rd, rs1, rs2`     | `rd = rs1 < rs2`                            |
+| `0x82` | `FLE rd, rs1, rs2`     | `rd = rs1 <= rs2`                           |
+| `0x83` | `FCLASS rd, rs1`       | `rd` = class of `rs1`, see below (`rs2` is reserved) |
+| `0x84` | `FTOI rd, rs1`         | float → signed integer (`rs2` is reserved)  |
+| `0x85` | `FTOU rd, rs1`         | float → unsigned integer (`rs2` is reserved) |
+| `0x86` | `ITOF rd, rs1`         | signed integer → float (`rs2` is reserved)  |
+| `0x87` | `UTOF rd, rs1`         | unsigned integer → float (`rs2` is reserved) |
+
+`FMADD` and `FMSUB` read `rd` as their third source, like stores and
+branches do.
+
+Results are rounded to nearest, ties to even, except `FTOI`/`FTOU`, which
+round toward zero like a C cast. Subnormal numbers are supported. There
+are no other rounding modes, no exception flags and no floating-point
+traps: an invalid operation gives NaN, an overflow gives ±infinity,
+division by zero gives ±infinity (or NaN for `0 / 0`).
+
+- **NaN.** Every instruction that computes a NaN (`FADD` to `FMSUB`)
+  returns the canonical NaN `0x7FC00000`; the payload and sign of NaN
+  operands are not propagated. `FSGNJ`, `FSGNJN` and `FSGNJX` only move
+  the sign bit and never change the other bits, even of a NaN.
+- **Comparisons** write `1` or `0`. A NaN operand makes all of them `0`,
+  so `FEQ rd, rs, rs` is `0` only for a NaN. `-0` and `+0` are equal.
+- **`FMIN`/`FMAX`** return the other operand when one of them is NaN, and
+  the canonical NaN when both are. `-0` counts as less than `+0`.
+- **`FTOI`/`FTOU`** saturate: a value too large for the result gives the
+  largest integer (`0x7FFFFFFF` or `0xFFFFFFFF`), a value too small the
+  smallest (`0x80000000` or `0`); NaN gives the largest.
+- **`FCLASS`** sets exactly one bit of `rd`:
+
+  | Bit | Class of `rs1`     | Bit | Class of `rs1`      |
+  |-----|--------------------|-----|---------------------|
+  | 0   | −infinity          | 5   | positive subnormal  |
+  | 1   | negative normal    | 6   | positive normal     |
+  | 2   | negative subnormal | 7   | +infinity           |
+  | 3   | −0                 | 8   | signaling NaN       |
+  | 4   | +0                 | 9   | quiet NaN           |
+
+The assembler has pseudo-instructions for the common sign operations:
+`fmv rd, rs` (`FSGNJ rd, rs, rs`), `fneg rd, rs` (`FSGNJN rd, rs, rs`),
+`fabs rd, rs` (`FSGNJX rd, rs, rs`), and `fgt`/`fge`, which are
+`FLT`/`FLE` with the operands swapped. `fli rd, 1.5` loads the bits of a
+float constant, and `.float` emits them as data.
 
 ## Interrupts
 
@@ -303,7 +391,7 @@ between the two.
 | `CAUSE` | Fault                   | `BADADDR`                         |
 |---------|-------------------------|-----------------------------------|
 | `0`     | interrupt (not a fault) | unchanged                         |
-| `1`     | illegal instruction: unknown opcode or control register, `MTCR` to a read-only one | instruction word |
+| `1`     | illegal instruction: unknown opcode or control register, a reserved bit set, `MTCR` to a read-only one | instruction word |
 | `2`     | misaligned fetch        | `pc`                              |
 | `3`     | misaligned load         | virtual address                   |
 | `4`     | misaligned store        | virtual address                   |

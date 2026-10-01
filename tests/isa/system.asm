@@ -90,12 +90,12 @@ test_main:
 	mfcr r4, status
 	bnez r4, fail
 
-	; ---- PTBR: reserved bits read as zero
+	; ---- PTBR: reserved bits 1-3 read as zero, the ASID is kept
 	li r28, 30
 	li r1, 0x12345FFE           ; EN clear: translation stays off
 	mtcr ptbr, r1
 	mfcr r4, ptbr
-	li r3, 0x12345000
+	li r3, 0x12345FF0
 	bne r4, r3, fail
 	mtcr ptbr, r0
 

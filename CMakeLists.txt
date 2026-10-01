@@ -64,6 +64,12 @@ target_include_directories(${PROJECT_NAME}  PRIVATE
 
 target_link_libraries(${PROJECT_NAME} PRIVATE SDL3::SDL3)
 
+# sqrtf and fmaf of the CPU's floating point are in libm on Linux
+find_library(WRM081632_LIBM m)
+if(WRM081632_LIBM)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${WRM081632_LIBM})
+endif()
+
 set_target_properties(${PROJECT_NAME} PROPERTIES
     C_STANDARD 99
     C_STANDARD_REQUIRED YES

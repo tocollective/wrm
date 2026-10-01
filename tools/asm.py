@@ -14,7 +14,8 @@ syntax:
   NAME = expr               constant (also .equ NAME, expr / .set NAME, expr)
   ; comment  # comment  // comment
 
-  registers: r0-r31, zero (= r0), fp (= r29), sp (= r30), ra (= r31)
+  registers: r0-r31, zero (= r0), tp (= r28), fp (= r29), sp (= r30),
+             ra (= r31)
   control registers: status, epc, ivec, scratch, cause, badaddr, ptbr,
                      cycle, cycleh, instret, instreth (read-only),
                      cr0-cr10 or a number
@@ -29,7 +30,9 @@ syntax:
     BEQ rd, rs1, target       JAL [rd,] target        JALR rd, rs1[, imm]
     MFCR rd, cr               MTCR cr, rs1            JALR rd, imm(rs1)
     TLBI rs1                  LL rd, (rs1)           SC rd, rs2, (rs1)
+    FADD rd, rs1, rs2         FSQRT rd, rs1           ITOF rd, rs1
   branch and JAL targets are addresses (labels), not offsets.
+  float values (fli, .float): 1.5 -2e-3 inf nan, or an integer expression
 
 pseudo-instructions:
   li rd, value      1 or 2 instructions (LUI + ORI for 32-bit values)
@@ -44,6 +47,11 @@ pseudo-instructions:
   ret               JALR r0, r31, 0
   beqz/bnez/bltz/bgez/bgtz/blez rs, target
   bgt/ble/bgtu/bleu rs1, rs2, target
+  fli rd, float     li with the bits of a binary32 value
+  fmv rd, rs        FSGNJ rd, rs, rs
+  fneg rd, rs       FSGNJN rd, rs, rs
+  fabs rd, rs       FSGNJX rd, rs, rs
+  fgt/fge rd, rs1, rs2   FLT/FLE rd, rs2, rs1
 
 directives:
   .org address              continue at an absolute address
@@ -51,6 +59,7 @@ directives:
   .byte / .db  values       8-bit values or strings
   .half / .dh  values       16-bit values
   .word / .dw  values       32-bit values
+  .float values             binary32 values
   .ascii "str"[, ...]       string bytes
   .asciz / .string "str"    string bytes followed by a zero byte
   .space / .zero n[, fill]  n fill bytes
@@ -61,6 +70,7 @@ directives:
 import argparse
 import os
 import re
+import struct
 import sys
 
 ROM_BASE = 0xFE000000
@@ -87,6 +97,11 @@ OP_SLTU = 0x19
 OP_SLTIU = 0x29
 OP_JAL = 0x60
 OP_JALR = 0x61
+OP_FSGNJ = 0x79
+OP_FSGNJN = 0x7A
+OP_FSGNJX = 0x7B
+OP_FLT = 0x81
+OP_FLE = 0x82
 
 
 def enc_r(op, rd, rs1, rs2):
@@ -111,7 +126,7 @@ def check_range(v, lo, hi, what):
 
 
 REGS = {f"r{i}": i for i in range(32)}
-REGS.update(zero=0, fp=29, sp=30, ra=31)  # roles from docs/ABI.md
+REGS.update(zero=0, tp=28, fp=29, sp=30, ra=31)  # roles from docs/ABI.md
 
 CREGS = {f"cr{i}": i for i in range(11)}
 CREGS.update(status=0, epc=1, ivec=2, scratch=3, cause=4, badaddr=5, ptbr=6,
@@ -375,6 +390,20 @@ def fmt_r(op):
 	return enc
 
 
+def fmt_r1(op):
+	def enc(a, st, pc):
+		rd, rs1 = a.nargs(st, 2)
+		return [enc_r(op, a.reg(rd), a.reg(rs1), 0)]
+	return enc
+
+
+def fmt_r_swap(op):
+	def enc(a, st, pc):
+		rd, rs1, rs2 = a.nargs(st, 3)
+		return [enc_r(op, a.reg(rd), a.reg(rs2), a.reg(rs1))]
+	return enc
+
+
 def fmt_atomic(op, load=False):
 	def enc(a, st, pc):
 		args = a.nargs(st, 2 if load else 3)
@@ -511,13 +540,13 @@ def load_short(rd, v):
 	return load_full(rd, v)
 
 
-def size_li(a, st, pc):
+def size_li(a, st, pc, value=None):
 	# The short form is used only when the value is known in the first
 	# pass, so the size never changes between passes.
 	if len(st.args) != 2:
 		return 8
 	try:
-		v = a.try_eval(st, st.args[1], pc)
+		v = (value or a.try_eval)(st, st.args[1], pc)
 	except AsmError:
 		return 8
 	if v is None or not -(1 << 31) <= v < (1 << 32):
@@ -525,9 +554,9 @@ def size_li(a, st, pc):
 	return 4 * len(load_short(0, v))
 
 
-def enc_li(a, st, pc):
-	rd, value = a.nargs(st, 2)
-	v = a.eval(st, value, pc)
+def enc_li(a, st, pc, value=None):
+	rd, text = a.nargs(st, 2)
+	v = (value or a.eval)(st, text, pc)
 	check_value32(v)
 	return load_full(a.reg(rd), v) if st.size == 8 else load_short(a.reg(rd), v)
 
@@ -576,6 +605,15 @@ def define_instructions():
 	ins["jal"] = (4, enc_jal)
 	ins["jalr"] = (4, enc_jalr)
 
+	for i, name in enumerate(("fadd", "fsub", "fmul", "fdiv", "fsqrt", "fmin", "fmax",
+							  "fmadd", "fmsub", "fsgnj", "fsgnjn", "fsgnjx")):
+		ins[name] = (4, (fmt_r1 if name == "fsqrt" else fmt_r)(0x70 + i))
+	for name, op in (("feq", 0x80), ("flt", 0x81), ("fle", 0x82)):
+		ins[name] = (4, fmt_r(op))
+	for name, op in (("fclass", 0x83), ("ftoi", 0x84), ("ftou", 0x85), ("itof", 0x86),
+					 ("utof", 0x87)):
+		ins[name] = (4, fmt_r1(op))
+
 	# pseudo-instructions
 	ins["li"] = (size_li, enc_li)
 	ins["la"] = (8, enc_la)
@@ -597,6 +635,13 @@ def define_instructions():
 	ins["ble"] = (4, fmt_branch(0x53, swap=True))
 	ins["bgtu"] = (4, fmt_branch(0x54, swap=True))
 	ins["bleu"] = (4, fmt_branch(0x55, swap=True))
+	ins["fli"] = (lambda a, st, pc: size_li(a, st, pc, a.try_float),
+				  lambda a, st, pc: enc_li(a, st, pc, a.float))
+	ins["fmv"] = (4, pseudo_rr(lambda rd, rs: enc_r(OP_FSGNJ, rd, rs, rs)))
+	ins["fneg"] = (4, pseudo_rr(lambda rd, rs: enc_r(OP_FSGNJN, rd, rs, rs)))
+	ins["fabs"] = (4, pseudo_rr(lambda rd, rs: enc_r(OP_FSGNJX, rd, rs, rs)))
+	ins["fgt"] = (4, fmt_r_swap(OP_FLT))
+	ins["fge"] = (4, fmt_r_swap(OP_FLE))
 
 
 define_instructions()
@@ -634,6 +679,10 @@ def dir_data(width):
 		return bytes(out)
 
 	return size, emit
+
+
+def emit_float(a, st, pc):
+	return b"".join(a.float(st, arg, pc).to_bytes(4, "little") for arg in st.args)
 
 
 def dir_ascii(zero):
@@ -683,6 +732,7 @@ DIRECTIVES = {
 	".byte": dir_data(1), ".db": dir_data(1),
 	".half": dir_data(2), ".dh": dir_data(2),
 	".word": dir_data(4), ".dw": dir_data(4),
+	".float": (lambda a, st, pc: 4 * len(a.nargs(st, 1, None)), emit_float),
 	".ascii": dir_ascii(False),
 	".asciz": dir_ascii(True), ".string": dir_ascii(True),
 	".space": (size_space, emit_space), ".zero": (size_space, emit_space),
@@ -777,6 +827,23 @@ class Assembler:
 			return self.eval(st, text, pc)
 		except Undefined as e:
 			raise AsmError(f"{e} (must be defined before this line)") from None
+
+	def float(self, st, text, pc):
+		"""Bits of the binary32 value of a float literal or an integer expression."""
+		try:
+			v = float(text)
+		except ValueError:
+			v = self.eval(st, text, pc)
+		try:
+			return struct.unpack("<I", struct.pack("<f", v))[0]
+		except OverflowError:
+			raise AsmError(f"'{text.strip()}' is out of range for a float") from None
+
+	def try_float(self, st, text, pc):
+		try:
+			return self.float(st, text, pc)
+		except Undefined:
+			return None
 
 	def nargs(self, st, lo, hi=-1):
 		hi = lo if hi == -1 else hi
