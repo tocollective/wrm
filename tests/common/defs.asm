@@ -20,6 +20,7 @@ BEEPER          = 0xFD009000
 MOUSE           = 0xFD00A000
 NET             = 0xFD00B000
 AUDIO           = 0xFD00C000
+RTC             = 0xFD00D000
 
 PIC_PENDING     = 0x00
 PIC_ENABLE      = 0x04
@@ -35,6 +36,7 @@ IRQ_FLOPPY      = 6
 IRQ_MOUSE       = 7
 IRQ_NET         = 8
 IRQ_AUDIO       = 9
+IRQ_RTC         = 10
 
 KBD_STATUS      = 0x00
 KBD_DATA        = 0x04
@@ -232,6 +234,17 @@ VOICE_STEREO    = 1 << 3
 VOICE_SIGNAL_END = 1 << 4
 VOICE_SIGNAL_HALF = 1 << 5
 AUDIO_SAMPLE_RATE = 48000
+
+RTC_SECONDS_LO  = 0x00              ; reading it latches the time
+RTC_SECONDS_HI  = 0x04
+RTC_NANOSECONDS = 0x08
+RTC_UTC_OFFSET  = 0x0C
+RTC_ALARM_LO    = 0x10
+RTC_ALARM_HI    = 0x14
+RTC_CONTROL     = 0x18
+RTC_STATUS      = 0x1C
+RTC_ARMED       = 1 << 0            ; CONTROL
+RTC_ALARM       = 1 << 0            ; STATUS
 
 STATUS_IE       = 1 << 0
 STATUS_PUM      = 1 << 3            ; user mode after IRET

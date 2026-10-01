@@ -7,9 +7,9 @@
 // A tour of the machine: every instruction group, the UART, the keyboard,
 // the PIC, polling, WFI, interrupts, the MMU and user mode, the timer and
 // the cycle counters, the video modes, the mouse, the network, the audio
-// card, power off. The demos' output goes to the UART, i.e. to the host's
-// stdout; the screen shows a short banner, the video modes and the
-// mouse's pointer.
+// card, the real-time clock, power off. The demos' output goes to the
+// UART, i.e. to the host's stdout; the screen shows a short banner, the
+// video modes and the mouse's pointer.
 //
 // Build (m/docs/COMPILER.md, "Цель: ROM"):
 //   python3 tools/m.py --rom firmware/main.m -o firmware.s
@@ -48,6 +48,7 @@ import { demoVideo } from "demos/video.m"
 import { demoMouse } from "demos/mouse.m"
 import { demoNet } from "demos/net.m"
 import { demoAudio } from "demos/audio.m"
+import { demoRtc } from "demos/rtc.m"
 
 /// The end of the ROM image (m/runtime/rom0.asm).
 extern let __image_end: UByte
@@ -75,8 +76,10 @@ let main(argc: UWord, argv: *UByte[]): Word {
     demoMouse()
     demoNet()
     demoAudio()
+    demoRtc()
 
     puts("\nbye\n")
+    // while true {}
     return 0                        // exit code 0: the emulator quits
 }
 

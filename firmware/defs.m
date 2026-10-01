@@ -138,6 +138,17 @@ type AudioVoiceRegs {
     reserved: UWord,        // the next voice at 0x20
 }
 
+type RtcRegs {
+    secondsLo:   UWord,     // since 1970-01-01 UTC; reading it latches the rest
+    secondsHi:   UWord,
+    nanoseconds: UWord,
+    utcOffset:   UWord,     // local time - UTC in seconds, signed
+    alarmLo:     UWord,     // 0x10
+    alarmHi:     UWord,
+    control:     UWord,
+    status:      UWord,     // writing 1 clears
+}
+
 let pic: *volatile mut PicRegs = 0xFD00_0000 as *volatile mut PicRegs
 let kbd: *volatile mut KbdRegs = 0xFD00_1000 as *volatile mut KbdRegs
 let uart: *volatile mut UartRegs = 0xFD00_2000 as *volatile mut UartRegs
@@ -152,6 +163,7 @@ let net: *volatile mut NetRegs = 0xFD00_B000 as *volatile mut NetRegs
 let netSocket: *volatile mut NetSocketRegs = 0xFD00_B100 as *volatile mut NetSocketRegs
 let audio: *volatile mut AudioRegs = 0xFD00_C000 as *volatile mut AudioRegs
 let audioVoice: *volatile mut AudioVoiceRegs = 0xFD00_C100 as *volatile mut AudioVoiceRegs
+let rtc: *volatile mut RtcRegs = 0xFD00_D000 as *volatile mut RtcRegs
 
 let PIC_BASE: UWord = 0xFD00_0000      // the I/O region
 let ROM_BASE: UWord = 0xFE00_0000
@@ -162,6 +174,7 @@ let IRQ_TIMER: UWord = 2
 let IRQ_MOUSE: UWord = 7
 let IRQ_NET: UWord = 8
 let IRQ_AUDIO: UWord = 9
+let IRQ_RTC: UWord = 10
 
 let KBD_READY: UWord = 1 << 0
 let KBD_OVERFLOW: UWord = 1 << 1
@@ -242,6 +255,9 @@ let VOICE_SIGNAL_END: UWord = 1 << 4
 let VOICE_SIGNAL_HALF: UWord = 1 << 5
 let AUDIO_VOICES: UWord = 8
 
+let RTC_ARMED: UWord = 1 << 0          // CONTROL
+let RTC_ALARM: UWord = 1 << 0          // STATUS
+
 // ---- the CPU ---------------------------------------------------------------
 
 // control registers (docs/INSTRUCTIONS.md#control-registers)
@@ -304,11 +320,11 @@ let HID_ESCAPE: UWord = 0x29
 
 export {
     PicRegs, KbdRegs, UartRegs, TimerRegs, PowerRegs, DiskRegs, VideoRegs, BeeperRegs,
-    MouseRegs, NetRegs, NetSocketRegs, AudioRegs, AudioVoiceRegs,
+    MouseRegs, NetRegs, NetSocketRegs, AudioRegs, AudioVoiceRegs, RtcRegs,
     pic, kbd, uart, timer, power, disk0, video, floppy, beeper,
-    mouse, net, netSocket, audio, audioVoice,
+    mouse, net, netSocket, audio, audioVoice, rtc,
     PIC_BASE, ROM_BASE,
-    IRQ_KBD, IRQ_UART, IRQ_TIMER, IRQ_MOUSE, IRQ_NET, IRQ_AUDIO,
+    IRQ_KBD, IRQ_UART, IRQ_TIMER, IRQ_MOUSE, IRQ_NET, IRQ_AUDIO, IRQ_RTC,
     KBD_READY, KBD_OVERFLOW, KBD_FLUSH,
     UART_RX_READY, UART_TX_READY, UART_FLUSH, HOST_ESCAPE,
     TIMER_ENABLE, TIMER_PERIODIC, TIMER_EXPIRED,
@@ -324,6 +340,7 @@ export {
     NET_EV_CONNECTED, NET_EV_CLOSED, NET_EV_RECEIVED, NET_EV_SENT, NET_ERR_STATE, NET_ERR_NETWORK,
     VOICE_ON, VOICE_LOOP, VOICE_16BIT, VOICE_STEREO, VOICE_SIGNAL_END, VOICE_SIGNAL_HALF,
     AUDIO_VOICES,
+    RTC_ARMED, RTC_ALARM,
     CR_STATUS, CR_EPC, CR_IVEC, CR_CAUSE, CR_BADADDR, CR_PTBR, CR_CYCLE, CR_CYCLEH, CR_INSTRET,
     STATUS_IE, STATUS_PUM, STATUS_EXL, CAUSE_INTERRUPT, CAUSE_SYSCALL,
     PTBR_EN, PTE_V, PTE_R, PTE_W, PTE_X, PTE_U, PAGE_SIZE, SUPERPAGE_SIZE,

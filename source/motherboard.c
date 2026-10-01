@@ -111,6 +111,9 @@ static bool motherboard_io_read(motherboard_t* mb, const uint32_t address,
 		case MB_AUDIO_BASE:
 			fail = audiocard_read(mb->audiocard, offset, size, value);
 			break;
+		case MB_RTC_BASE:
+			fail = rtc_read(mb->rtc, offset, size, value);
+			break;
 	}
 	if (!fail) *value &= motherboard_io_mask(size);
 	return fail;
@@ -148,6 +151,8 @@ static bool motherboard_io_write(motherboard_t* mb, const uint32_t address,
 			return netcard_write(mb->netcard, offset, size, value);
 		case MB_AUDIO_BASE:
 			return audiocard_write(mb->audiocard, offset, size, value);
+		case MB_RTC_BASE:
+			return rtc_write(mb->rtc, offset, size, value);
 	}
 	return true;
 }
@@ -320,6 +325,7 @@ motherboard_t* motherboard_create(void) {
 			mb->pic, MB_IRQ_NET, video_dma, cfg->net, cfg->net_bind);
 	mb->audiocard = audiocard_create(
 			mb->pic, MB_IRQ_AUDIO, video_dma, (uint32_t)mb->clock->rate);
+	mb->rtc = rtc_create(mb->pic, MB_IRQ_RTC, (uint32_t)mb->clock->rate);
 
 	for (int i = 0; i < RAM_SLOT_COUNT; i++) {
 		mb->ram_slot[i].ram = NULL;
@@ -342,6 +348,11 @@ motherboard_t* motherboard_create(void) {
 
 void motherboard_destroy(motherboard_t* mb) {
 	if (!mb) return;
+	if (mb->rtc) {
+		rtc_destroy(mb->rtc);
+		mb->rtc = NULL;
+	}
+
 	if (mb->audiocard) {
 		audiocard_destroy(mb->audiocard);
 		mb->audiocard = NULL;
@@ -445,6 +456,7 @@ void motherboard_reset(motherboard_t* mb) {
 	mouse_reset(mb->mouse);
 	netcard_reset(mb->netcard);
 	audiocard_reset(mb->audiocard);
+	rtc_reset(mb->rtc);
 	pic_reset(mb->pic);
 }
 
@@ -456,6 +468,7 @@ void motherboard_tick(motherboard_t* mb) {
 	disk_tick(mb->floppy);
 	beeper_tick(mb->beeper);
 	audiocard_tick(mb->audiocard);
+	rtc_tick(mb->rtc);
 	cpu_set_irq(mb->cpu, pic_irq(mb->pic));
 	cpu_update(mb->cpu);
 

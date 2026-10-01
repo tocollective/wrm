@@ -14,6 +14,7 @@
 #include "devices/pic.h"
 #include "devices/pit.h"
 #include "devices/power.h"
+#include "devices/rtc.h"
 #include "devices/uart.h"
 #include "devices/videocard.h"
 #include "ram.h"
@@ -39,6 +40,7 @@
 #define MB_MOUSE_BASE 0xFD00A000
 #define MB_NET_BASE 0xFD00B000
 #define MB_AUDIO_BASE 0xFD00C000
+#define MB_RTC_BASE 0xFD00D000
 #define MB_ROM_BASE 0xFE000000 // ROM_MAX_SIZE bytes up to 0xFFFFFFFF
 
 // IRQ lines (see docs/SPECIFICATION.md)
@@ -51,6 +53,7 @@
 #define MB_IRQ_MOUSE 7
 #define MB_IRQ_NET 8
 #define MB_IRQ_AUDIO 9
+#define MB_IRQ_RTC 10
 
 typedef struct ram_slot {
 	ram_t* ram;
@@ -74,6 +77,7 @@ typedef struct motherboard {
 	mouse_t* mouse;
 	netcard_t* netcard;
 	audiocard_t* audiocard;
+	rtc_t* rtc;
 } motherboard_t;
 
 motherboard_t* motherboard_create(void);

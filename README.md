@@ -181,6 +181,7 @@ runs every ROM through it as a test of its own.
 | `sound`    | the beeper's registers and `DURATION` timing; the audio card's voices, loops, signals and DMA faults |
 | `mouse`    | the mouse's registers (headless, so without events)         |
 | `net`      | the network card without a link (`--no-net`), and with one over the host's loopback: TCP, UDP, DNS |
+| `rtc`      | the real-time clock: the host's time and its latch, the alarm and its IRQ line |
 
 A test includes `tests/common/harness.asm` and defines `test_main`. It
 sets `r28` to the number of each check and ends with `j pass`, or

@@ -18,6 +18,7 @@
 | `0xFD00A000`–`0xFD00AFFF` | Mouse                                   |
 | `0xFD00B000`–`0xFD00BFFF` | Network card                            |
 | `0xFD00C000`–`0xFD00CFFF` | Audio card                              |
+| `0xFD00D000`–`0xFD00DFFF` | Real-time clock                         |
 | `0xFE000000`–`0xFFFFFFFF` | ROM (32MB, read-only)                   |
 
 Addresses between the end of RAM and `0xFD000000` are unmapped, as are
@@ -66,6 +67,7 @@ with `ENABLE` left at 0.
 | 7   | Mouse    | event FIFO is not empty |
 | 8   | Network  | `PENDING` is not zero   |
 | 9   | Audio    | `STATUS` is not zero    |
+| 10  | RTC      | `STATUS.ALARM` is set   |
 
 ### Keyboard
 
@@ -677,6 +679,43 @@ the card runs the same.
 
 IRQ line 9 is asserted while `STATUS` is not zero.
 
+### Real-time clock
+
+The date and time, taken from the host's wall clock, and a one-shot
+alarm that raises IRQ 10. Unlike the timer, it keeps counting across a
+reset and follows the host even when the machine runs slower than its
+clock rate.
+
+| Offset | Register      | Access | Description                                       |
+|--------|---------------|--------|---------------------------------------------------|
+| `0x00` | `SECONDS_LO`  | R      | seconds since 1970-01-01 00:00:00 UTC, low 32 bits; reading it latches the time |
+| `0x04` | `SECONDS_HI`  | R      | latched seconds, high 32 bits                     |
+| `0x08` | `NANOSECONDS` | R      | latched fraction of the second, 0–999999999       |
+| `0x0C` | `UTC_OFFSET`  | R      | latched local time minus UTC, in seconds, signed (36000 for UTC+10) |
+| `0x10` | `ALARM_LO`    | RW     | alarm time in seconds since the epoch, low 32 bits |
+| `0x14` | `ALARM_HI`    | RW     | alarm time, high 32 bits                          |
+| `0x18` | `CONTROL`     | RW     | bit 0 = alarm armed                               |
+| `0x1C` | `STATUS`      | RW     | bit 0 = alarm went off; writing 1 clears it       |
+
+The time can't change between the reads of one value: reading
+`SECONDS_LO` takes a snapshot of the time, and `SECONDS_HI`,
+`NANOSECONDS` and `UTC_OFFSET` return that snapshot until the next read of
+`SECONDS_LO`. So read `SECONDS_LO` first. `UTC_OFFSET` is the host's time
+zone, daylight saving time included, at the latched time; it is 0 if the
+host doesn't know it. The time is not settable: an OS that wants another
+time keeps its own offset. Leap seconds are not counted, as in Unix time.
+
+While `CONTROL` bit 0 is set, the clock compares the time in whole
+seconds with `ALARM`: once `SECONDS` ≥ `ALARM`, it sets `STATUS.ALARM`
+and clears `CONTROL` bit 0, so the alarm goes off once. The clock
+compares them when `CONTROL` is written, so an alarm in the past goes
+off at once, and then once every clock rate / 1000 ticks; the alarm can
+be up to that late. Changing `ALARM` while armed takes effect with the
+next comparison.
+
+`STATUS.ALARM` stays set, and the IRQ line asserted, until software
+writes 1 to it. Clearing `CONTROL` bit 0 does not clear it.
+
 ## Reset
 
 On reset all registers are zero and `pc = 0xFE000000`, so execution starts
@@ -689,7 +728,9 @@ mask, the timer and its `COUNT` are cleared, disk transfers stop and the
 disk registers are cleared, the video card stops its DMA, turns the
 display off and clears its palette and `FRAME`, the beeper goes quiet,
 the mouse is disabled, the network card closes its sockets and forgets a
-DNS lookup, the audio card's voices stop).
+DNS lookup, the audio card's voices stop, the real-time clock's alarm is
+disarmed and cleared). The real-time clock's time is not reset: it keeps
+following the host's clock.
 RAM, VRAM and the disk images, and the disk in the floppy drive, keep
 their contents, including the sectors of an interrupted
 write that were already written. VRAM is zero at power-on.
@@ -758,8 +799,8 @@ The boot info block describes the machine:
 - The PIC `ENABLE` mask is 0. The boot disk is idle with `DONE` clear.
   The beeper may still be sounding the firmware's beep, for up to 1/10 s
   of ticks.
-  The timer, the mouse, the network card and the audio card are as
-  after reset. The UART RX FIFO was flushed at reset, but
+  The timer, the mouse, the network card, the audio card and the
+  real-time clock's alarm are as after reset. The UART RX FIFO was flushed at reset, but
   it may hold input typed since then, as may the keyboard FIFO.
 - The video card shows the firmware's screen console: 640×480, 8 bpp,
   `START` = 0, display on, IRQs off, the engine idle. The palette holds
@@ -778,7 +819,8 @@ each, then the video card moves a DMA word and counts the tick towards
 the end of the frame, then the floppy counts the tick towards its next
 word, then the beeper
 advances its wave and `DURATION`, then the audio card counts the tick
-towards its next frame, then the CPU samples the IRQ line and
+towards its next frame, then the real-time clock counts the tick
+towards its next alarm comparison, then the CPU samples the IRQ line and
 advances its pipeline by one stage. Nothing runs once the CPU has
 halted or the machine is powered off.
 
