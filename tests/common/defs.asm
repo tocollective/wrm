@@ -1,6 +1,7 @@
 ; ============================================================================
-;  Definitions shared by the whole firmware: hardware constants and the
-;  RAM layout. Constants only, no code or data.
+;  Hardware constants and a RAM layout for the test ROMs (the firmware,
+;  now in M, has its own in firmware/defs.m). Constants only, no code or
+;  data.
 ; ============================================================================
 
 ; ---- memory map (docs/SPECIFICATION.md) ------------------------------------

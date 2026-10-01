@@ -15,7 +15,8 @@ dd if=/dev/zero of=firmware.rom  bs=1m  count=32
 ## Running
 
 ```sh
-python3 tools/asm.py firmware/main.asm -o firmware.rom
+python3 tools/m.py --rom firmware/main.m -o firmware.s
+python3 tools/asm.py firmware.s -o firmware.rom
 bin/wrm081632 [--rom PATH] [--ram SIZE[,...]] [--clock HZ] [--hdd PATH]
               [--floppy PATH] [--mute] [--headless] [--trace[=PATH]] [--debug]
 ```
@@ -54,15 +55,17 @@ A disk image is a plain file of 512-byte sectors. The disk is written
 back to the file, and a file the emulator can't write is attached
 read-only.
 
-The firmware boots from the floppy, or else from disk 0, when it holds a
-boot image. A boot image starts with a small header and is loaded to
-`0x00010000`
-([docs/SPECIFICATION.md](docs/SPECIFICATION.md#boot-protocol)). Assembled
-at that address and padded to a whole sector, the assembler output is
-itself a bootable disk image:
+The firmware (`firmware/`, written in M: see
+[m/docs/spec](m/docs/spec/README.md)) boots from the floppy, or else from
+disk 0, when it holds a boot image. A boot image starts with a small
+header and is loaded to `0x00010000`
+([docs/SPECIFICATION.md](docs/SPECIFICATION.md#boot-protocol)). The M
+compiler makes one by default; assembled at that address and padded to
+whole sectors, the assembler output is itself a bootable disk image:
 
 ```sh
-python3 tools/asm.py firmware/disk/hello.asm --base 0x10000 -o hdd0.img
+python3 tools/m.py firmware/disk/hello.m -o hello.s
+python3 tools/asm.py hello.s --base 0x10000 -o hdd0.img
 bin/wrm081632 --hdd hdd0.img
 bin/wrm081632 --floppy hdd0.img     # the same image boots from the floppy
 ```
@@ -139,7 +142,7 @@ runs every ROM through it as a test of its own.
 | `isa`      | every instruction, control registers, exceptions, user mode |
 | `pipeline` | forwarding and stalls, cycle timing, precise faults and interrupts |
 | `mmu`      | pages and superpages, permissions, TLB invalidation, `U`    |
-| `disk`     | the disk controller, the floppy drive, booting from disk    |
+| `disk`     | the disk controller, the floppy drive, the firmware booting from disk |
 | `video`    | the video card: modes, palette, drawing engine, DMA, VBLANK |
 | `sound`    | the beeper's registers and `DURATION` timing                |
 
@@ -157,6 +160,7 @@ Comment lines in a test set up the machine it runs on:
 | `; @hdd FILE.asm` | attach a boot image assembled from `FILE.asm` (relative to the test) at `0x00010000` |
 | `; @floppy SPEC`  | put a disk in the floppy drive, `N` or `FILE.asm` as for `@hdd` |
 | `; @args ARGS`    | more emulator options, e.g. `--ram 4M,2M`               |
+| `; @rom FILE.m`   | run a ROM compiled from M (e.g. `../../firmware/main.m`) instead of the test itself |
 
 Each `@hdd` attaches the next disk, 0 and then 1.
 

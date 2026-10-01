@@ -5,7 +5,10 @@ source is one load or store, in order, so 'volatile' holds by itself.
 
 Values of expressions live on a stack of registers, r10-r27. They are
 saved by the callee (docs/ABI.md), so a call in the middle of an
-expression keeps them. A scalar is its value, normalized to its type
+expression keeps them. Value number v is in r(10 + v mod 18): past 18
+values, pushing a value spills the one 18 below it, which shares its
+register, to a slot of the frame, and popping reloads it. So the top 18
+values are always in registers, which is all an operation needs. A scalar is its value, normalized to its type
 (7.8: UByte and UHalf zero-extended, Byte and Half sign-extended, Bool 0
 or 1); a struct or an array is its address. r1-r9 are only used inside
 one step: marshalling a call, a byte-wise load, a large offset (r9).
@@ -25,7 +28,7 @@ import re
 import struct
 
 from .diag import CompileError
-from .image import Program, RUNTIME, RUNTIME_ASM
+from .image import BOOT_RUNTIME, ROM_RUNTIME, RUNTIME, Program
 from .lexer import CMP_OPS
 from .syntax import *
 from .typesys import *
@@ -47,7 +50,8 @@ BRANCH_REACH = 7000     # instructions; a branch reaches 8192 either way
 
 
 def reg(i):
-	return f"r{10 + i}"
+	"""The register of value number i of the stack."""
+	return f"r{10 + i % NREGS}"
 
 
 def is_aggr(t):
@@ -184,8 +188,10 @@ class CodeGen:
 		if d.mut and all(b == 0 for b in image):
 			self.program.bss.append((sym.label, size, align))
 			return
-		section = self.program.data if d.mut else self.program.rodata
-		section.append(f"\t.align {align}\n{sym.label}:\n" + self.bytes_lines(image))
+		if d.mut:
+			self.program.data.append((sym.label, size, align, self.bytes_lines(image)))
+		else:
+			self.program.rodata.append(f"\t.align {align}\n{sym.label}:\n" + self.bytes_lines(image))
 
 	def static(self, e, t, image, off):
 		"""Writes the value of a constant initializer into image: bytes,
@@ -257,8 +263,9 @@ class CodeGen:
 	# -- symbols defined outside M
 
 	def check_externs(self):
-		defined = {"__bss_start", "__bss_end", "__image_start", "__image_end"}
-		for name in RUNTIME_ASM:
+		defined = {"__bss_start", "__bss_end", "__image_start", "__image_end", "__data_start",
+				   "__data_end", "__data_load"}
+		for name in dict.fromkeys(BOOT_RUNTIME + ROM_RUNTIME):
 			defined |= self.asm_labels(os.path.join(RUNTIME, name), set())
 		for path in self.program.includes:
 			defined |= self.asm_labels(path, set())
@@ -292,9 +299,10 @@ class CodeGen:
 class FuncGen:
 	"""One function."""
 
-	def __init__(self, cg, decl, far=False):
+	def __init__(self, cg, decl, far=False, spills=0):
 		self.cg = cg
 		self.far = far          # conditional branches may not reach: invert them around a 'j'
+		self.spills = spills    # frame slots for values past NREGS, see push
 		self.decl = decl
 		self.sym = decl.sym
 		self.ft = decl.sym.type
@@ -332,17 +340,27 @@ class FuncGen:
 		return f".L{self.nlabels}"
 
 	def push(self):
-		if self.depth == NREGS:
-			raise CompileError(self.loc, "this expression is too complex for M0: it needs more "
-										 "than 18 values at once")
-		r = reg(self.depth)
+		"""A register for a new value on top of the stack. Past NREGS values
+		it is the register of the value NREGS below, which is spilled."""
+		v = self.depth
+		r = reg(v)
+		if v >= NREGS and self.spills:
+			self.mem("sw", r, "fp", self.spill_slot(v - NREGS))
 		self.depth += 1
 		self.max_depth = max(self.max_depth, self.depth)
 		return r
 
 	def pop(self, n=1):
-		self.depth -= n
-		assert self.depth >= 0
+		"""Drops the top n values, reloading those they had spilled."""
+		for _ in range(n):
+			self.depth -= 1
+			v = self.depth
+			assert v >= 0
+			if v >= NREGS and self.spills:
+				self.mem("lw", reg(v), "fp", self.spill_slot(v - NREGS))
+
+	def spill_slot(self, v):
+		return self.spill_area + 4 * v
 
 	def slot(self, size, align):
 		"""Frame bytes for a variable or a temporary; returns the offset
@@ -379,6 +397,8 @@ class FuncGen:
 		d, ft = self.decl, self.ft
 		hidden = by_reference(ft.result)
 		locs, _ = classify(ft.params, hidden)
+		if self.spills:
+			self.spill_area = self.slot(4 * self.spills, 4)
 		entry = []
 		if hidden:
 			self.ret_slot = self.slot(4, 4)
@@ -397,10 +417,14 @@ class FuncGen:
 		self.block(d.body)
 		body = self.lines
 		size = sum(2 if l.startswith(("\tli ", "\tla ")) else 1 for l in body if l.startswith("\t"))
-		if size > BRANCH_REACH and not self.far:
-			return FuncGen(self.cg, self.decl, far=True).gen()
+		far = self.far or size > BRANCH_REACH
+		spills = max(self.spills, self.max_depth - NREGS)
+		if far != self.far or spills != self.spills:
+			# redo with long branches or slots for spills: the first pass
+			# only measured
+			return FuncGen(self.cg, self.decl, far, spills).gen()
 
-		nsaved = self.max_depth
+		nsaved = min(self.max_depth, NREGS)
 		frame = align_up(self.max_locals + 4 * nsaved + self.outgoing, 8)
 		label = self.sym.label
 		out = [f"\n; {d.name} ({self.decl.loc.path}:{d.loc.line})", f"{label}:"]
@@ -704,10 +728,14 @@ class FuncGen:
 			self.emit(f"sari {dst}, {dst}, {32 - 8 * size}")
 
 	def assemble(self, dst, base, off, n):
-		"""dst = n bytes at base + off, little-endian, any alignment; uses r9."""
+		"""dst = n bytes at base + off, little-endian, any alignment; uses r9
+		for the bytes (and a register of the stack for a far address)."""
 		if not -8192 <= off <= 8191 - n:
-			raise CompileError(self.loc, "an unaligned access more than 8KB from its base is "
-										 "not supported by M0")
+			t = self.push()
+			self.addi(t, base, off)
+			self.assemble(dst, t, 0, n)
+			self.pop()
+			return
 		self.emit(f"lbu {dst}, {off}({base})")
 		for b in range(1, n):
 			self.emit(f"lbu r9, {off + b}({base})")
@@ -720,10 +748,10 @@ class FuncGen:
 		if min(align, lowbit(off)) >= size:
 			self.mem(op, src, base, off)
 			return
-		for b in range(size):
+		for b in range(size):    # r8: mem() may need r9 for a far address
 			if b:
-				self.emit(f"shri r9, {src}, {8 * b}")
-			self.mem("sb", src if b == 0 else "r9", base, off + b)
+				self.emit(f"shri r8, {src}, {8 * b}")
+			self.mem("sb", src if b == 0 else "r8", base, off + b)
 
 	# -- copies
 
@@ -784,8 +812,9 @@ class FuncGen:
 			a = min(dal, sal, lowbit(doff + i), lowbit(soff + i))
 			w = 4 if size - i >= 4 and a >= 4 else 2 if size - i >= 2 and a >= 2 else 1
 			op = {1: "b", 2: "h", 4: "w"}[w]
-			self.mem(f"l{op}" if w == 4 else f"l{op}u", "r9", s, soff + i)
-			self.mem(f"s{op}", "r9", d, doff + i)
+			# r8: mem() may need r9 for a far address
+			self.mem(f"l{op}" if w == 4 else f"l{op}u", "r8", s, soff + i)
+			self.mem(f"s{op}", "r8", d, doff + i)
 			i += w
 
 	def scalar_fields(self, t, off):
@@ -1083,13 +1112,13 @@ class FuncGen:
 		if hidden:
 			buf = self.slot(size_of(ft.result), max(align_of(ft.result), 4))
 			self.addi(self.push(), "fp", buf)
-		args = []
+		args = []               # (type, alignment of its address); the values are on the stack
 		for a, pt in zip(e.args, ft.params):
 			decay = getattr(a, "decay", None)
 			if decay is not None:
 				r, off, al = self.addr(a)
 				self.addi(r, r, off)
-				args.append((r, pt, 4))
+				args.append((pt, 4))
 			elif is_aggr(pt):
 				r, off, al = self.aggr(a)
 				if by_reference(pt):
@@ -1101,32 +1130,35 @@ class FuncGen:
 					self.copy(c, 0, cal, r, off, al, pt, False, getattr(a, "volatile", False))
 					self.emit(f"mv {r}, {c}")
 					self.pop()
-					args.append((r, pt, 4))
+					args.append((pt, 4))
 				else:
 					self.addi(r, r, off)
-					args.append((r, pt, al if off == 0 else min(al, lowbit(off))))
+					args.append((pt, al if off == 0 else min(al, lowbit(off))))
 			else:
-				args.append((self.expr(a), pt, 4))
+				self.expr(a)
+				args.append((pt, 4))
 		locs, stack = classify(ft.params, hidden)
 		self.outgoing = max(self.outgoing, stack)
-		for (r, pt, al), (where, n, words) in zip(args, locs):
-			if where != "stack":
-				continue
-			if is_aggr(pt) and not by_reference(pt):
+		# Place the arguments from the last one: each is on top of the stack,
+		# so in a register, when its turn comes, however many there are.
+		# The stack arguments come last, so r1 and r2 are still free for
+		# the struct ones.
+		for (pt, al), (where, n, words) in reversed(list(zip(args, locs))):
+			r = reg(self.depth - 1)
+			small = is_aggr(pt) and not by_reference(pt)
+			if where == "stack" and small:
 				self.to_regs(1, r, 0, al, pt)
 				for w in range(words):
 					self.emit(f"sw r{1 + w}, {n + 4 * w}(sp)")
-			else:
+			elif where == "stack":
 				self.emit(f"sw {r}, {n}(sp)")
-		if hidden:
-			self.emit(f"mv r1, {reg(base + (0 if direct else 1))}")
-		for (r, pt, al), (where, n, words) in zip(args, locs):
-			if where != "reg":
-				continue
-			if is_aggr(pt) and not by_reference(pt):
+			elif small:
 				self.to_regs(n, r, 0, al, pt)
 			else:
 				self.emit(f"mv r{n}, {r}")
+			self.pop()
+		if hidden:
+			self.emit(f"mv r1, {reg(base + (0 if direct else 1))}")
 		if direct:
 			self.emit(f"call {e.func.sym.label}")
 		else:

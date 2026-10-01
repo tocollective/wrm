@@ -14,6 +14,8 @@ tests.
                      contains MSG; LINE: may be left out (any place)
   @warning LINE: MSG the same for a warning
   @args ARGS         more emulator options, e.g. --ram 4M
+  @rom               build a ROM image (m.py --rom) and run it in place of
+                     the firmware, instead of a boot image on disk 0
   @input "text"      bytes for the UART, Python string syntax; they are
                      sent 1 s after the start, when the program is running
                      (the RX FIFO is flushed at reset and the program may
@@ -45,7 +47,7 @@ M_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT = os.path.dirname(M_DIR)
 COMPILER = os.path.join(ROOT, "tools", "m.py")
 ASSEMBLER = os.path.join(ROOT, "tools", "asm.py")
-FIRMWARE = os.path.join(ROOT, "firmware", "main.asm")
+FIRMWARE = os.path.join(ROOT, "firmware", "main.m")    # in M: built with m.py --rom
 EMULATOR = os.path.join(ROOT, "bin", "wrm081632.exe" if os.name == "nt" else "wrm081632")
 
 TEST_DIRS = ("tests", "examples")
@@ -86,6 +88,7 @@ class Test:
 		self.diags = []  # (kind, line or None, message)
 		self.args = []
 		self.input = None
+		self.rom = False
 
 
 def read_test(path):
@@ -118,6 +121,10 @@ def read_test(path):
 					test.diags.append((name, line_no, d.group(2)))
 				elif name == "args":
 					test.args += shlex.split(value)
+				elif name == "rom":
+					if value:
+						raise SyntaxError
+					test.rom = True
 				elif name == "input":
 					test.input = (test.input or "") + parse_text(value)
 				else:
@@ -178,7 +185,8 @@ def run_test(test, emulator, firmware, timeout, workdir):
 	source, image = base + ".s", base + ".img"
 	expect_error = any(kind == "error" for kind, _, _ in test.diags)
 	check_only = not test.run and not expect_error
-	command = [sys.executable, COMPILER, test.path] + (["--check"] if check_only else ["-o", source])
+	command = [sys.executable, COMPILER, test.path] + (["--check"] if check_only else ["-o", source]) + \
+		(["--rom"] if test.rom else [])
 	compile_ = subprocess.run(command, capture_output=True, text=True)
 	compile_out = compile_.stdout + compile_.stderr
 	problems = check_diags(test, compile_.stderr)
@@ -191,12 +199,16 @@ def run_test(test, emulator, firmware, timeout, workdir):
 	if expect_error or check_only:
 		return True, "", compile_out
 
-	asm = subprocess.run([sys.executable, ASSEMBLER, source, "--base", hex(BOOT_LOAD),
-						  "-o", image], capture_output=True, text=True)
+	base_args = [] if test.rom else ["--base", hex(BOOT_LOAD)]
+	asm = subprocess.run([sys.executable, ASSEMBLER, source] + base_args + ["-o", image],
+						 capture_output=True, text=True)
 	if asm.returncode != 0:
 		return False, "assembler failed", asm.stdout + asm.stderr
 
-	command = [emulator, "--headless", "--rom", firmware, "--hdd", image] + test.args
+	if test.rom:
+		command = [emulator, "--headless", "--rom", image] + test.args
+	else:
+		command = [emulator, "--headless", "--rom", firmware, "--hdd", image] + test.args
 	proc = subprocess.Popen(command, stdin=subprocess.PIPE if test.input else subprocess.DEVNULL,
 							stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 	try:
@@ -268,11 +280,13 @@ def main(argv=None):
 		workdir = args.keep or tmp
 		os.makedirs(workdir, exist_ok=True)
 		firmware = os.path.join(workdir, "firmware.rom")
-		asm = subprocess.run([sys.executable, ASSEMBLER, FIRMWARE, "-o", firmware],
-							 capture_output=True, text=True)
-		if asm.returncode != 0:
-			print(asm.stdout + asm.stderr, end="")
-			p.exit(1, "run.py: can't assemble the firmware\n")
+		source = os.path.join(workdir, "firmware.s")
+		for command in ([COMPILER, "--rom", FIRMWARE, "-o", source],
+						[ASSEMBLER, source, "-o", firmware]):
+			build = subprocess.run([sys.executable] + command, capture_output=True, text=True)
+			if build.returncode != 0:
+				print(build.stdout + build.stderr, end="")
+				p.exit(1, "run.py: can't build the firmware\n")
 
 		with concurrent.futures.ThreadPoolExecutor(max(1, args.jobs)) as pool:
 			jobs = [pool.submit(run_test, t, args.emulator, firmware, args.timeout, workdir)

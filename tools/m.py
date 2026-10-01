@@ -11,7 +11,10 @@ An .asm input is taken as an already compiled program: it is linked with
 the runtime the same way and has to define main. The runtime tests in
 m/tests use this.
 
-usage: tools/m.py [-I DIR]... [-o OUT.asm] [--ast] [--check] main.m
+With --rom the program is a ROM image instead, such as the firmware:
+assembled at the start of ROM, with .data copied to RAM by its crt0.
+
+usage: tools/m.py [-I DIR]... [-o OUT.asm] [--rom] [--ast] [--check] main.m
 """
 
 import argparse
@@ -21,7 +24,7 @@ import sys
 from mlang.check import Checker
 from mlang.codegen import CodeGen
 from mlang.diag import CompileError, Diagnostics
-from mlang.image import RUNTIME_M, Program, boot_image
+from mlang.image import RUNTIME_M, Program, boot_image, rom_image
 from mlang.modules import load_program
 from mlang.syntax import dump
 
@@ -51,6 +54,8 @@ def main(argv=None):
 				   help="output assembly (default: the input with the .asm extension)")
 	p.add_argument("-I", dest="include", action="append", default=[], metavar="DIR",
 				   help="add a directory to search for imported files")
+	p.add_argument("--rom", action="store_true",
+				   help="make a ROM image (like the firmware), not a boot image")
 	p.add_argument("--ast", action="store_true",
 				   help="print the syntax tree of every module and stop")
 	p.add_argument("--check", action="store_true",
@@ -78,7 +83,12 @@ def main(argv=None):
 		if program is None:
 			return 1 if diag.errors else 0
 
-	text = boot_image(program, os.path.dirname(os.path.abspath(output)))
+	layout = rom_image if args.rom else boot_image
+	try:
+		text = layout(program, os.path.dirname(os.path.abspath(output)))
+	except ValueError as e:
+		diag.error(None, str(e))
+		return 1
 	with open(output, "w", encoding="utf-8") as f:
 		f.write(text)
 	return 0

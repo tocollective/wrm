@@ -1,10 +1,10 @@
 ; ============================================================================
-;  [4] PC-relative code
+;  [4] PC-relative code (see pcrel.m)
 ; ============================================================================
 
-demo_pcrel:
-	addi r30, r30, -4
-	sw ra, 0(r30)
+demoPcrel:
+	addi sp, sp, -8
+	sw ra, 4(sp)
 
 	la r1, s_pcrel_title
 	call puts
@@ -22,18 +22,16 @@ demo_pcrel:
 
 	; AUIPC + JALR reach any address, JAL only +-1MB
 .far:
-	auipc r5, %hi(far_target - .far)
-	jalr ra, r5, %lo(far_target - .far)
+	auipc r5, %hi(pcrel_far_target - .far)
+	jalr ra, r5, %lo(pcrel_far_target - .far)
 
-	lw ra, 0(r30)
-	addi r30, r30, 4
+	lw ra, 4(sp)
+	addi sp, sp, 8
 	ret
 
-far_target:
+pcrel_far_target:
 	la r1, s_far
-	j puts                      ; tail call: puts returns to demo_pcrel
-
-; ---- data -----------------------------------------------------------------
+	j puts                      ; tail call: puts returns to demoPcrel
 
 s_pcrel_title:  .asciz "\n[4] pc-relative\n"
 s_auipc:        .asciz "AUIPC r2, 0"

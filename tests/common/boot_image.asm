@@ -5,7 +5,7 @@
 ;  "PASS" and exit code 0, or "FAIL: test N" and exit code N.
 ; ============================================================================
 
-	.include "../../firmware/defs.asm"
+	.include "defs.asm"
 
 RAM_SIZE        = 6 << 20           ; --ram 4M,2M
 IMAGE_SIZE      = image_end - header
@@ -107,7 +107,7 @@ fail:
 	sw r28, POWER_OFF(r1)
 	hlt
 
-	.include "../../firmware/lib.asm"
+	.include "lib.asm"
 
 s_pass:         .asciz "PASS\n"
 s_fail:         .asciz "FAIL: test "

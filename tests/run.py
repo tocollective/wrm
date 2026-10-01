@@ -16,6 +16,8 @@ A test can set up the machine with comment lines in its source:
                     to the test) at BOOT_LOAD
   ; @floppy SPEC    put a disk in the floppy drive, SPEC as for @hdd
   ; @args ARGS      more emulator options, e.g. --ram 4M,2M
+  ; @rom FILE.m     run a ROM compiled from M (relative to the test, e.g.
+                    the firmware) instead of the test itself
 Each @hdd attaches the next disk, 0 then 1.
 
 usage: tests/run.py [--emulator PATH] [tests...]
@@ -33,6 +35,7 @@ import tempfile
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTS = os.path.join(ROOT, "tests")
 ASSEMBLER = os.path.join(ROOT, "tools", "asm.py")
+COMPILER = os.path.join(ROOT, "tools", "m.py")
 EMULATOR = os.path.join(ROOT, "bin", "wrm081632.exe" if os.name == "nt" else "wrm081632")
 
 EXIT_TRAP = 254  # tests/common/harness.asm
@@ -59,9 +62,9 @@ def test_name(path):
 
 
 def read_directives(path):
-	"""Returns the @hdd specs, the @floppy spec (or None) and the @args
-	options of a test source."""
-	hdds, floppy, args = [], None, []
+	"""Returns the @hdd specs, the @floppy spec (or None), the @args
+	options and the @rom source (or None) of a test."""
+	hdds, floppy, args, rom = [], None, [], None
 	with open(path, encoding="utf-8") as f:
 		for line in f:
 			m = DIRECTIVE.match(line)
@@ -74,9 +77,11 @@ def read_directives(path):
 				floppy = value
 			elif name == "args":
 				args += shlex.split(value)
+			elif name == "rom":
+				rom = value
 			else:
 				raise ValueError(f"unknown directive @{name}")
-	return hdds, floppy, args
+	return hdds, floppy, args, rom
 
 
 def pattern_disk(sectors):
@@ -101,15 +106,23 @@ def run_test(path, emulator, timeout, workdir):
 	"""Returns (passed, message, output)."""
 	base = os.path.join(workdir, test_name(path).replace("/", "_"))
 	rom = base + ".rom"
-	asm = subprocess.run([sys.executable, ASSEMBLER, path, "-o", rom],
+	try:
+		hdds, floppy, extra, rom_source = read_directives(path)
+	except ValueError as e:
+		return False, str(e), ""
+	source = path
+	if rom_source is not None:
+		source = base + ".s"
+		m = subprocess.run([sys.executable, COMPILER, "--rom",
+							os.path.join(os.path.dirname(path), rom_source), "-o", source],
+						   capture_output=True, text=True)
+		if m.returncode != 0:
+			return False, f"can't compile @rom {rom_source}", m.stdout + m.stderr
+	asm = subprocess.run([sys.executable, ASSEMBLER, source, "-o", rom],
 						 capture_output=True, text=True)
 	if asm.returncode != 0:
 		return False, "assembler failed", asm.stdout + asm.stderr
 
-	try:
-		hdds, floppy, extra = read_directives(path)
-	except ValueError as e:
-		return False, str(e), ""
 	command = [emulator, "--headless", "--rom", rom]
 	for n, spec in enumerate(hdds):
 		image = f"{base}.hdd{n}.img"

@@ -23,7 +23,7 @@
 ;  user mode: user code reports back through SYSCALL.
 ; ============================================================================
 
-	.include "../../firmware/defs.asm"
+	.include "defs.asm"
 
 FAIL_REGS       = 0x0080            ; r1-r4 saved by fail, 16 bytes
 EXIT_TRAP       = 254               ; exit code of unexpected_trap
@@ -151,7 +151,7 @@ trap_record:
 	li r25, 0
 	iret
 
-	.include "../../firmware/lib.asm"
+	.include "lib.asm"
 
 s_pass:         .asciz "PASS\n"
 s_fail:         .asciz "FAIL: test "
