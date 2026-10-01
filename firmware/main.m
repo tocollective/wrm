@@ -32,7 +32,7 @@
 // The reset code is m/runtime/rom0.asm: it sets the stack, copies .data to
 // RAM, zeroes .bss and calls main; its result powers the machine off.
 
-import { uart, beeper, timer, ROM_BASE, UART_FLUSH, BEEPER_ON } from "defs.m"
+import { beeper, timer, ROM_BASE, BEEPER_ON } from "defs.m"
 import { puts, show } from "lib.m"
 import { videoInit, conPuts } from "video.m"
 import { boot } from "boot.m"
@@ -54,7 +54,6 @@ import { demoRtc } from "demos/rtc.m"
 extern let __image_end: UByte
 
 let main(argc: UWord, argv: *UByte[]): Word {
-    uart.control = UART_FLUSH       // drop anything received before reset
     postBeep()
     videoInit()                     // a boot image gets the screen console too
     conPuts("WRM.081632 firmware\n\n")
