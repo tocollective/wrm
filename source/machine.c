@@ -23,6 +23,8 @@ void machine_update(machine_t* machine) {
 	const uint64_t ticks = clock_update(mb->clock);
 	for (uint64_t i = 0; i < ticks && !machine_stopped(machine); i++)
 		motherboard_tick(mb);
+	// the host's network moves between batches of ticks, not every tick
+	netcard_poll(mb->netcard);
 }
 
 bool machine_powered_off(const machine_t* machine) {

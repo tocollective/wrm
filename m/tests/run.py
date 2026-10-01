@@ -216,9 +216,10 @@ def run_test(test, emulator, firmware, timeout, workdir):
 			time.sleep(INPUT_DELAY)
 			try:
 				proc.stdin.write(test.input.encode("latin-1"))
-				proc.stdin.close()
+				proc.stdin.flush()
 			except BrokenPipeError:
 				pass
+		# closes stdin itself; closing it here first makes 3.12's communicate() flush a closed file
 		out, err = proc.communicate(timeout=timeout)
 	except subprocess.TimeoutExpired:
 		proc.kill()

@@ -12,6 +12,7 @@ typedef struct application {
 	display_t* display; // NULL in headless mode
 	speaker_t* speaker; // NULL in headless mode, with --mute or no audio
 	FILE* trace_file; // --trace=PATH, NULL when off or on stderr
+	float mouse_x, mouse_y; // motion the mouse hasn't been given yet
 } application_t;
 
 application_t* application_create(int argc, char* argv[]);

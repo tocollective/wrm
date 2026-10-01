@@ -19,6 +19,8 @@ typedef struct config {
 	bool step_mode;
 	bool headless; // no window: runs until the machine powers off or halts
 	const char* trace_path; // retired instructions, NULL = off, "-" = stderr
+	bool net; // the network card is connected to the host's network
+	uint32_t net_bind; // IPv4 address the card listens on, 127.0.0.1
 } config_t;
 
 config_t* config_get(void);

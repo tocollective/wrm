@@ -89,6 +89,12 @@ target_include_directories(${PROJECT_NAME}  PRIVATE
 
 target_link_libraries(${PROJECT_NAME} PRIVATE SDL3::SDL3 miniaudio)
 
+# the network card's sockets: Winsock on Windows; elsewhere they are in
+# libc (on the web Emscripten turns them into WebSockets)
+if(WIN32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32)
+endif()
+
 # sqrtf and fmaf of the CPU's floating point (and miniaudio's resampler)
 # are in libm on Linux
 find_library(WRM081632_LIBM m)

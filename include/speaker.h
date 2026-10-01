@@ -4,6 +4,7 @@
 
 #include "miniaudio.h"
 
+#include "devices/audiocard.h"
 #include "devices/beeper.h"
 
 // Frames of audio queued between the emulator and the host's audio
@@ -11,19 +12,21 @@
 // few 60Hz frames of the emulator's main loop.
 #define SPEAKER_BUFFER_FRAMES 4096
 
-// The host's sound output (miniaudio): plays the samples the beeper makes.
-// The main loop queues them, the audio thread plays them; an empty queue
-// plays silence, a full one drops the newest samples.
+// The host's sound output (miniaudio): plays the mix of the audio card and
+// the beeper. The main loop queues it, the audio thread plays it; an empty
+// queue plays silence, a full one drops the newest frames.
 typedef struct speaker {
-	ma_pcm_rb queue; // mono s16, single producer, single consumer
+	ma_pcm_rb queue; // stereo s16, single producer, single consumer
 	ma_device device;
+	int16_t mix[AUDIO_BUFFER_FRAMES * 2]; // left, right
 } speaker_t;
 
 // NULL (with a warning) if the host has no sound output to use.
 speaker_t* speaker_create(void);
 void speaker_destroy(speaker_t* speaker);
 
-// Queues the beeper's new samples and empties its buffer.
-void speaker_play(speaker_t* speaker, beeper_t* beeper);
+// Mixes the frames both devices have made, queues them and takes them out
+// of the devices' buffers.
+void speaker_play(speaker_t* speaker, beeper_t* beeper, audiocard_t* card);
 
 #endif // WRM_SPEAKER_H

@@ -2,12 +2,15 @@
 
 #include <math.h>
 
+#define DISPLAY_TITLE "WRM.081632"
+#define DISPLAY_TITLE_CAPTURED "WRM.081632 - Ctrl+Alt releases the mouse"
+
 display_t* display_create(void) {
 	display_t* display = (display_t*)calloc(1, sizeof(display_t));
 	if (!display) error("Failed to allocate display!");
 
 	const SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE;
-	display->window = SDL_CreateWindow("WRM.081632", 800, 600, flags);
+	display->window = SDL_CreateWindow(DISPLAY_TITLE, 800, 600, flags);
 	if (!display->window) error(SDL_GetError());
 
 	display->renderer = SDL_CreateRenderer(display->window, NULL);
@@ -96,4 +99,15 @@ void display_render(display_t* display, const videocard_t* videocard) {
 		SDL_RenderTexture(renderer, texture, NULL, &rect);
 	}
 	SDL_RenderPresent(renderer);
+}
+
+void display_capture_mouse(display_t* display, const bool capture) {
+	if (!display || display->mouse_captured == capture) return;
+	if (!SDL_SetWindowRelativeMouseMode(display->window, capture)) {
+		warning("Mouse: %s", SDL_GetError());
+		return;
+	}
+	display->mouse_captured = capture;
+	SDL_SetWindowTitle(display->window,
+					   capture ? DISPLAY_TITLE_CAPTURED : DISPLAY_TITLE);
 }

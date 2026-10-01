@@ -102,6 +102,15 @@ static bool motherboard_io_read(motherboard_t* mb, const uint32_t address,
 		case MB_BEEPER_BASE:
 			fail = beeper_read(mb->beeper, offset, size, value);
 			break;
+		case MB_MOUSE_BASE:
+			fail = mouse_read(mb->mouse, offset, size, value);
+			break;
+		case MB_NET_BASE:
+			fail = netcard_read(mb->netcard, offset, size, value);
+			break;
+		case MB_AUDIO_BASE:
+			fail = audiocard_read(mb->audiocard, offset, size, value);
+			break;
 	}
 	if (!fail) *value &= motherboard_io_mask(size);
 	return fail;
@@ -133,6 +142,12 @@ static bool motherboard_io_write(motherboard_t* mb, const uint32_t address,
 			return disk_write(mb->floppy, offset, size, value);
 		case MB_BEEPER_BASE:
 			return beeper_write(mb->beeper, offset, size, value);
+		case MB_MOUSE_BASE:
+			return mouse_write(mb->mouse, offset, size, value);
+		case MB_NET_BASE:
+			return netcard_write(mb->netcard, offset, size, value);
+		case MB_AUDIO_BASE:
+			return audiocard_write(mb->audiocard, offset, size, value);
 	}
 	return true;
 }
@@ -237,7 +252,8 @@ static bool motherboard_dma_write(void* ctx, const uint32_t address,
 	return motherboard_bus_write(ctx, address, size, value);
 }
 
-// Video card DMA: reads RAM or ROM (e.g. the firmware's font), writes RAM
+// DMA of the video, network and audio cards: reads RAM or ROM (e.g. the
+// firmware's font, a request or a sample in the firmware), writes RAM
 // only; the I/O region is a bus error.
 // returns true on bus error
 static bool motherboard_video_dma_read(void* ctx, const uint32_t address,
@@ -299,6 +315,11 @@ motherboard_t* motherboard_create(void) {
 	mb->videocard = videocard_create(
 			mb->pic, MB_IRQ_VIDEO, video_dma, (uint32_t)mb->clock->rate);
 	mb->beeper = beeper_create((uint32_t)mb->clock->rate);
+	mb->mouse = mouse_create(mb->pic, MB_IRQ_MOUSE);
+	mb->netcard = netcard_create(
+			mb->pic, MB_IRQ_NET, video_dma, cfg->net, cfg->net_bind);
+	mb->audiocard = audiocard_create(
+			mb->pic, MB_IRQ_AUDIO, video_dma, (uint32_t)mb->clock->rate);
 
 	for (int i = 0; i < RAM_SLOT_COUNT; i++) {
 		mb->ram_slot[i].ram = NULL;
@@ -321,6 +342,21 @@ motherboard_t* motherboard_create(void) {
 
 void motherboard_destroy(motherboard_t* mb) {
 	if (!mb) return;
+	if (mb->audiocard) {
+		audiocard_destroy(mb->audiocard);
+		mb->audiocard = NULL;
+	}
+
+	if (mb->netcard) {
+		netcard_destroy(mb->netcard);
+		mb->netcard = NULL;
+	}
+
+	if (mb->mouse) {
+		mouse_destroy(mb->mouse);
+		mb->mouse = NULL;
+	}
+
 	if (mb->beeper) {
 		beeper_destroy(mb->beeper);
 		mb->beeper = NULL;
@@ -406,6 +442,9 @@ void motherboard_reset(motherboard_t* mb) {
 	videocard_reset(mb->videocard);
 	disk_reset(mb->floppy);
 	beeper_reset(mb->beeper);
+	mouse_reset(mb->mouse);
+	netcard_reset(mb->netcard);
+	audiocard_reset(mb->audiocard);
 	pic_reset(mb->pic);
 }
 
@@ -416,6 +455,7 @@ void motherboard_tick(motherboard_t* mb) {
 	videocard_tick(mb->videocard);
 	disk_tick(mb->floppy);
 	beeper_tick(mb->beeper);
+	audiocard_tick(mb->audiocard);
 	cpu_set_irq(mb->cpu, pic_irq(mb->pic));
 	cpu_update(mb->cpu);
 

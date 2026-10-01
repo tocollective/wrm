@@ -36,7 +36,7 @@ typedef struct beeper {
 	uint32_t level_ticks;
 	int16_t last_sample;
 	int16_t samples[BEEPER_BUFFER_SIZE];
-	uint32_t sample_count; // the host takes them and sets this to 0
+	uint32_t sample_count; // the host takes them and lowers this
 } beeper_t;
 
 beeper_t* beeper_create(const uint32_t clock_rate);

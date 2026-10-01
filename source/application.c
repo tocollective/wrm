@@ -1,5 +1,6 @@
 #include "application.h"
 
+#include <math.h>
 #include <string.h>
 
 #include "config.h"
@@ -30,6 +31,7 @@ application_t* application_create(int argc, char* argv[]) {
 		if (!config_get()->mute) app->speaker = speaker_create();
 		// ... and samples only made while a speaker plays them
 		app->machine->motherboard->beeper->connected = app->speaker != NULL;
+		app->machine->motherboard->audiocard->connected = app->speaker != NULL;
 	}
 	app->running = true;
 	console_open();
@@ -82,14 +84,87 @@ static void application_check_stopped(application_t* app) {
 	}
 }
 
+// Gives the host pointer to the machine or takes it back. Buttons held
+// then count as released.
+static void application_capture_mouse(application_t* app, const bool capture) {
+	if (!app->display || app->display->mouse_captured == capture) return;
+	display_capture_mouse(app->display, capture);
+	mouse_release_buttons(app->machine->motherboard->mouse);
+	app->mouse_x = 0;
+	app->mouse_y = 0;
+}
+
 bool application_update(application_t* app) {
 	application_update_console(app);
+	// the guest has disabled the mouse: the pointer goes back to the host
+	if (!app->machine->motherboard->mouse->enabled)
+		application_capture_mouse(app, false);
 	machine_update(app->machine);
 	display_render(app->display, app->machine->motherboard->videocard);
-	speaker_play(app->speaker, app->machine->motherboard->beeper);
+	speaker_play(app->speaker,
+				 app->machine->motherboard->beeper,
+				 app->machine->motherboard->audiocard);
 	application_report_stop(app);
 	application_check_stopped(app);
 	return true;
+}
+
+// SDL's button number as the mouse's button bit, 0 for others
+static uint32_t application_mouse_button(const Uint8 button) {
+	switch (button) {
+		case SDL_BUTTON_LEFT:
+			return MOUSE_BUTTON_LEFT;
+		case SDL_BUTTON_RIGHT:
+			return MOUSE_BUTTON_RIGHT;
+		case SDL_BUTTON_MIDDLE:
+			return MOUSE_BUTTON_MIDDLE;
+	}
+	return 0;
+}
+
+// Passes the whole part of the motion so far to the mouse; the fraction
+// waits for the next motion.
+static void application_mouse_motion(application_t* app, const float dx,
+									 const float dy) {
+	app->mouse_x += dx;
+	app->mouse_y += dy;
+	const float x = truncf(app->mouse_x);
+	const float y = truncf(app->mouse_y);
+	app->mouse_x -= x;
+	app->mouse_y -= y;
+	mouse_move(app->machine->motherboard->mouse, (int32_t)x, (int32_t)y);
+}
+
+// Mouse events go to the machine only while it has the pointer; a click
+// gives it the pointer once software has enabled the mouse.
+static void application_mouse_event(application_t* app, SDL_Event* event) {
+	mouse_t* mouse = app->machine->motherboard->mouse;
+	const bool captured = app->display && app->display->mouse_captured;
+	switch (event->type) {
+		case SDL_EVENT_MOUSE_BUTTON_DOWN:
+			// the click that captures the pointer is not an event
+			if (!captured && mouse->enabled)
+				application_capture_mouse(app, true);
+			else if (captured)
+				mouse_button(mouse,
+							 application_mouse_button(event->button.button),
+							 true);
+			break;
+		case SDL_EVENT_MOUSE_BUTTON_UP:
+			if (captured)
+				mouse_button(mouse,
+							 application_mouse_button(event->button.button),
+							 false);
+			break;
+		case SDL_EVENT_MOUSE_MOTION:
+			if (captured)
+				application_mouse_motion(
+						app, event->motion.xrel, event->motion.yrel);
+			break;
+		case SDL_EVENT_MOUSE_WHEEL:
+			if (captured) mouse_wheel(mouse, event->wheel.integer_y);
+			break;
+	}
 }
 
 bool application_process_events(application_t* app, SDL_Event* event) {
@@ -107,8 +182,22 @@ bool application_process_events(application_t* app, SDL_Event* event) {
 			if (event->drop.data)
 				disk_insert(app->machine->motherboard->floppy, event->drop.data);
 		} break;
+		case SDL_EVENT_WINDOW_FOCUS_LOST: {
+			application_capture_mouse(app, false);
+		} break;
+		case SDL_EVENT_MOUSE_BUTTON_DOWN:
+		case SDL_EVENT_MOUSE_BUTTON_UP:
+		case SDL_EVENT_MOUSE_MOTION:
+		case SDL_EVENT_MOUSE_WHEEL: {
+			application_mouse_event(app, event);
+		} break;
 		case SDL_EVENT_KEY_DOWN:
 		case SDL_EVENT_KEY_UP: {
+			// Ctrl+Alt gives the pointer back; the keys still reach the guest
+			if (event->type == SDL_EVENT_KEY_DOWN
+				&& (event->key.mod & SDL_KMOD_CTRL)
+				&& (event->key.mod & SDL_KMOD_ALT))
+				application_capture_mouse(app, false);
 			if (event->key.repeat) break; // firmware does its own repeat
 			// SDL scancodes are USB HID usage IDs
 			keyboard_key(app->machine->motherboard->keyboard,

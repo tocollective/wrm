@@ -16,10 +16,10 @@ type TrapFrame {
 type IrqHandler = (): Void
 type FaultHandler = (frame: *mut TrapFrame, cause: UWord): Void
 
-let IRQ_LINES: UWord = 8
+let IRQ_LINES: UWord = 16
 let EXIT_TRAP: UWord = 254
 
-let mut irqHandlers: IrqHandler[8]
+let mut irqHandlers: IrqHandler[16]
 let mut faultHandler: FaultHandler = null
 
 /// Interrupts taken, of any line.

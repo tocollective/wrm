@@ -6,9 +6,10 @@
 //
 // A tour of the machine: every instruction group, the UART, the keyboard,
 // the PIC, polling, WFI, interrupts, the MMU and user mode, the timer and
-// the cycle counters, the video modes, power off. The demos' output goes
-// to the UART, i.e. to the host's stdout; the screen shows a short banner
-// and the video modes.
+// the cycle counters, the video modes, the mouse, the network, the audio
+// card, power off. The demos' output goes to the UART, i.e. to the host's
+// stdout; the screen shows a short banner, the video modes and the
+// mouse's pointer.
 //
 // Build (m/docs/COMPILER.md, "Цель: ROM"):
 //   python3 tools/m.py --rom firmware/main.m -o firmware.s
@@ -20,6 +21,9 @@
 //   boot.m, .asm     booting from the floppy or disk 0
 //   lib.m            UART output and helpers (puts, show, sort, ...)
 //   video.m          video card setup, text, the screen console
+//   mouse.m          enabling the mouse, decoding its events
+//   net.m            the network card's commands, waiting for them
+//   audio.m          playing samples on the audio card's voices
 //   font.m           the 8x16 font, loaded into VRAM by videoInit
 //   trap.m, .asm     the trap entry and the dispatch of interrupts
 //   demos/*.m        one demo each; pcrel and the user program of mmu are
@@ -41,6 +45,9 @@ import { demoInterrupts } from "demos/interrupts.m"
 import { demoMmu } from "demos/mmu.m"
 import { demoTimer } from "demos/timer.m"
 import { demoVideo } from "demos/video.m"
+import { demoMouse } from "demos/mouse.m"
+import { demoNet } from "demos/net.m"
+import { demoAudio } from "demos/audio.m"
 
 /// The end of the ROM image (m/runtime/rom0.asm).
 extern let __image_end: UByte
@@ -65,6 +72,9 @@ let main(argc: UWord, argv: *UByte[]): Word {
     demoMmu()
     demoTimer()
     demoVideo()
+    demoMouse()
+    demoNet()
+    demoAudio()
 
     puts("\nbye\n")
     return 0                        // exit code 0: the emulator quits

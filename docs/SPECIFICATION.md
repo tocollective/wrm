@@ -15,6 +15,9 @@
 | `0xFD007000`–`0xFD007FFF` | Video card                              |
 | `0xFD008000`–`0xFD008FFF` | Floppy drive                            |
 | `0xFD009000`–`0xFD009FFF` | Beeper                                  |
+| `0xFD00A000`–`0xFD00AFFF` | Mouse                                   |
+| `0xFD00B000`–`0xFD00BFFF` | Network card                            |
+| `0xFD00C000`–`0xFD00CFFF` | Audio card                              |
 | `0xFE000000`–`0xFFFFFFFF` | ROM (32MB, read-only)                   |
 
 Addresses between the end of RAM and `0xFD000000` are unmapped, as are
@@ -60,6 +63,9 @@ with `ENABLE` left at 0.
 | 4   | Disk 1   | `STATUS.DONE` is set    |
 | 5   | Video    | `STATUS.DONE` or `STATUS.VBLANK` is set and enabled in `CONTROL` |
 | 6   | Floppy   | `STATUS.DONE` or `STATUS.CHANGED` is set |
+| 7   | Mouse    | event FIFO is not empty |
+| 8   | Network  | `PENDING` is not zero   |
+| 9   | Audio    | `STATUS` is not zero    |
 
 ### Keyboard
 
@@ -410,6 +416,264 @@ The output is mixed down to 48000 samples per second, each the average
 of the wave over its clock ticks. The host plays it with a delay of up
 to about 85ms. There is no IRQ line.
 
+### Mouse
+
+A relative mouse, like a PS/2 one: it reports how far it moved and which
+buttons are down, not where the pointer is. Software draws its own
+pointer. Events are queued in a 64-entry FIFO, and only while the mouse
+is enabled.
+
+| Offset | Register  | Access | Description                              |
+|--------|-----------|--------|------------------------------------------|
+| `0x00` | `STATUS`  | R      | bit 0 = event ready, bit 1 = overflow    |
+| `0x04` | `DATA`    | R      | pops the next event, `0` if empty        |
+| `0x08` | `CONTROL` | RW     | bit 0 = flush the FIFO (reads as 0), bit 1 = enabled |
+
+Event:
+
+| Bits  | Field   | Description                                              |
+|-------|---------|----------------------------------------------------------|
+| 0–7   | `DX`    | motion to the right, signed, −128…127                    |
+| 8–15  | `DY`    | motion down, signed (the screen's y goes down too)       |
+| 16–23 | `WHEEL` | wheel steps, signed, positive away from the user         |
+| 24    | `LEFT`  | the left button is down                                  |
+| 25    | `RIGHT` | the right button is down                                 |
+| 26    | `MIDDLE`| the middle button is down                                |
+| 31    | —       | always 1, so an event is never `0`                       |
+
+The buttons are their state after the event: an event that only presses
+or releases a button has no motion. A motion that doesn't fit in one
+event is split into several. Motion is merged into the newest event in
+the FIFO while it holds only motion, the buttons haven't changed and the
+sum still fits, so a slow reader loses no motion. Units are the host's
+pointer units (window pixels), whatever the video mode. The overflow bit
+is set when an event is dropped because the FIFO is full, and is cleared
+when `STATUS` is read.
+
+The mouse is disabled at reset. While it is disabled nothing is queued
+and the host keeps its own pointer. Once software sets bit 1, a click in
+the emulator's window captures the host pointer for the machine (that
+click is not an event); Ctrl+Alt, switching to another window, or
+clearing bit 1 gives it back. Buttons held when the pointer is given back count as
+released: if the mouse is still enabled, an event says so. Without a
+window (`--headless`) there are no events.
+
+### Network card
+
+A network card with the TCP/IP stack in hardware, like the WIZnet W5500:
+software opens up to 8 sockets and moves bytes, the card does the rest
+through the host's network. Software needs no TCP/IP stack of its own,
+and doesn't see packets, MAC addresses or IP configuration.
+
+The card is connected only when the emulator is started with `--net`
+(see [README](../README.md#running)); otherwise the link is down and
+every command fails with error 4. Addresses are IPv4, as a word with the
+first byte of the dotted form on top: `127.0.0.1` is `0x7F000001`.
+
+| Offset  | Register      | Access | Description                                 |
+|---------|---------------|--------|---------------------------------------------|
+| `0x00`  | `STATUS`      | R      | bit 0 = link up, bit 1 = `LISTEN` works, bit 2 = UDP works |
+| `0x04`  | `PENDING`     | R      | bits 0–7 = socket N asserts the IRQ line, bit 8 = the DNS lookup does |
+| `0x08`  | `SOCKETS`     | R      | `8`                                         |
+| `0x10`  | `DNS_COMMAND` | W      | `1` = look up the name at `DNS_NAME`        |
+| `0x14`  | `DNS_STATUS`  | RW     | bit 0 = busy, bit 1 = done, bit 2 = failed; writing 1 to bit 1 clears it |
+| `0x18`  | `DNS_CONTROL` | RW     | bit 0 = IRQ on done                         |
+| `0x1C`  | `DNS_NAME`    | RW     | physical address of the host name           |
+| `0x20`  | `DNS_RESULT`  | R      | the address found, `0` if the lookup failed |
+| `0x100` | socket 0      |        | the socket registers below                  |
+| …       |               |        | socket N at `0x100` + N × `0x40`            |
+
+Socket registers (offsets from the socket's base):
+
+| Offset | Register     | Access | Description                                 |
+|--------|--------------|--------|---------------------------------------------|
+| `0x00` | `STATE`      | R      | see below                                   |
+| `0x04` | `COMMAND`    | W      | see below                                   |
+| `0x08` | `ERROR`      | R      | why the last command, or the connection, failed; `0` if it didn't |
+| `0x0C` | `EVENTS`     | RW     | bit 0 = connected, bit 1 = closed, bit 2 = received, bit 3 = sent; writing 1 to a bit clears it |
+| `0x10` | `IRQ_MASK`   | RW     | the `EVENTS` bits that assert the IRQ line  |
+| `0x14` | `LOCAL_PORT` | RW     | the socket's own port, low 16 bits          |
+| `0x18` | `PEER_ADDR`  | RW     | the other end's address                     |
+| `0x1C` | `PEER_PORT`  | RW     | the other end's port, low 16 bits           |
+| `0x20` | `ADDRESS`    | RW     | physical address of the next byte to move   |
+| `0x24` | `COUNT`      | RW     | bytes left to move                          |
+| `0x28` | `RX_SIZE`    | R      | bytes received and not yet moved to memory  |
+| `0x2C` | `TX_FREE`    | R      | free bytes in the send buffer               |
+
+| `STATE` | Name        | Description                                      |
+|---------|-------------|--------------------------------------------------|
+| `0`     | closed      | free for a command                               |
+| `1`     | connecting  | `CONNECT` is waiting for the other end           |
+| `2`     | listening   | `LISTEN` is waiting for a connection             |
+| `3`     | connected   | a TCP connection: bytes go both ways             |
+| `4`     | peer closed | the connection ended: the bytes received stay readable, nothing can be sent |
+| `5`     | UDP         | an open UDP socket                               |
+
+| `COMMAND` | Name      | In state       | Operation                     |
+|-----------|-----------|----------------|-------------------------------|
+| `1`       | `CONNECT` | closed         | opens a TCP connection to `PEER_ADDR`:`PEER_PORT` |
+| `2`       | `LISTEN`  | closed         | waits for one TCP connection on `LOCAL_PORT` |
+| `3`       | `UDP`     | closed         | opens a UDP socket on `LOCAL_PORT` |
+| `4`       | `SEND`    | connected, UDP | moves `COUNT` bytes from memory at `ADDRESS` to the network |
+| `5`       | `RECEIVE` | connected, peer closed, UDP | moves received bytes to RAM at `ADDRESS`, at most `COUNT` |
+| `6`       | `CLOSE`   | any            | closes the socket             |
+
+Writing `COMMAND` clears `ERROR` and runs the command at once, in the
+same store. A command that can't run changes nothing else and sets
+`ERROR`. The network itself is serviced between the CPU's instructions
+by the emulator, every few milliseconds of host time: `STATE`, `EVENTS`,
+`RX_SIZE` and `TX_FREE` change on their own as it goes.
+
+- **`CONNECT`** goes to connecting. When the other end accepts, the
+  socket goes to connected, `LOCAL_PORT` takes the port the host chose,
+  and `EVENTS.connected` is set. If it can't connect, the socket goes
+  back to closed with error 6 and `EVENTS.closed` set; the host may know
+  that at once, and then the socket never leaves closed.
+- **`LISTEN`** goes to listening on `LOCAL_PORT`; `0` picks a free port,
+  which `LOCAL_PORT` then shows. The first connection that comes in
+  turns the socket into a connected one, with the other end in
+  `PEER_ADDR` and `PEER_PORT`, and sets `EVENTS.connected`. The socket
+  stops listening then: to take another connection, `LISTEN` on another
+  socket. The host listens on the address given with `--net`,
+  `127.0.0.1` by default, so only programs on the host can connect.
+- **`UDP`** opens a UDP socket on `LOCAL_PORT`. With `0` the host picks
+  the port (and `LOCAL_PORT` shows it) and listens on all its
+  addresses, as any UDP client does; another port is opened on the
+  `--net` address, like `LISTEN`.
+- **`SEND`** on a connection moves as many of the `COUNT` bytes as
+  `TX_FREE` allows into the send buffer (16KB); `ADDRESS` goes up and
+  `COUNT` down by the bytes moved, so a `COUNT` left over is sent with
+  another `SEND`. The card sends the buffer on its own and sets
+  `EVENTS.sent` when it is empty. On a UDP socket `SEND` sends the
+  `COUNT` bytes, at most 8192, as one datagram to `PEER_ADDR`:`PEER_PORT`;
+  `ADDRESS` goes up by `COUNT` and `COUNT` becomes 0. A datagram may be
+  lost, as UDP allows. The bytes may come from RAM or ROM.
+- **`RECEIVE`** moves `RX_SIZE` bytes, or `COUNT` if that is less, from
+  the receive buffer (16KB) to RAM; `ADDRESS` and `COUNT` go on by the
+  bytes moved. Every time bytes arrive `EVENTS.received` is set. On a
+  UDP socket the buffer holds whole datagrams, each after an 8-byte
+  header: the sender's address (a word), its port and the datagram's
+  length (half-words), little-endian like everything else. A datagram
+  that doesn't fit in the free part of the buffer is dropped.
+- **`CLOSE`** closes the socket from any state and empties both buffers;
+  bytes not yet sent are dropped. The socket goes to closed and `EVENTS`
+  is cleared.
+
+When the other end closes the connection, or it breaks (then with error
+6), a connected socket goes to peer closed and `EVENTS.closed` is set.
+The bytes in the receive buffer stay there for `RECEIVE`; the socket is
+free again after `CLOSE`.
+
+The DMA moves bytes, so `ADDRESS` and `COUNT` need no alignment. It uses
+physical addresses and ignores the MMU. A byte the DMA can't reach stops
+the command with error 3, with `ADDRESS` and `COUNT` at that byte; the
+bytes before it have been moved.
+
+| `ERROR` | Reason                                                        |
+|---------|---------------------------------------------------------------|
+| `1`     | unknown command                                               |
+| `2`     | the command can't be used in the socket's state               |
+| `3`     | the DMA reached memory it can't: not RAM (or ROM, for `SEND`) |
+| `4`     | the link is down: the emulator runs without `--net`           |
+| `5`     | not available on this host: `LISTEN` or UDP in a browser      |
+| `6`     | the host's network failed: refused, unreachable, the port is taken, the connection broke |
+| `7`     | the UDP datagram is longer than 8192 bytes                    |
+
+**DNS.** `DNS_COMMAND` = 1 looks up the zero-terminated host name, up to
+255 characters, at `DNS_NAME` in RAM or ROM (a dotted address such as
+`"10.0.0.1"` works too). It sets `DNS_STATUS.busy` and clears
+`DNS_STATUS.done` and `.failed`; when the lookup ends, busy is cleared,
+`DNS_RESULT` holds the first IPv4 address found and done is set, with
+failed too if there was none. Without the link, or with no terminator
+in 256 bytes, the lookup fails at once. Writes to `DNS_COMMAND` while
+busy are ignored. Only one lookup runs at a time; it may take seconds,
+but the machine runs on meanwhile.
+
+IRQ line 8 is asserted while any socket has an `EVENTS` bit set that is
+also set in its `IRQ_MASK`, or `DNS_STATUS.done` is set with
+`DNS_CONTROL` bit 0. `PENDING` tells which; the handler writes 1 to the
+`EVENTS` bits it has handled (or to `DNS_STATUS.done`).
+
+In a browser (the web build) a connection is a WebSocket to
+`ws://ADDRESS:PORT`, which a proxy such as websockify turns into TCP;
+`LISTEN` and UDP fail with error 5, and `STATUS` bits 1 and 2 are clear.
+
+### Audio card
+
+Eight voices that play samples straight from memory, like the Amiga's
+Paula or the Gravis Ultrasound: each voice reads its sample by DMA at
+its own rate, and the card mixes the voices in stereo with a volume for
+each side. A voice can loop a part of its sample and raise an interrupt
+at its end and half way, so a looping buffer that software refills is a
+stream.
+
+| Offset  | Register  | Access | Description                                     |
+|---------|-----------|--------|-------------------------------------------------|
+| `0x00`  | `STATUS`  | RW     | bit N = voice N has signalled; writing 1 to a bit clears it |
+| `0x04`  | `FAULT`   | RW     | bit N = voice N was stopped by a bad sample address; writing 1 to a bit clears it |
+| `0x08`  | `MASTER`  | RW     | volume of the mix: bits 0–7 left, bits 8–15 right |
+| `0x0C`  | `VOICES`  | R      | `8`                                             |
+| `0x10`  | `RATE`    | R      | `48000`, frames per second of the mix           |
+| `0x100` | voice 0   |        | the voice registers below                       |
+| …       |           |        | voice N at `0x100` + N × `0x20`                 |
+
+Voice registers (offsets from the voice's base):
+
+| Offset | Register   | Access | Description                                  |
+|--------|------------|--------|----------------------------------------------|
+| `0x00` | `CONTROL`  | RW     | bit 0 = on, bit 1 = loop, bit 2 = 16-bit, bit 3 = stereo, bit 4 = signal at the end, bit 5 = signal half way |
+| `0x04` | `ADDRESS`  | RW     | physical address of the sample's first frame |
+| `0x08` | `LENGTH`   | RW     | the sample's length in frames                |
+| `0x0C` | `LOOP`     | RW     | the frame a loop goes back to                |
+| `0x10` | `POSITION` | RW     | the frame playing now                        |
+| `0x14` | `RATE`     | RW     | frames per second, low 24 bits              |
+| `0x18` | `VOLUME`   | RW     | bits 0–7 left, bits 8–15 right               |
+
+A sample is an array of frames at `ADDRESS` in RAM or ROM. A frame is one
+sample value, or two (left, then right) with `CONTROL` bit 3 set; a value
+is a signed byte, or a signed little-endian half-word with bit 2 set. So
+a frame takes 1, 2 or 4 bytes. Volumes go from 0 (silent) to 255 (as
+recorded). Reserved bits of `CONTROL`, `VOLUME` and `MASTER` read as 0.
+
+The card makes 48000 stereo frames a second of clock ticks, one every
+clock rate / 48000 ticks. For each frame, every voice that is on plays
+the sample frame at `POSITION` and then moves `POSITION` on by `RATE` /
+48000 frames, keeping the fraction internally: `RATE` = 48000 plays a
+frame per frame, 24000 plays each one twice, 0 holds the frame. There is
+no interpolation. When `POSITION` reaches `LENGTH` or goes past it, the
+voice is at its end:
+
+- with bit 1 (loop) set and `LOOP` < `LENGTH`, `POSITION` goes back by
+  `LENGTH` − `LOOP` frames (as many times as it takes to be below
+  `LENGTH` again), and the voice plays on;
+- otherwise bit 0 is cleared and `POSITION` stays at `LENGTH`.
+
+With bit 4 set, the end sets bit N of `STATUS`. With bit 5 set, so does
+`POSITION` reaching `LENGTH` / 2 (rounded down) from below. A stream
+plays a buffer of two halves with loop on, `LOOP` = 0 and bits 4 and 5:
+each signal says which half to fill next.
+
+Writing `POSITION` moves the voice to that frame and drops the fraction.
+Turning a voice on doesn't move it, so to play a sample again software
+writes `POSITION` = 0 too; a voice turned on at `LENGTH` or past it is at
+its end at once, before it plays anything. `CONTROL` and the other
+registers can be changed while the voice plays and take effect with the
+next frame.
+
+The DMA uses physical addresses and ignores the MMU. A frame that is not
+in RAM or ROM, or a 16-bit value at an odd address, stops the voice: bit
+0 of its `CONTROL` is cleared and bit N of `FAULT` is set (without a
+signal).
+
+The left and right sides of each voice are scaled by its `VOLUME`,
+summed over the voices, scaled by `MASTER` and clipped to 16 bits; the
+beeper is added after that. `MASTER` is 0 at reset, so the card is
+silent until software sets it. The host plays the mix with a delay of up
+to about 85ms; without a window or with `--mute` nothing is heard, but
+the card runs the same.
+
+IRQ line 9 is asserted while `STATUS` is not zero.
+
 ## Reset
 
 On reset all registers are zero and `pc = 0xFE000000`, so execution starts
@@ -420,7 +684,9 @@ The power controller's `RESET` does the same at run time: the CPU and all
 devices return to their reset state (FIFOs are emptied, the PIC `ENABLE`
 mask, the timer and its `COUNT` are cleared, disk transfers stop and the
 disk registers are cleared, the video card stops its DMA, turns the
-display off and clears its palette and `FRAME`, the beeper goes quiet).
+display off and clears its palette and `FRAME`, the beeper goes quiet,
+the mouse is disabled, the network card closes its sockets and forgets a
+DNS lookup, the audio card's voices stop).
 RAM, VRAM and the disk images, and the disk in the floppy drive, keep
 their contents, including the sectors of an interrupted
 write that were already written. VRAM is zero at power-on.
@@ -489,7 +755,8 @@ The boot info block describes the machine:
 - The PIC `ENABLE` mask is 0. The boot disk is idle with `DONE` clear.
   The beeper may still be sounding the firmware's beep, for up to 1/10 s
   of ticks.
-  The timer is as after reset. The UART RX FIFO was flushed at reset, but
+  The timer, the mouse, the network card and the audio card are as
+  after reset. The UART RX FIFO was flushed at reset, but
   it may hold input typed since then, as may the keyboard FIFO.
 - The video card shows the firmware's screen console: 640×480, 8 bpp,
   `START` = 0, display on, IRQs off, the engine idle. The palette holds
@@ -507,7 +774,8 @@ On every tick the timer advances first, then the hard disks move a word
 each, then the video card moves a DMA word and counts the tick towards
 the end of the frame, then the floppy counts the tick towards its next
 word, then the beeper
-advances its wave and `DURATION`, then the CPU samples the IRQ line and
+advances its wave and `DURATION`, then the audio card counts the tick
+towards its next frame, then the CPU samples the IRQ line and
 advances its pipeline by one stage. Nothing runs once the CPU has
 halted or the machine is powered off.
 

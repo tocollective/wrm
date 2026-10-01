@@ -21,6 +21,8 @@ static config_t config = {
 	.step_mode = false,
 	.headless = false,
 	.trace_path = NULL,
+	.net = false,
+	.net_bind = 0x7F000001, // 127.0.0.1: only the host can connect
 };
 
 config_t* config_get(void) {
@@ -43,6 +45,9 @@ static void config_usage(const char* program) {
 			"dropped on the\n"
 			"                    window replaces it at run time\n"
 			"  --mute            no sound\n"
+			"  --net[=ADDR]      connect the network card to the host's "
+			"network; it listens\n"
+			"                    on ADDR (default: 127.0.0.1)\n"
 			"  --headless        no window; exit when the machine powers off "
 			"or halts\n"
 			"  --trace[=PATH]    log every retired instruction to PATH "
@@ -125,6 +130,27 @@ static void config_parse_hdd(const char* path) {
 	error("--hdd: at most %d disks", CONFIG_HDD_COUNT);
 }
 
+// "a.b.c.d" for --net, as a word with a on top
+static void config_parse_net(const char* text) {
+	uint32_t addr = 0;
+	const char* p = text;
+	for (int i = 0; i < 4; i++) {
+		if (!isdigit((unsigned char)*p))
+			error("--net: invalid address '%s'", text);
+		errno = 0;
+		char* end = NULL;
+		const unsigned long part = strtoul(p, &end, 10);
+		if (errno || part > 255 || end - p > 3)
+			error("--net: invalid address '%s'", text);
+		addr = addr << 8 | (uint32_t)part;
+		p = end;
+		if (i < 3 && *p++ != '.') error("--net: invalid address '%s'", text);
+	}
+	if (*p) error("--net: invalid address '%s'", text);
+	config.net = true;
+	config.net_bind = addr;
+}
+
 static void config_parse_clock(const char* text) {
 	uint64_t rate = 0;
 	if (!config_parse_number(text, 1000, &rate) || rate == 0
@@ -161,6 +187,10 @@ void config_parse(int argc, char* argv[]) {
 			config.trace_path = "-";
 		} else if (strncmp(arg, "--trace=", 8) == 0 && arg[8]) {
 			config.trace_path = arg + 8;
+		} else if (strcmp(arg, "--net") == 0) {
+			config.net = true;
+		} else if (strncmp(arg, "--net=", 6) == 0) {
+			config_parse_net(arg + 6);
 		} else if (strcmp(arg, "--debug") == 0) {
 			config.debug = true;
 		} else if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
