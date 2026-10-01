@@ -1,11 +1,15 @@
 ; ============================================================================
-;  The parts of booting that M can't express: probing RAM through faults,
+;  The parts of booting that M can't express: probing RAM and the devices
+;  through faults,
 ;  switching stacks and entering the image with the registers the boot
 ;  protocol sets (docs/SPECIFICATION.md#state-at-the-entry-point).
 ; ============================================================================
 
 BOOT_ASM_INFO   = 0x00001000        ; the boot info block
 BOOT_ASM_STACK  = 0x00010000        ; the image's stack, empty
+BOOT_ASM_IO     = 0xFD000000        ; the I/O region, one device a page
+BOOT_ASM_IO_END = 0xFE000000
+BOOT_ASM_ID     = 0xFFC             ; the ID register in a device's page
 
 ; ramSize(): UWord -> bytes of RAM from address 0
 ; Slots are 1MB-32MB each and laid out back to back, so RAM ends at a 1MB
@@ -35,6 +39,45 @@ ramSize:
 	mfcr r7, epc
 	addi r7, r7, 4              ; skip the load
 	mtcr epc, r7
+	iret
+
+; probeDevices(table: UWord, max: UWord): UWord -> devices found
+; Reads the ID register of each page of the I/O region; an unused page is
+; a bus error. Lists the pages that answer at table as (address, ID)
+; pairs, at most max of them. Borrows IVEC and STATUS like ramSize.
+probeDevices:
+	mfcr r5, ivec
+	mfcr r6, status
+	la r9, .fault
+	mtcr ivec, r9
+	mtcr status, r0             ; EXL = 0: a bus error enters .fault
+	li r8, 0                    ; found
+	li r3, BOOT_ASM_IO
+.next:
+	beqz r2, .end               ; the table is full
+	li r7, 0
+	lw r4, BOOT_ASM_ID(r3)      ; a bus error sets r7
+	bnez r7, .skip
+	sw r3, 0(r1)
+	sw r4, 4(r1)
+	addi r1, r1, 8
+	addi r8, r8, 1
+	addi r2, r2, -1
+.skip:
+	li r9, 0x1000
+	add r3, r3, r9
+	li r9, BOOT_ASM_IO_END
+	bltu r3, r9, .next
+.end:
+	mtcr status, r6
+	mtcr ivec, r5
+	mv r1, r8
+	ret
+.fault:
+	li r7, 1
+	mfcr r9, epc
+	addi r9, r9, 4              ; skip the load
+	mtcr epc, r9
 	iret
 
 ; onStack(fn: (): Void, top: UWord): Void

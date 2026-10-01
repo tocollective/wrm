@@ -386,6 +386,11 @@ static bool cpu_cr_is_counter(const uint32_t cr) {
 	return cr >= CPU_CR_CYCLE && cr <= CPU_CR_INSTRETH;
 }
 
+// the counters and CPUID
+static bool cpu_cr_is_read_only(const uint32_t cr) {
+	return cpu_cr_is_counter(cr) || cr == CPU_CR_CPUID;
+}
+
 bool cpu_rs2_is_reserved(const uint8_t opcode) {
 	switch (opcode) {
 		case CPU_OP_LL:
@@ -417,7 +422,8 @@ static bool cpu_has_reserved_bits(const cpu_instruction_t* in) {
 		case CPU_OP_MTCR:
 			return in->rd;
 		case CPU_OP_TLBI:
-			return in->rd || in->imm;
+			return in->rd || in->imm >= CPU_TLBI_MODE_COUNT // unsigned
+				   || (in->imm == CPU_TLBI_ALL && in->rs1);
 	}
 	return false;
 }
@@ -427,7 +433,7 @@ static bool cpu_has_reserved_bits(const cpu_instruction_t* in) {
 static bool cpu_cr_is_illegal(const cpu_instruction_t* in) {
 	if (in->opcode != CPU_OP_MFCR && in->opcode != CPU_OP_MTCR) return false;
 	if (in->imm >= CPU_CR_COUNT) return true;
-	return in->opcode == CPU_OP_MTCR && cpu_cr_is_counter(in->imm);
+	return in->opcode == CPU_OP_MTCR && cpu_cr_is_read_only(in->imm);
 }
 
 // supervisor-only instructions
@@ -649,6 +655,8 @@ static uint32_t cpu_read_cr(const cpu_t* cpu, const uint32_t cr) {
 			return (uint32_t)cpu->retired;
 		case CPU_CR_INSTRETH:
 			return (uint32_t)(cpu->retired >> 32);
+		case CPU_CR_CPUID:
+			return CPU_CPUID;
 	}
 	return cpu->cr[cr];
 }
@@ -1058,7 +1066,17 @@ static bool cpu_stage_wb(cpu_t* cpu) {
 			break;
 		case CPU_OP_TLBI:
 			cpu->reservation_valid = false;
-			mmu_invalidate(cpu->mmu, wb->result);
+			switch (wb->in.imm) {
+				case CPU_TLBI_PAGE:
+					mmu_invalidate(cpu->mmu, wb->result);
+					break;
+				case CPU_TLBI_ASID:
+					mmu_invalidate_asid(cpu->mmu, (uint8_t)wb->result);
+					break;
+				case CPU_TLBI_ALL:
+					mmu_flush(cpu->mmu);
+					break;
+			}
 			cpu_refetch(cpu, wb->pc + 4);
 			return true;
 		case CPU_OP_IRET: {

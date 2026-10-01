@@ -1,9 +1,25 @@
 #include "display.h"
 
 #include <math.h>
+#include <stdio.h>
+#include <string.h>
 
 #define DISPLAY_TITLE "WRM.081632"
-#define DISPLAY_TITLE_CAPTURED "WRM.081632 - Ctrl+Alt releases the mouse"
+#define DISPLAY_TITLE_CAPTURED " - Ctrl+Alt releases the mouse"
+
+// "WRM.081632 - <status> - <how to release the mouse>"
+static void display_update_title(display_t* display) {
+	char title[sizeof(DISPLAY_TITLE) + sizeof(display->status)
+			   + sizeof(DISPLAY_TITLE_CAPTURED) + 3];
+	snprintf(title,
+			 sizeof(title),
+			 "%s%s%s%s",
+			 DISPLAY_TITLE,
+			 display->status[0] ? " - " : "",
+			 display->status,
+			 display->mouse_captured ? DISPLAY_TITLE_CAPTURED : "");
+	SDL_SetWindowTitle(display->window, title);
+}
 
 display_t* display_create(void) {
 	display_t* display = (display_t*)calloc(1, sizeof(display_t));
@@ -108,6 +124,13 @@ void display_capture_mouse(display_t* display, const bool capture) {
 		return;
 	}
 	display->mouse_captured = capture;
-	SDL_SetWindowTitle(display->window,
-					   capture ? DISPLAY_TITLE_CAPTURED : DISPLAY_TITLE);
+	display_update_title(display);
+}
+
+void display_set_status(display_t* display, const char* status) {
+	if (!display
+		|| strncmp(display->status, status, sizeof(display->status)) == 0)
+		return;
+	snprintf(display->status, sizeof(display->status), "%s", status);
+	display_update_title(display);
 }

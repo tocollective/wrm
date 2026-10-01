@@ -28,10 +28,7 @@ void mmu_set_ptbr(mmu_t* mmu, const uint32_t value) {
 	const uint8_t new_asid = (uint8_t)((next & MMU_PTBR_ASID) >> 4);
 	// Reusing an ASID explicitly refreshes that context. Switching to a
 	// different ASID leaves its cached translations available on return.
-	if (old_asid == new_asid)
-		for (size_t i = 0; i < MMU_TLB_SIZE; i++)
-			if (!mmu->tlb[i].global && mmu->tlb[i].asid == new_asid)
-				mmu->tlb[i].valid = false;
+	if (old_asid == new_asid) mmu_invalidate_asid(mmu, new_asid);
 	mmu->ptbr = next;
 }
 
@@ -51,6 +48,13 @@ void mmu_invalidate(mmu_t* mmu, const uint32_t address) {
 			&& (entry->global || entry->asid == asid))
 			entry->valid = false;
 	}
+}
+
+void mmu_invalidate_asid(mmu_t* mmu, const uint8_t asid) {
+	if (!mmu) return;
+	for (size_t i = 0; i < MMU_TLB_SIZE; i++)
+		if (!mmu->tlb[i].global && mmu->tlb[i].asid == asid)
+			mmu->tlb[i].valid = false;
 }
 
 // Page table walks never read device registers.

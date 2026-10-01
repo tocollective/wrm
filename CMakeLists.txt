@@ -3,6 +3,14 @@ cmake_minimum_required(VERSION 3.16)
 set(PROJECT_NAME "wrm081632")
 project(${PROJECT_NAME} LANGUAGES C)
 
+# A fresh build directory gets an optimized build: without -O the machine
+# can't keep up with its clock rate. Multi-config generators pick per build.
+get_property(WRM081632_MULTI_CONFIG GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+if(NOT WRM081632_MULTI_CONFIG AND NOT CMAKE_BUILD_TYPE)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING
+        "Build type: Debug, Release, RelWithDebInfo or MinSizeRel" FORCE)
+endif()
+
 find_package(Git QUIET)
 
 set(WRM081632_VERSION "unknown")
@@ -88,6 +96,13 @@ target_include_directories(${PROJECT_NAME}  PRIVATE
 )
 
 target_link_libraries(${PROJECT_NAME} PRIVATE SDL3::SDL3 miniaudio)
+
+# warnings for our own code only, not for SDL and miniaudio
+if(MSVC)
+    target_compile_options(${PROJECT_NAME} PRIVATE /W4)
+else()
+    target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra)
+endif()
 
 # the network card's sockets: Winsock on Windows; elsewhere they are in
 # libc (on the web Emscripten turns them into WebSockets)

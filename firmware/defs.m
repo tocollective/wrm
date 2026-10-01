@@ -34,8 +34,10 @@ type TimerRegs {
 }
 
 type PowerRegs {
-    off:   UWord,       // the low 8 bits are the exit code
-    reset: UWord,
+    off:        UWord,  // the low 8 bits are the exit code
+    reset:      UWord,
+    status:     UWord,  // the host asks to power off; writing 1 clears
+    resetCause: UWord,  // why the machine last started, RESET_*
 }
 
 type DiskRegs {
@@ -175,6 +177,9 @@ let IRQ_MOUSE: UWord = 7
 let IRQ_NET: UWord = 8
 let IRQ_AUDIO: UWord = 9
 let IRQ_RTC: UWord = 10
+let IRQ_POWER: UWord = 11
+
+let IO_ID: UWord = 0xFFC               // every device's ID register
 
 let KBD_READY: UWord = 1 << 0
 let KBD_OVERFLOW: UWord = 1 << 1
@@ -258,6 +263,11 @@ let AUDIO_VOICES: UWord = 8
 let RTC_ARMED: UWord = 1 << 0          // CONTROL
 let RTC_ALARM: UWord = 1 << 0          // STATUS
 
+let POWER_OFF_REQUEST: UWord = 1 << 0  // STATUS
+let RESET_POWER_ON: UWord = 0          // RESET_CAUSE
+let RESET_SOFTWARE: UWord = 1
+let RESET_HOST: UWord = 2
+
 // ---- the CPU ---------------------------------------------------------------
 
 // control registers (docs/INSTRUCTIONS.md#control-registers)
@@ -270,6 +280,7 @@ let CR_PTBR: UWord = 6
 let CR_CYCLE: UWord = 7
 let CR_CYCLEH: UWord = 8
 let CR_INSTRET: UWord = 9
+let CR_CPUID: UWord = 11
 
 let STATUS_IE: UWord = 1 << 0
 let STATUS_PUM: UWord = 1 << 3         // user mode after IRET
@@ -306,11 +317,21 @@ type BootInfo {
     image:       UWord,     // = BOOT_LOAD
     imageSize:   UWord,
     clock:       UWord,     // ticks per second
+    devices:     UWord,     // entries in the device table
+    deviceTable: UWord,     // right after the block
+}
+
+/// An entry of the device table: a page of the I/O region and the ID
+/// register of the device there.
+type DeviceEntry {
+    address: UWord,
+    id:      UWord,         // type << 16 | version << 8 | IRQ line
 }
 
 let BOOT_MAGIC: UWord = 0x424D_5257    // "WRMB"
 let BOOT_INFO_MAGIC: UWord = 0x4F46_4E49   // "INFO"
 let BOOT_INFO: UWord = 0x0000_1000
+let BOOT_INFO_END: UWord = 0x0000_2000 // the device table ends below it
 let BOOT_STACK_TOP: UWord = 0x0001_0000
 let BOOT_LOAD: UWord = 0x0001_0000
 
@@ -324,7 +345,7 @@ export {
     pic, kbd, uart, timer, power, disk0, video, floppy, beeper,
     mouse, net, netSocket, audio, audioVoice, rtc,
     PIC_BASE, ROM_BASE,
-    IRQ_KBD, IRQ_UART, IRQ_TIMER, IRQ_MOUSE, IRQ_NET, IRQ_AUDIO, IRQ_RTC,
+    IRQ_KBD, IRQ_UART, IRQ_TIMER, IRQ_MOUSE, IRQ_NET, IRQ_AUDIO, IRQ_RTC, IRQ_POWER, IO_ID,
     KBD_READY, KBD_OVERFLOW, KBD_FLUSH,
     UART_RX_READY, UART_TX_READY, UART_FLUSH, HOST_ESCAPE,
     TIMER_ENABLE, TIMER_PERIODIC, TIMER_EXPIRED,
@@ -341,9 +362,12 @@ export {
     VOICE_ON, VOICE_LOOP, VOICE_16BIT, VOICE_STEREO, VOICE_SIGNAL_END, VOICE_SIGNAL_HALF,
     AUDIO_VOICES,
     RTC_ARMED, RTC_ALARM,
+    POWER_OFF_REQUEST, RESET_POWER_ON, RESET_SOFTWARE, RESET_HOST,
     CR_STATUS, CR_EPC, CR_IVEC, CR_CAUSE, CR_BADADDR, CR_PTBR, CR_CYCLE, CR_CYCLEH, CR_INSTRET,
+    CR_CPUID,
     STATUS_IE, STATUS_PUM, STATUS_EXL, CAUSE_INTERRUPT, CAUSE_SYSCALL,
     PTBR_EN, PTE_V, PTE_R, PTE_W, PTE_X, PTE_U, PAGE_SIZE, SUPERPAGE_SIZE,
-    BootHeader, BootInfo, BOOT_MAGIC, BOOT_INFO_MAGIC, BOOT_INFO, BOOT_STACK_TOP, BOOT_LOAD,
+    BootHeader, BootInfo, DeviceEntry, BOOT_MAGIC, BOOT_INFO_MAGIC, BOOT_INFO, BOOT_INFO_END,
+    BOOT_STACK_TOP, BOOT_LOAD,
     HID_A, HID_ESCAPE,
 }

@@ -6,12 +6,16 @@
 
 typedef struct machine {
 	motherboard_t* motherboard;
+	uint64_t ticks; // clock ticks run, across resets: for the speed shown
 } machine_t;
 
 machine_t* machine_create(void);
 void machine_destroy(machine_t* machine);
 
 void machine_update(machine_t* machine);
+// The host's reset key: a reset like the power controller's RESET, also
+// after the CPU has halted.
+void machine_reset(machine_t* machine);
 
 // The guest turned the machine off through the power controller.
 bool machine_powered_off(const machine_t* machine);

@@ -5,8 +5,14 @@
 WRM.081632 – is a 32-bit, RISC based, little-endian CPU architecture.
 
 ```sh
+cmake -S . -B build     # RelWithDebInfo unless -DCMAKE_BUILD_TYPE says otherwise
 cmake --build build && ctest --test-dir build
 ```
+
+A `Debug` build runs several times slower and may not keep up with the
+32 MHz clock. The title bar shows the speed the machine really runs at
+and its share of the clock rate; below 100% the guest's time, which it
+counts in ticks, falls behind the host's.
 
 ```sh
 dd if=/dev/zero of=firmware.rom  bs=1m  count=32
@@ -50,7 +56,13 @@ mode it also quits when the CPU halts:
 | `0`         | `HLT` (headless only)                                    |
 | `1`         | a fault the CPU couldn't handle (headless only, reported on stderr), or an emulator error |
 
-With a window, a halted machine keeps the window open.
+With a window, a halted machine keeps the window open; Ctrl+Alt+R resets
+it, as at any other time.
+
+Closing the window or Ctrl+C in the terminal is the power button: if the
+guest has enabled the power controller's IRQ in the PIC and still runs,
+the emulator asks it to power off and waits; doing it again quits at
+once. A guest that doesn't listen is cut off at once, as before.
 
 ## Mouse
 
@@ -73,15 +85,28 @@ address, e.g. `--net=0.0.0.0` for all of them. See
 
 A browser can't open TCP connections or look up host names, so the web
 build asks a proxy on the host to do it, `tools/netproxy.py` (only the
-standard library); one proxy reaches any address and port:
+standard library). It prints a random token and the URL parameter that
+passes it to the page:
 
 ```sh
 python3 tools/netproxy.py            # 127.0.0.1:8080
+# netproxy: open the emulator's page with ?netproxy=127.0.0.1:8080/TOKEN
 ```
 
-A page looks for it at `127.0.0.1:8080`, or where its URL says, e.g.
-`wrm081632.html?netproxy=127.0.0.1:9000`. Listening and UDP are not
-available in a browser.
+Open the page as `wrm081632.html?netproxy=127.0.0.1:8080/TOKEN`. Every
+page open in the browser can reach the proxy, so it serves only requests
+with the token and only pages from `localhost` or `127.0.0.1` (any port),
+and connects only to public addresses:
+
+| Option          | Effect                                                   |
+|-----------------|----------------------------------------------------------|
+| `--token TOKEN` | a fixed token instead of a random one                    |
+| `--no-token`    | no token; the page then needs no `?netproxy=` for `127.0.0.1:8080` |
+| `--origin URL`  | also serve pages from this origin, e.g. `https://example.com`; `'*'` for any |
+| `--allow CIDR`  | also connect to a loopback, private or other non-public network, e.g. `127.0.0.1/32` |
+| `--listen ADDR`, `--port N` | where it listens, `127.0.0.1:8080` by default |
+
+Listening and UDP are not available in a browser.
 
 ## Booting from disk
 
@@ -175,13 +200,15 @@ runs every ROM through it as a test of its own.
 |------------|-------------------------------------------------------------|
 | `isa`      | every instruction, control registers, exceptions, user mode |
 | `pipeline` | forwarding and stalls, cycle timing, precise faults and interrupts |
-| `mmu`      | pages and superpages, permissions, TLB invalidation, `U`    |
+| `mmu`      | pages and superpages, permissions, TLB invalidation and its modes, `U` |
 | `disk`     | the disk controller, the floppy drive, the firmware booting from disk |
 | `video`    | the video card: modes, palette, drawing engine, DMA, VBLANK |
 | `sound`    | the beeper's registers and `DURATION` timing; the audio card's voices, loops, signals and DMA faults |
 | `mouse`    | the mouse's registers (headless, so without events)         |
 | `net`      | the network card without a link (`--no-net`), and with one over the host's loopback: TCP, UDP, DNS |
 | `rtc`      | the real-time clock: the host's time and its latch, the alarm and its IRQ line |
+| `power`    | the power controller: its state at power-on, a reset by software and `RESET_CAUSE` |
+| `devices`  | every device's `ID` register, unused pages of the I/O region |
 
 A test includes `tests/common/harness.asm` and defines `test_main`. It
 sets `r28` to the number of each check and ends with `j pass`, or

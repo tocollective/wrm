@@ -7,12 +7,15 @@
 typedef struct application {
 	bool running;
 	bool stop_reported; // the machine has stopped and the state was dumped
+	bool off_requested; // the guest was asked to power off: next quit forces
 	int exit_code; // process exit status once the app stops running
 	machine_t* machine;
 	display_t* display; // NULL in headless mode
 	speaker_t* speaker; // NULL in headless mode, with --mute or no audio
 	FILE* trace_file; // --trace=PATH, NULL when off or on stderr
 	float mouse_x, mouse_y; // motion the mouse hasn't been given yet
+	uint64_t speed_ns; // host time of the last speed sample
+	uint64_t speed_ticks; // machine ticks run by then
 } application_t;
 
 application_t* application_create(int argc, char* argv[]);

@@ -21,10 +21,17 @@ void machine_update(machine_t* machine) {
 
 	motherboard_t* mb = machine->motherboard;
 	const uint64_t ticks = clock_update(mb->clock);
-	for (uint64_t i = 0; i < ticks && !machine_stopped(machine); i++)
+	for (uint64_t i = 0; i < ticks && !machine_stopped(machine); i++) {
 		motherboard_tick(mb);
+		machine->ticks++;
+	}
 	// the host's network moves between batches of ticks, not every tick
 	netcard_poll(mb->netcard);
+}
+
+void machine_reset(machine_t* machine) {
+	if (!machine) return;
+	motherboard_reset(machine->motherboard, POWER_RESET_CAUSE_HOST);
 }
 
 bool machine_powered_off(const machine_t* machine) {

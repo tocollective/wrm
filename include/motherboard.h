@@ -54,6 +54,30 @@
 #define MB_IRQ_NET 8
 #define MB_IRQ_AUDIO 9
 #define MB_IRQ_RTC 10
+#define MB_IRQ_POWER 11
+
+// Every device's page has an ID register at MB_IO_ID: the type in bits
+// 31:16, the version in 15:8 and the IRQ line in 7:0 (MB_NO_IRQ for none)
+#define MB_IO_ID 0xFFC
+#define MB_DEVICE_VERSION 1
+#define MB_NO_IRQ 0xFF
+
+// Device types in the ID register (see docs/SPECIFICATION.md)
+typedef enum mb_device_type {
+	MB_DEVICE_PIC = 1,
+	MB_DEVICE_KEYBOARD = 2,
+	MB_DEVICE_UART = 3,
+	MB_DEVICE_TIMER = 4,
+	MB_DEVICE_POWER = 5,
+	MB_DEVICE_DISK = 6, // a hard disk
+	MB_DEVICE_VIDEO = 7,
+	MB_DEVICE_FLOPPY = 8,
+	MB_DEVICE_BEEPER = 9,
+	MB_DEVICE_MOUSE = 10,
+	MB_DEVICE_NET = 11,
+	MB_DEVICE_AUDIO = 12,
+	MB_DEVICE_RTC = 13,
+} mb_device_type_t;
 
 typedef struct ram_slot {
 	ram_t* ram;
@@ -83,8 +107,9 @@ typedef struct motherboard {
 motherboard_t* motherboard_create(void);
 void motherboard_destroy(motherboard_t* mb);
 
-// Resets the CPU and every device; RAM keeps its contents.
-void motherboard_reset(motherboard_t* mb);
+// Resets the CPU and every device; RAM keeps its contents. cause is what
+// the power controller's RESET_CAUSE then reads.
+void motherboard_reset(motherboard_t* mb, const power_reset_cause_t cause);
 // Advances the machine by one clock tick.
 void motherboard_tick(motherboard_t* mb);
 

@@ -64,7 +64,7 @@ let putc(c: UByte): Void {
 | `syscall(n, a1, …, a6)` | `SYSCALL` | `Word` |
 | `wfi()` | `WFI` | `Void` |
 | `hlt()` | `HLT` | `Void` |
-| `tlbi(addr)` | `TLBI` | `Void`; `addr: UWord` |
+| `tlbi(addr)`, `tlbi(x, mode)` | `TLBI` | `Void`; `addr`, `x: UWord`; `mode` — константа 0–2 |
 | `fence()` | `FENCE` | `Void` |
 | `breakpoint()` | `BREAK` | `Void` |
 | `sizeof(T)` | — | `UWord`, константа |
@@ -78,10 +78,19 @@ let putc(c: UByte): Void {
   кодируется в `imm14` инструкции. Переменная — ошибка.
 - Номера (INSTRUCTIONS, «Control registers»): `STATUS` 0, `EPC` 1,
   `IVEC` 2, `SCRATCH` 3, `CAUSE` 4, `BADADDR` 5, `PTBR` 6, `CYCLE` 7,
-  `CYCLEH` 8, `INSTRET` 9, `INSTRETH` 10. Язык имён не вводит: их
-  объявляют константами.
+  `CYCLEH` 8, `INSTRET` 9, `INSTRETH` 10, `CPUID` 11. Язык имён не
+  вводит: их объявляют константами.
 - `mtcr` не переставляется с обращениями к памяти: после `mtcr(PTBR, ...)`
   следующие обращения уже идут через новую таблицу страниц.
+
+### `tlbi`
+
+- `tlbi(addr)` — `TLBI addr`: сбросить трансляцию страницы `addr`.
+- `tlbi(x, mode)` — `mode` — **константное выражение** 0–2, оно
+  кодируется в `imm14` (INSTRUCTIONS, «TLB»): 0 — как `tlbi(x)`;
+  1 — `TLBI.ASID`, сбросить все неглобальные записи ASID `x & 0xFF`;
+  2 — `TLBI.ALL`, сбросить весь TLB, `x` вычисляется, но не используется.
+  Другой `mode` — ошибка.
 
 ### `syscall`
 

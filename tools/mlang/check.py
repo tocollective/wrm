@@ -1394,15 +1394,19 @@ class Checker:
 			if not count(1 if name == "mfcr" else 2):
 				return ERROR
 			n = self.const_int(args[0], UWORD, f"the register number of '{name}'")
-			if n is not None and not 0 <= n <= 10:
-				self.error(args[0].loc, f"there is no control register {n} (0 to 10)")
+			if n is not None and not 0 <= n <= 11:
+				self.error(args[0].loc, f"there is no control register {n} (0 to 11)")
 			if name == "mfcr":
 				return UWORD
 			self.check_value(args[1], UWORD)
 			return VOID
 		if name == "tlbi":
-			if count(1):
+			if count(1, 2):
 				self.check_value(args[0], UWORD)
+				if len(args) == 2:
+					mode = self.const_int(args[1], UWORD, "the mode of 'tlbi'")
+					if mode is not None and not 0 <= mode <= 2:
+						self.error(args[1].loc, f"there is no TLBI mode {mode} (0 to 2)")
 			return VOID
 		if name == "syscall":
 			if not count(1, 7):

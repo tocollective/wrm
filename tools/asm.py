@@ -17,8 +17,8 @@ syntax:
   registers: r0-r31, zero (= r0), tp (= r28), fp (= r29), sp (= r30),
              ra (= r31)
   control registers: status, epc, ivec, scratch, cause, badaddr, ptbr,
-                     cycle, cycleh, instret, instreth (read-only),
-                     cr0-cr10 or a number
+                     cycle, cycleh, instret, instreth, cpuid (read-only),
+                     cr0-cr11 or a number
 
   expressions: C operators | ^ & << >> + - * / % ~ and parentheses,
     numbers 42 0x2A 0b101010 0o52 'c', $ = address of the current line,
@@ -30,6 +30,7 @@ syntax:
     BEQ rd, rs1, target       JAL [rd,] target        JALR rd, rs1[, imm]
     MFCR rd, cr               MTCR cr, rs1            JALR rd, imm(rs1)
     TLBI rs1                  LL rd, (rs1)           SC rd, rs2, (rs1)
+    TLBI.ASID rs1             TLBI.ALL
     FADD rd, rs1, rs2         FSQRT rd, rs1           ITOF rd, rs1
   branch and JAL targets are addresses (labels), not offsets.
   float values (fli, .float): 1.5 -2e-3 inf nan, or an integer expression
@@ -128,10 +129,11 @@ def check_range(v, lo, hi, what):
 REGS = {f"r{i}": i for i in range(32)}
 REGS.update(zero=0, tp=28, fp=29, sp=30, ra=31)  # roles from docs/ABI.md
 
-CREGS = {f"cr{i}": i for i in range(11)}
+CREGS = {f"cr{i}": i for i in range(12)}
 CREGS.update(status=0, epc=1, ivec=2, scratch=3, cause=4, badaddr=5, ptbr=6,
-             cycle=7, cycleh=8, instret=9, instreth=10)
-CREGS_READONLY = {7, 8, 9, 10}  # MTCR to them is an illegal instruction
+             cycle=7, cycleh=8, instret=9, instreth=10, cpuid=11)
+CREGS_READONLY = {7, 8, 9, 10, 11}  # MTCR to them is an illegal instruction
+TLBI_PAGE, TLBI_ASID, TLBI_ALL = 0, 1, 2  # TLBI modes, in imm14
 
 
 # -- lexing ---------------------------------------------------------------
@@ -500,9 +502,14 @@ def enc_mtcr(a, st, pc):
 	return [enc_i(0x05, 0, a.reg(rs1), n)]
 
 
-def enc_tlbi(a, st, pc):
-	rs1, = a.nargs(st, 1)
-	return [enc_i(0x06, 0, a.reg(rs1), 0)]
+def enc_tlbi(mode):
+	def enc(a, st, pc):
+		if mode == TLBI_ALL:
+			a.nargs(st, 0)
+			return [enc_i(0x06, 0, 0, mode)]
+		rs1, = a.nargs(st, 1)
+		return [enc_i(0x06, 0, a.reg(rs1), mode)]
+	return enc
 
 
 def pseudo_rr(build):
@@ -575,7 +582,9 @@ def define_instructions():
 		ins[name] = (4, fmt_n(op))
 	ins["mfcr"] = (4, enc_mfcr)
 	ins["mtcr"] = (4, enc_mtcr)
-	ins["tlbi"] = (4, enc_tlbi)
+	ins["tlbi"] = (4, enc_tlbi(TLBI_PAGE))
+	ins["tlbi.asid"] = (4, enc_tlbi(TLBI_ASID))
+	ins["tlbi.all"] = (4, enc_tlbi(TLBI_ALL))
 
 	for i, name in enumerate(("add", "sub", "and", "or", "xor", "shl", "shr", "sar",
 							  "slt", "sltu", "mul", "div", "divu", "rem", "remu")):

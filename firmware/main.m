@@ -32,7 +32,7 @@
 // The reset code is m/runtime/rom0.asm: it sets the stack, copies .data to
 // RAM, zeroes .bss and calls main; its result powers the machine off.
 
-import { beeper, timer, ROM_BASE, BEEPER_ON } from "defs.m"
+import { beeper, timer, power, ROM_BASE, BEEPER_ON } from "defs.m"
 import { puts, show } from "lib.m"
 import { videoInit, conPuts } from "video.m"
 import { boot } from "boot.m"
@@ -62,6 +62,7 @@ let main(argc: UWord, argv: *UByte[]): Word {
 
     puts("\nWRM.081632 demo firmware\n========================\n")
     show("firmware size, bytes", &__image_end as UWord - ROM_BASE)
+    show("reset cause", power.resetCause)   // 0 power-on, 1 RESET, 2 host
 
     demoAlu()
     demoMemory()

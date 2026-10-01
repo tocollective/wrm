@@ -35,9 +35,9 @@ from .typesys import *
 
 NREGS = 18  # r10-r27
 
-ASM_RESERVED = {f"r{i}" for i in range(32)} | {f"cr{i}" for i in range(11)} | {
+ASM_RESERVED = {f"r{i}" for i in range(32)} | {f"cr{i}" for i in range(12)} | {
 	"zero", "tp", "fp", "sp", "ra", "status", "epc", "ivec", "scratch", "cause",
-	"badaddr", "ptbr", "cycle", "cycleh", "instret", "instreth"}
+	"badaddr", "ptbr", "cycle", "cycleh", "instret", "instreth", "cpuid"}
 
 LABEL_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*(?::|=)", re.M)
 INCLUDE_RE = re.compile(r'^\s*\.include\s+"([^"]+)"', re.M)
@@ -1196,7 +1196,11 @@ class FuncGen:
 			return r
 		if name == "tlbi":
 			r = self.expr(args[0])
-			self.emit(f"tlbi {r}")
+			mode = args[1].const if len(args) == 2 else 0
+			if mode == 2:
+				self.emit("tlbi.all")       # the address is unused
+			else:
+				self.emit(f"tlbi{'.asid' if mode == 1 else ''} {r}")
 			return r
 		if name == "syscall":
 			regs = [self.expr(a) for a in args]

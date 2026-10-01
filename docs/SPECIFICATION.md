@@ -38,6 +38,30 @@ must be accessed at a multiple of 4; byte and half-word accesses see the
 low bits. Writes to read-only registers are ignored; other offsets are
 unmapped.
 
+The last word of every device's page, offset `0xFFC`, is its read-only
+`ID` register, so software can find the devices and check what they
+are; an unused page has none, so reading it is a bus error. The firmware
+lists the devices it finds for the image it boots (see
+[Boot protocol](#memory)).
+
+| Bits  | Field     | Description                                   |
+|-------|-----------|-----------------------------------------------|
+| 31:16 | `TYPE`    | what the device is, see below; never 0        |
+| 15:8  | `VERSION` | its register interface, `1` for this document |
+| 7:0   | `IRQ`     | its PIC line, `0xFF` if it has none           |
+
+| `TYPE` | Device          | `TYPE` | Device          |
+|--------|-----------------|--------|-----------------|
+| `1`    | PIC             | `8`    | Floppy drive    |
+| `2`    | Keyboard        | `9`    | Beeper          |
+| `3`    | UART            | `10`   | Mouse           |
+| `4`    | Timer           | `11`   | Network card    |
+| `5`    | Power controller| `12`   | Audio card      |
+| `6`    | Hard disk       | `13`   | Real-time clock |
+| `7`    | Video card      |        |                 |
+
+For example, disk 1's `ID` reads `0x00060104`.
+
 ### PIC
 
 Interrupt controller with 32 level-triggered IRQ lines. A device keeps its
@@ -68,6 +92,7 @@ with `ENABLE` left at 0.
 | 8   | Network  | `PENDING` is not zero   |
 | 9   | Audio    | `STATUS` is not zero    |
 | 10  | RTC      | `STATUS.ALARM` is set   |
+| 11  | Power    | `STATUS` is not zero    |
 
 ### Keyboard
 
@@ -132,18 +157,35 @@ halves differ.
 
 ### Power controller
 
-Lets software turn the machine off or reset it. The request takes effect
-at the end of the clock tick in which the store completes; the
-instructions after the store never run.
+Lets software turn the machine off or reset it, passes on the host's
+request to power off, and tells why the machine last started. A request
+from software takes effect at the end of the clock tick in which the
+store completes; the instructions after the store never run.
 
-| Offset | Register | Access | Description                                        |
-|--------|----------|--------|----------------------------------------------------|
-| `0x00` | `OFF`    | W      | power off; the low 8 bits are the exit code        |
-| `0x04` | `RESET`  | W      | reset the machine, the value is ignored            |
+| Offset | Register      | Access | Description                                   |
+|--------|---------------|--------|-----------------------------------------------|
+| `0x00` | `OFF`         | W      | power off; the low 8 bits are the exit code   |
+| `0x04` | `RESET`       | W      | reset the machine, the value is ignored       |
+| `0x08` | `STATUS`      | RW     | bit 0 = the host asks to power off; writing 1 clears it |
+| `0x0C` | `RESET_CAUSE` | R      | why the machine last started, see below       |
 
-Both registers read as `0`. On power off the emulator quits with the exit
-code as its process status (see [README](../README.md#running)). Reset is
-described [below](#reset).
+`OFF` and `RESET` read as `0`. On power off the emulator quits with the
+exit code as its process status (see [README](../README.md#running)).
+Reset is described [below](#reset).
+
+`STATUS` bit 0 is the power button: the host sets it when the user closes
+the window or presses Ctrl+C, so software can save its state and power
+off. It stays set, and IRQ 11 asserted, until software writes 1 to it.
+The host sets it only while IRQ 11 is enabled in the PIC and the CPU
+hasn't halted; otherwise it quits at once, as it does on a second request
+whatever software does with the first.
+
+| `RESET_CAUSE` | The machine started after |
+|---------------|---------------------------|
+| `0`           | power-on                  |
+| `1`           | a write to `RESET`        |
+| `2`           | the host's reset key (Ctrl+Alt+R) |
+| `3`           | reserved: a double fault  |
 
 ### Disks
 
@@ -729,8 +771,11 @@ disk registers are cleared, the video card stops its DMA, turns the
 display off and clears its palette and `FRAME`, the beeper goes quiet,
 the mouse is disabled, the network card closes its sockets and forgets a
 DNS lookup, the audio card's voices stop, the real-time clock's alarm is
-disarmed and cleared). The real-time clock's time is not reset: it keeps
-following the host's clock.
+disarmed and cleared, the power controller's `STATUS` is cleared). The
+real-time clock's time is not reset: it keeps following the host's clock.
+The power controller's `RESET_CAUSE` says which reset it was. The host's
+reset key, Ctrl+Alt+R in the window, resets the machine the same way,
+even after the CPU has halted.
 RAM, VRAM and the disk images, and the disk in the floppy drive, keep
 their contents, including the sectors of an interrupted
 write that were already written. VRAM is zero at power-on.
@@ -768,8 +813,8 @@ without a disk is skipped silently.
 | Range                     | Contents                                          |
 |---------------------------|---------------------------------------------------|
 | `0x00000000`–`0x00000FFF` | unspecified                                       |
-| `0x00001000`–`0x0000101F` | boot info block                                   |
-| `0x00001020`–`0x0000FFFF` | free; the stack starts at `0x00010000` and grows down |
+| `0x00001000`–`0x00001FFF` | boot info block, then the device table            |
+| `0x00002000`–`0x0000FFFF` | free; the stack starts at `0x00010000` and grows down |
 | `0x00010000`–…            | the image, `SECTORS` × 512 bytes                  |
 | the rest of RAM           | unspecified: RAM is not cleared, not even at reset |
 
@@ -778,13 +823,26 @@ The boot info block describes the machine:
 | Offset | Field          | Description                                        |
 |--------|----------------|----------------------------------------------------|
 | `0x00` | `MAGIC`        | `0x4F464E49` (the bytes `INFO`)                    |
-| `0x04` | `SIZE`         | size of the block in bytes, 32 here; later fields go after the ones here, so check `SIZE` before reading them |
+| `0x04` | `SIZE`         | size of the block in bytes, 40 here; later fields go after the ones here, so check `SIZE` before reading them |
 | `0x08` | `RAM_SIZE`     | bytes of RAM, all of it from address 0             |
 | `0x0C` | `DISK`         | physical address of the boot disk's controller: the floppy's or disk 0's |
 | `0x10` | `DISK_SECTORS` | its size in sectors                                |
 | `0x14` | `IMAGE`        | load address, `0x00010000`                         |
 | `0x18` | `IMAGE_SIZE`   | bytes loaded                                       |
 | `0x1C` | `CLOCK`        | timer ticks per second                             |
+| `0x20` | `DEVICES`      | number of entries in the device table              |
+| `0x24` | `DEVICE_TABLE` | physical address of the device table, right after the block |
+
+The device table lists every page of the I/O region that holds a device,
+in address order: `DEVICES` entries of 8 bytes, the page's address and
+the device's [`ID`](#devices). The firmware finds them by reading the
+`ID` of each page. The table ends below `0x00002000`, so it holds at
+most 507 devices.
+
+| Offset | Field     | Description                              |
+|--------|-----------|------------------------------------------|
+| `0x00` | `ADDRESS` | physical address of the device's page    |
+| `0x04` | `ID`      | the device's `ID` register               |
 
 ### State at the entry point
 

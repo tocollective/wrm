@@ -75,6 +75,14 @@ test_main:
 	li r1, 11
 	la r2, u_tlbi
 	call check_log
+	li r28, 21                  ; CPUID is not a counter
+	li r1, 11
+	la r2, u_cpuid
+	call check_log
+	li r28, 22
+	li r1, 11
+	la r2, u_tlbi_all
+	call check_log
 	li r28, 16                  ; faults are handled in user mode with IE = 0
 	li r1, 3
 	la r2, u_misaligned
@@ -209,6 +217,10 @@ u_mtcr:
 	mtcr scratch, r0
 u_tlbi:
 	tlbi r0
+u_cpuid:
+	mfcr r9, cpuid
+u_tlbi_all:
+	tlbi.all
 u_misaligned:
 	lw r9, 1(r0)
 u_illegal:

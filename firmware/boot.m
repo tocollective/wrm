@@ -1,14 +1,15 @@
 // Booting from the floppy or disk 0 (docs/SPECIFICATION.md#boot-protocol).
 
 import {
-    pic, timer, floppy, disk0, DiskRegs, BootHeader, BootInfo,
+    pic, timer, floppy, disk0, DiskRegs, BootHeader, BootInfo, DeviceEntry,
     DISK_PRESENT, DISK_DONE, DISK_READ, SECTOR_SIZE,
-    BOOT_MAGIC, BOOT_INFO_MAGIC, BOOT_INFO, BOOT_STACK_TOP, BOOT_LOAD,
+    BOOT_MAGIC, BOOT_INFO_MAGIC, BOOT_INFO, BOOT_INFO_END, BOOT_STACK_TOP, BOOT_LOAD,
     CR_PTBR, CR_IVEC, CR_STATUS, STATUS_EXL,
 } from "defs.m"
 import { puts, putc, printDec } from "lib.m"
 
 extern let ramSize(): UWord
+extern let probeDevices(table: UWord, max: UWord): UWord
 extern let onStack(fn: (): Void, top: UWord): Void
 extern let bootJump(entry: UWord): Void
 
@@ -98,6 +99,10 @@ let bootDisk(d: *volatile mut DiskRegs, drive: *UByte): Void {
     info.image = BOOT_LOAD
     info.imageSize = sectors * SECTOR_SIZE
     info.clock = timer.frequency
+    // the device table right after the block, up to BOOT_INFO_END
+    let table: UWord = BOOT_INFO + sizeof(BootInfo)
+    info.devices = probeDevices(table, (BOOT_INFO_END - table) / sizeof(DeviceEntry))
+    info.deviceTable = table
 
     // the state after reset, except for what the protocol passes on
     pic.enable = 0

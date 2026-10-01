@@ -26,8 +26,29 @@ typedef enum cpu_cr {
 	CPU_CR_CYCLEH = 8, // high 32 bits
 	CPU_CR_INSTRET = 9, // instructions retired since reset, low 32 bits
 	CPU_CR_INSTRETH = 10, // high 32 bits
+	// read-only, supervisor
+	CPU_CR_CPUID = 11, // ISA version and extensions
 	CPU_CR_COUNT,
 } cpu_cr_t;
+
+// CPUID: the ISA version in bits 31:24, the extensions below
+#define CPU_CPUID_VERSION 1
+#define CPU_CPUID_MMU 0x01 // paging and TLBI
+#define CPU_CPUID_FPU 0x02 // binary32 floating point in the GPRs
+#define CPU_CPUID_ATOMIC 0x04 // LL and SC
+#define CPU_CPUID_MULH 0x08 // MULH, MULHU and MULHSU
+#define CPU_CPUID_TLBI_MODES 0x10 // TLBI of an ASID and of the whole TLB
+#define CPU_CPUID                                                              \
+	(CPU_CPUID_VERSION << 24 | CPU_CPUID_MMU | CPU_CPUID_FPU                   \
+	 | CPU_CPUID_ATOMIC | CPU_CPUID_MULH | CPU_CPUID_TLBI_MODES)
+
+// TLBI modes, in imm14
+typedef enum cpu_tlbi_mode {
+	CPU_TLBI_PAGE = 0, // the page at rs1, current ASID and global entries
+	CPU_TLBI_ASID = 1, // every non-global entry of the ASID in rs1[7:0]
+	CPU_TLBI_ALL = 2, // the whole TLB, global entries too; rs1 is reserved
+	CPU_TLBI_MODE_COUNT,
+} cpu_tlbi_mode_t;
 
 #define CPU_STATUS_IE 0x01 // interrupts enabled
 #define CPU_STATUS_PIE 0x02 // IE before the handler was entered

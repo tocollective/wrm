@@ -57,6 +57,7 @@ static const char* const disasm_cr_names[CPU_CR_COUNT] = {
 	[CPU_CR_CYCLEH] = "cycleh",
 	[CPU_CR_INSTRET] = "instret",
 	[CPU_CR_INSTRETH] = "instreth",
+	[CPU_CR_CPUID] = "cpuid",
 };
 
 const char* disasm_cr_name(const uint32_t cr) {
@@ -81,9 +82,11 @@ static bool disasm_is_encodable(const cpu_instruction_t* in) {
 		case CPU_OP_MFCR:
 			return !in->rs1 && in->imm < CPU_CR_COUNT;
 		case CPU_OP_MTCR:
-			return !in->rd && in->imm < CPU_CR_CYCLE; // counters: read-only
+			// the counters and CPUID are read-only
+			return !in->rd && in->imm < CPU_CR_CYCLE;
 		case CPU_OP_TLBI:
-			return !in->rd && !in->imm;
+			return !in->rd && in->imm < CPU_TLBI_MODE_COUNT
+				   && (in->imm != CPU_TLBI_ALL || !in->rs1);
 		case CPU_OP_SHLI:
 		case CPU_OP_SHRI:
 		case CPU_OP_SARI:
@@ -114,7 +117,15 @@ void disasm_instruction(const uint32_t raw, const uint32_t pc, char* out,
 			snprintf(out, size, "%s %s, r%u", name, disasm_cr_name(uimm), rs1);
 			return;
 		case CPU_OP_TLBI:
-			snprintf(out, size, "%s r%u", name, rs1);
+			if (uimm == CPU_TLBI_ALL)
+				snprintf(out, size, "%s.all", name);
+			else
+				snprintf(out,
+						 size,
+						 "%s%s r%u",
+						 name,
+						 uimm == CPU_TLBI_ASID ? ".asid" : "",
+						 rs1);
 			return;
 		case CPU_OP_LL:
 			snprintf(out, size, "%s r%u, (r%u)", name, rd, rs1);

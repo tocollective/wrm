@@ -37,6 +37,10 @@ test_main:
 	mfcr r1, instret
 	mfcr r4, cycle
 	bltu r4, r1, fail           ; at most one instruction per cycle
+	li r28, 9                   ; ISA version 1, every extension
+	mfcr r4, cpuid
+	li r3, CPUID
+	bne r4, r3, fail
 
 	; ---- plain registers keep what is written
 	li r28, 10

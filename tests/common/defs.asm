@@ -21,6 +21,25 @@ MOUSE           = 0xFD00A000
 NET             = 0xFD00B000
 AUDIO           = 0xFD00C000
 RTC             = 0xFD00D000
+IO_END          = 0xFE000000        ; the end of the I/O region
+DEVICE_COUNT    = 14                ; pages PIC to RTC, all used
+
+; every device's ID register: TYPE << 16 | VERSION << 8 | IRQ (0xFF: none)
+IO_ID           = 0xFFC
+ID_PIC          = 0x000101FF
+ID_KBD          = 0x00020100
+ID_UART         = 0x00030101
+ID_TIMER        = 0x00040102
+ID_POWER        = 0x0005010B
+ID_DISK0        = 0x00060103
+ID_DISK1        = 0x00060104
+ID_VIDEO        = 0x00070105
+ID_FLOPPY       = 0x00080106
+ID_BEEPER       = 0x000901FF
+ID_MOUSE        = 0x000A0107
+ID_NET          = 0x000B0108
+ID_AUDIO        = 0x000C0109
+ID_RTC          = 0x000D010A
 
 PIC_PENDING     = 0x00
 PIC_ENABLE      = 0x04
@@ -37,6 +56,7 @@ IRQ_MOUSE       = 7
 IRQ_NET         = 8
 IRQ_AUDIO       = 9
 IRQ_RTC         = 10
+IRQ_POWER       = 11
 
 KBD_STATUS      = 0x00
 KBD_DATA        = 0x04
@@ -65,6 +85,12 @@ TIMER_EXPIRED   = 1 << 0
 
 POWER_OFF       = 0x00              ; write the exit code
 POWER_RESET     = 0x04
+POWER_STATUS    = 0x08              ; writing 1 clears a bit
+POWER_RESET_CAUSE = 0x0C
+POWER_OFF_REQUEST = 1 << 0          ; STATUS: the host asks to power off
+RESET_POWER_ON  = 0                 ; RESET_CAUSE values
+RESET_SOFTWARE  = 1
+RESET_HOST      = 2
 
 DISK_STATUS     = 0x00
 DISK_SECTORS    = 0x04
@@ -253,6 +279,9 @@ STATUS_EXL      = 1 << 4            ; in the handler: set on entry and at reset
 CAUSE_SYSCALL   = 12
 CAUSE_BREAK     = 13
 
+; CPUID: ISA version 1 with MMU, FPU, LL/SC, MULH and the TLBI modes
+CPUID           = 1 << 24 | 0x1F
+
 ; MMU (docs/INSTRUCTIONS.md#memory-management)
 PTBR_EN         = 1 << 0
 PTBR_ASID_SHIFT = 4
@@ -285,7 +314,11 @@ BI_DISK_SECTORS = 0x10
 BI_IMAGE        = 0x14              ; = BOOT_LOAD
 BI_IMAGE_SIZE   = 0x18
 BI_CLOCK        = 0x1C              ; ticks per second
-BOOT_INFO_SIZE  = 0x20
+BI_DEVICES      = 0x20              ; entries in the device table
+BI_DEVICE_TABLE = 0x24              ; right after the block
+BOOT_INFO_SIZE  = 0x28
+DT_ADDRESS      = 0x00              ; a device table entry, 8 bytes
+DT_ID           = 0x04
 BOOT_INFO       = 0x00001000
 BOOT_STACK_TOP  = 0x00010000
 BOOT_LOAD       = 0x00010000

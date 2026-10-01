@@ -14,6 +14,7 @@ typedef struct display {
 	SDL_Texture* texture; // NULL until the first frame
 	uint64_t screen_updates; // of the frame in the texture
 	bool mouse_captured; // the host pointer belongs to the machine
+	char status[48]; // shown in the title after the name, e.g. the speed
 } display_t;
 
 display_t* display_create(void);
@@ -23,5 +24,7 @@ void display_render(display_t* display, const videocard_t* videocard);
 // Gives the host pointer to the machine (hidden, relative motion) or
 // back to the host; the title says how to get it back.
 void display_capture_mouse(display_t* display, const bool capture);
+// Text the title shows after the machine's name, "" for none.
+void display_set_status(display_t* display, const char* status);
 
 #endif // WRM_DISPLAY_H

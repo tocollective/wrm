@@ -2,9 +2,11 @@
 // look up host names, so it asks the network proxy (tools/netproxy.py) on
 // the host: a connection is a WebSocket to ws://PROXY/tcp/ADDR/PORT that
 // carries the bytes of a TCP connection the proxy opens, and a lookup is
-// GET http://PROXY/resolve/NAME. One proxy reaches any address and port.
-// PROXY is 127.0.0.1:8080 unless the page's URL names another with
-// ?netproxy=HOST:PORT. Listening and UDP are not available.
+// GET http://PROXY/resolve/NAME. PROXY is HOST:PORT/TOKEN, from the page's
+// URL: ?netproxy=... as the proxy prints it at start (127.0.0.1:8080 if
+// the URL has none, for a proxy run with --no-token). The proxy only
+// reaches public addresses unless told otherwise. Listening and UDP are
+// not available.
 
 #ifdef __EMSCRIPTEN__
 
@@ -30,7 +32,8 @@ EM_JS(void, web_net_init, (void), {
 			if (this.warned) return;
 			this.warned = true;
 			console.warn("No network proxy at " + this.proxy
-						 + ": run tools/netproxy.py on the host");
+						 + ": run tools/netproxy.py on the host and open"
+						 + " the page with the ?netproxy= it prints");
 		},
 	};
 });

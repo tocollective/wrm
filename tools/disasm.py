@@ -16,7 +16,7 @@ import sys
 
 sys.dont_write_bytecode = True  # no __pycache__ next to asm.py
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from asm import CREGS, CREGS_READONLY, ROM_BASE, auto_int  # noqa: E402
+from asm import CREGS, CREGS_READONLY, ROM_BASE, TLBI_ALL, TLBI_ASID, TLBI_PAGE, auto_int  # noqa: E402
 
 N = {0x00: "hlt", 0x01: "nop", 0x02: "wfi", 0x03: "iret", 0x07: "syscall",
 	 0x08: "fence", 0x09: "break"}
@@ -90,8 +90,12 @@ def disassemble(word, pc):
 		return f"mfcr r{rd}, {CR_NAMES[simm]}"
 	if op == OP_MTCR and not rd and simm in CR_NAMES and simm not in CREGS_READONLY:
 		return f"mtcr {CR_NAMES[simm]}, r{rs1}"
-	if op == OP_TLBI and not rd and not imm14:
+	if op == OP_TLBI and not rd and imm14 == TLBI_PAGE:
 		return f"tlbi r{rs1}"
+	if op == OP_TLBI and not rd and imm14 == TLBI_ASID:
+		return f"tlbi.asid r{rs1}"
+	if op == OP_TLBI and not rd and imm14 == TLBI_ALL and not rs1:
+		return "tlbi.all"
 	return f".word 0x{word:08X}"
 
 

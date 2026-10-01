@@ -67,6 +67,8 @@ void mmu_reset(mmu_t* mmu);
 void mmu_set_ptbr(mmu_t* mmu, const uint32_t value);
 void mmu_flush(mmu_t* mmu);
 void mmu_invalidate(mmu_t* mmu, const uint32_t address); // one 4KB page
+// every entry of the ASID except the global ones
+void mmu_invalidate_asid(mmu_t* mmu, const uint8_t asid);
 
 // Translates a virtual address; returns true on page fault.
 // In user mode only pages with MMU_PTE_U are accessible.

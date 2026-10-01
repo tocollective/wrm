@@ -15,6 +15,8 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
 	config_parse(argc, argv);
 	const bool headless = config_get()->headless;
 
+	// closing the window asks the guest to power off first (application.c)
+	SDL_SetHint(SDL_HINT_QUIT_ON_LAST_WINDOW_CLOSE, "0");
 	// SDL brings up the events subsystem on its own, so Ctrl+C still quits
 	SDL_InitFlags initFlags = 0;
 	if (!headless) initFlags = SDL_INIT_VIDEO | SDL_INIT_GAMEPAD;

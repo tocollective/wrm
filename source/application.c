@@ -6,6 +6,9 @@
 #include "config.h"
 #include "console.h"
 
+// How often the title shows the speed the machine really runs at.
+#define APPLICATION_SPEED_PERIOD_NS 1000000000ULL // 1s
+
 // Points the CPU trace at the file or stream given by --trace.
 static void application_open_trace(application_t* app) {
 	const char* path = config_get()->trace_path;
@@ -84,6 +87,41 @@ static void application_check_stopped(application_t* app) {
 	}
 }
 
+// Puts the speed the machine ran at over the last period in the title: a
+// slow host runs fewer ticks than the clock rate, and the guest's time
+// falls behind.
+static void application_update_speed(application_t* app) {
+	if (!app->display) return;
+	const uint64_t now = SDL_GetTicksNS();
+	const uint64_t elapsed = now - app->speed_ns;
+	if (app->speed_ns && elapsed < APPLICATION_SPEED_PERIOD_NS) return;
+
+	const uint64_t ticks = app->machine->ticks - app->speed_ticks;
+	const bool first = app->speed_ns == 0;
+	app->speed_ns = now;
+	app->speed_ticks = app->machine->ticks;
+	if (first) return;
+
+	char status[sizeof(app->display->status)];
+	if (machine_stopped(app->machine)) {
+		snprintf(status, sizeof(status), "stopped");
+	} else {
+		const double hz = (double)ticks * 1e9 / (double)elapsed;
+		const double rate = (double)app->machine->motherboard->clock->rate;
+		const double percent = hz * 100.0 / rate;
+		if (hz >= 1e6)
+			snprintf(status, sizeof(status), "%.1f MHz", hz / 1e6);
+		else if (hz >= 1e3)
+			snprintf(status, sizeof(status), "%.1f kHz", hz / 1e3);
+		else
+			snprintf(status, sizeof(status), "%.0f Hz", hz);
+		const size_t length = strlen(status);
+		snprintf(
+			status + length, sizeof(status) - length, " (%.0f%%)", percent);
+	}
+	display_set_status(app->display, status);
+}
+
 // Gives the host pointer to the machine or takes it back. Buttons held
 // then count as released.
 static void application_capture_mouse(application_t* app, const bool capture) {
@@ -100,6 +138,7 @@ bool application_update(application_t* app) {
 	if (!app->machine->motherboard->mouse->enabled)
 		application_capture_mouse(app, false);
 	machine_update(app->machine);
+	application_update_speed(app);
 	display_render(app->display, app->machine->motherboard->videocard);
 	speaker_play(app->speaker,
 				 app->machine->motherboard->beeper,
@@ -167,15 +206,36 @@ static void application_mouse_event(application_t* app, SDL_Event* event) {
 	}
 }
 
+// Closing the window or Ctrl+C. The first time it asks the guest to power
+// off, like a power button, if the guest listens: the power controller's
+// IRQ line is enabled in the PIC and the machine still runs. Otherwise,
+// and the second time, the app quits at once. Returns true to quit.
+static bool application_quit(application_t* app) {
+	motherboard_t* mb = app->machine->motherboard;
+	const bool listens = (mb->pic->enable & (1u << MB_IRQ_POWER)) != 0;
+	if (app->off_requested || !listens || machine_stopped(app->machine)) {
+		app->running = false;
+		return true;
+	}
+	app->off_requested = true;
+	power_request_off(mb->power);
+	print("Asked the machine to power off; quit again to force it");
+	return false;
+}
+
+// Ctrl+Alt+R: resets the machine, also after it has halted.
+static void application_reset(application_t* app) {
+	machine_reset(app->machine);
+	app->stop_reported = false;
+	app->off_requested = false;
+	print("Reset");
+}
+
 bool application_process_events(application_t* app, SDL_Event* event) {
 	switch (event->type) {
-		case SDL_EVENT_QUIT: {
-			app->running = false;
-			return true;
-		} break;
+		case SDL_EVENT_QUIT:
 		case SDL_EVENT_WINDOW_CLOSE_REQUESTED: {
-			app->running = false;
-			return true;
+			return application_quit(app);
 		} break;
 		case SDL_EVENT_DROP_FILE: {
 			// a disk image dropped on the window goes in the floppy drive
@@ -193,11 +253,17 @@ bool application_process_events(application_t* app, SDL_Event* event) {
 		} break;
 		case SDL_EVENT_KEY_DOWN:
 		case SDL_EVENT_KEY_UP: {
-			// Ctrl+Alt gives the pointer back; the keys still reach the guest
+			// Ctrl+Alt gives the pointer back; the keys still reach the
+			// guest, except R of Ctrl+Alt+R, which resets the machine
 			if (event->type == SDL_EVENT_KEY_DOWN
 				&& (event->key.mod & SDL_KMOD_CTRL)
-				&& (event->key.mod & SDL_KMOD_ALT))
+				&& (event->key.mod & SDL_KMOD_ALT)) {
 				application_capture_mouse(app, false);
+				if (event->key.scancode == SDL_SCANCODE_R) {
+					if (!event->key.repeat) application_reset(app);
+					break;
+				}
+			}
 			if (event->key.repeat) break; // firmware does its own repeat
 			// SDL scancodes are USB HID usage IDs
 			keyboard_key(app->machine->motherboard->keyboard,

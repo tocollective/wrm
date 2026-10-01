@@ -7,7 +7,7 @@ The opcode is always the lowest byte.
 
 - `r0`–`r31` — 32-bit general purpose registers, `r0` always reads as zero.
 - `pc` — program counter, reset value `0xFE000000` (start of ROM).
-- `cr0`–`cr10` — control registers, see [Control registers](#control-registers).
+- `cr0`–`cr11` — control registers, see [Control registers](#control-registers).
 
 ## Privilege modes
 
@@ -45,8 +45,9 @@ Reserved fields must be zero; an instruction with a reserved bit set is an
 illegal instruction. They are bits [31:8] of the N-type, bits [31:23] of
 the R-type, and the fields the tables below mark as reserved: `rs2` of
 `LL` and of the [floating-point](#floating-point) instructions with one
-source, `rs1` of `MFCR`, `rd` of `MTCR`, `rd` and `imm14` of `TLBI`. This
-keeps them free for future extensions.
+source, `rs1` of `MFCR`, `rd` of `MTCR`, `rd` of `TLBI` and its `rs1` in
+mode 2. A `TLBI` mode other than 0–2 in `imm14` is an illegal instruction
+too. This keeps them free for future extensions.
 
 `imm14` is sign-extended, except for `ANDI`, `ORI`, `XORI`, `SHLI`, `SHRI`
 and `SARI`, where it is zero-extended. Shift amounts use the low 5 bits.
@@ -63,7 +64,7 @@ and `SARI`, where it is zero-extended. Shift amounts use the low 5 bits.
 | `0x03` | `IRET`          | N      | `pc = EPC`, `IE = PIE`, `UM = PUM`, `EXL = 0` (S) |
 | `0x04` | `MFCR rd, cr`   | I      | `rd = cr[imm14]` (`rs1` is reserved) (S, except counters) |
 | `0x05` | `MTCR cr, rs1`  | I      | `cr[imm14] = rs1` (`rd` is reserved) (S) |
-| `0x06` | `TLBI rs1`      | I      | drop the TLB entry of the page at `rs1` (`rd`, `imm14` are reserved) (S) |
+| `0x06` | `TLBI rs1, mode`| I      | drop TLB entries, `mode` = `imm14`, see [TLB](#tlb) (`rd` is reserved) (S) |
 | `0x07` | `SYSCALL`       | N      | enter the handler with `CAUSE` = 12    |
 | `0x08` | `FENCE`         | N      | order memory operations                 |
 | `0x09` | `BREAK`         | N      | enter the handler with `CAUSE` = 13    |
@@ -284,6 +285,7 @@ float constant, and `.float` emits them as data.
 | `8`    | `CYCLEH`  | `0`   | clock cycles since reset, high 32 bits (read-only) |
 | `9`    | `INSTRET` | `0`   | instructions retired since reset, low 32 bits (read-only) |
 | `10`   | `INSTRETH`| `0`   | instructions retired since reset, high 32 bits (read-only) |
+| `11`   | `CPUID`   | see below | the ISA version and its extensions (read-only) |
 
 ### Taking an interrupt
 
@@ -350,6 +352,28 @@ again:  mfcr r2, cycleh
         mfcr r3, cycleh
         bne r2, r3, again
 ```
+
+### CPUID
+
+`CPUID` tells software what the CPU implements, so an OS or a runtime
+can check instead of assuming. It is read-only and, like the other
+control registers, supervisor only; an OS passes on what user code needs.
+
+| Bits  | Field     | Value                                      |
+|-------|-----------|--------------------------------------------|
+| 31:24 | `VERSION` | the ISA version, `1` for this document     |
+| 23:0  | extensions, one bit each | set if implemented          |
+
+| Bit | Extension                                                  |
+|-----|------------------------------------------------------------|
+| 0   | MMU: `PTBR`, paging and `TLBI`, see [Memory management](#memory-management) |
+| 1   | [floating point](#floating-point), binary32 in the GPRs    |
+| 2   | `LL` and `SC`                                              |
+| 3   | `MULH`, `MULHU` and `MULHSU`                               |
+| 4   | `TLBI` modes 1 and 2, see [TLB](#tlb)                      |
+
+Other bits read as zero. This CPU implements all of them: `CPUID` reads
+`0x0100001F`.
 
 ## Exceptions
 
@@ -476,13 +500,24 @@ superpages.
 ### TLB
 
 The CPU caches translations in a TLB. After changing an entry, software
-must drop the stale translation:
+must drop the stale translation with `TLBI`, whose `imm14` selects what
+it drops:
 
-- `TLBI rs1` drops the translation of the 4KB page containing `rs1` for
-  the current ASID, including a matching global translation;
-- writing `PTBR` with the current ASID refreshes that ASID's non-global
-  translations. Switching to another ASID retains cached entries from the
-  previous context. `G` entries remain cached until `TLBI` or reset.
+| `imm14` | Assembly        | Drops                                          |
+|---------|-----------------|------------------------------------------------|
+| `0`     | `TLBI rs1`      | the translation of the 4KB page containing `rs1` for the current ASID, including a matching global translation |
+| `1`     | `TLBI.ASID rs1` | every non-global translation of the ASID in `rs1` bits 7:0, current or not |
+| `2`     | `TLBI.ALL`      | every translation, global ones too (`rs1` is reserved) |
+
+A superpage may be cached as 4KB translations, so `TLBI rs1` drops only
+the part of it around `rs1`; `TLBI.ALL` drops a changed global superpage
+in one go. `TLBI.ASID` lets an OS reuse an ASID for a new address space
+without switching to it first.
+
+Writing `PTBR` with the current ASID refreshes that ASID's non-global
+translations, like `TLBI.ASID`. Switching to another ASID retains cached
+entries from the previous context. `G` entries remain cached until
+`TLBI` or reset.
 
 Software must invalidate entries after changing page tables, including
 global mappings and ASIDs reused for different address spaces.

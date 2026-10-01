@@ -9,8 +9,8 @@
 // assembler output is itself a disk image. crt0 calls main(0, null): the
 // boot info block is read where the firmware leaves it, at BOOT_INFO.
 
-import { BootInfo, BOOT_INFO } from "../defs.m"
-import { puts, show } from "../lib.m"
+import { BootInfo, DeviceEntry, BOOT_INFO } from "../defs.m"
+import { puts, putc, printHex, show } from "../lib.m"
 
 let main(argc: UWord, argv: *UByte[]): Word {
     let info: *BootInfo = BOOT_INFO as *BootInfo
@@ -20,5 +20,16 @@ let main(argc: UWord, argv: *UByte[]): Word {
     show("disk size, sectors", info.diskSectors)
     show("image size, bytes", info.imageSize)
     show("clock, Hz", info.clock)
+    show("devices", info.devices)
+    let table: *DeviceEntry = info.deviceTable as *DeviceEntry
+    for i: UWord in 0..info.devices {
+        puts("  0x")
+        printHex(table[i].address, 8)
+        puts("  type ")
+        printHex(table[i].id >> 16, 4)
+        puts("  IRQ ")
+        printHex(table[i].id & 0xFF, 2)
+        putc('\n')
+    }
     return 0
 }

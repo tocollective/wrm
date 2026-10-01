@@ -67,12 +67,55 @@ static disk_t* motherboard_find_disk(motherboard_t* mb, const uint32_t page) {
 	return mb->disk[index];
 }
 
+// The ID register of the device in the I/O page at page; returns false
+// if the page holds no device.
+static bool motherboard_device_id(const uint32_t page, uint32_t* id) {
+	static const struct {
+		uint32_t base;
+		uint32_t type;
+		uint32_t irq;
+	} devices[] = {
+		{ MB_PIC_BASE, MB_DEVICE_PIC, MB_NO_IRQ },
+		{ MB_KEYBOARD_BASE, MB_DEVICE_KEYBOARD, MB_IRQ_KEYBOARD },
+		{ MB_UART_BASE, MB_DEVICE_UART, MB_IRQ_UART },
+		{ MB_PIT_BASE, MB_DEVICE_TIMER, MB_IRQ_PIT },
+		{ MB_POWER_BASE, MB_DEVICE_POWER, MB_IRQ_POWER },
+		{ MB_VIDEO_BASE, MB_DEVICE_VIDEO, MB_IRQ_VIDEO },
+		{ MB_FLOPPY_BASE, MB_DEVICE_FLOPPY, MB_IRQ_FLOPPY },
+		{ MB_BEEPER_BASE, MB_DEVICE_BEEPER, MB_NO_IRQ },
+		{ MB_MOUSE_BASE, MB_DEVICE_MOUSE, MB_IRQ_MOUSE },
+		{ MB_NET_BASE, MB_DEVICE_NET, MB_IRQ_NET },
+		{ MB_AUDIO_BASE, MB_DEVICE_AUDIO, MB_IRQ_AUDIO },
+		{ MB_RTC_BASE, MB_DEVICE_RTC, MB_IRQ_RTC },
+	};
+	uint32_t type = 0, irq = 0;
+	for (size_t i = 0; i < sizeof(devices) / sizeof(devices[0]); i++) {
+		if (devices[i].base != page) continue;
+		type = devices[i].type;
+		irq = devices[i].irq;
+	}
+	// the hard disks, one page each
+	const uint32_t index = (page - MB_DISK0_BASE) / MB_IO_PAGE_SIZE;
+	if (page >= MB_DISK0_BASE && index < DISK_COUNT) {
+		type = MB_DEVICE_DISK;
+		irq = MB_IRQ_DISK0 + index;
+	}
+	if (!type) return false;
+	*id = type << 16 | MB_DEVICE_VERSION << 8 | irq;
+	return true;
+}
+
 // returns true on bus error
 static bool motherboard_io_read(motherboard_t* mb, const uint32_t address,
 								const uint8_t size, uint32_t* value) {
 	const uint32_t page = address & ~(MB_IO_PAGE_SIZE - 1);
 	const uint32_t offset = address & (MB_IO_PAGE_SIZE - 1);
 	if (offset & 3) return true;
+	if (offset == MB_IO_ID) {
+		if (!motherboard_device_id(page, value)) return true;
+		*value &= motherboard_io_mask(size);
+		return false;
+	}
 
 	bool fail = true;
 	disk_t* disk = motherboard_find_disk(mb, page);
@@ -125,6 +168,10 @@ static bool motherboard_io_write(motherboard_t* mb, const uint32_t address,
 	const uint32_t page = address & ~(MB_IO_PAGE_SIZE - 1);
 	const uint32_t offset = address & (MB_IO_PAGE_SIZE - 1);
 	if (offset & 3) return true;
+	if (offset == MB_IO_ID) {
+		uint32_t id;
+		return !motherboard_device_id(page, &id); // read-only
+	}
 
 	disk_t* disk = motherboard_find_disk(mb, page);
 	if (disk) return disk_write(disk, offset, size, value);
@@ -289,7 +336,7 @@ motherboard_t* motherboard_create(void) {
 	mb->uart = uart_create(mb->pic, MB_IRQ_UART);
 	// the timer counts clock ticks
 	mb->pit = pit_create(mb->pic, MB_IRQ_PIT, (uint32_t)mb->clock->rate);
-	mb->power = power_create();
+	mb->power = power_create(mb->pic, MB_IRQ_POWER);
 
 	const bus_t dma = {
 		.ctx = mb,
@@ -442,13 +489,13 @@ void motherboard_destroy(motherboard_t* mb) {
 	mb = NULL;
 }
 
-void motherboard_reset(motherboard_t* mb) {
+void motherboard_reset(motherboard_t* mb, const power_reset_cause_t cause) {
 	if (!mb) return;
 	cpu_reset(mb->cpu);
 	keyboard_reset(mb->keyboard);
 	uart_reset(mb->uart);
 	pit_reset(mb->pit);
-	power_reset(mb->power);
+	power_reset(mb->power, cause);
 	for (int i = 0; i < DISK_COUNT; i++) disk_reset(mb->disk[i]);
 	videocard_reset(mb->videocard);
 	disk_reset(mb->floppy);
@@ -473,5 +520,6 @@ void motherboard_tick(motherboard_t* mb) {
 	cpu_update(mb->cpu);
 
 	// requested by a store the CPU has just made
-	if (mb->power->request == POWER_REQUEST_RESET) motherboard_reset(mb);
+	if (mb->power->request == POWER_REQUEST_RESET)
+		motherboard_reset(mb, POWER_RESET_CAUSE_SOFTWARE);
 }

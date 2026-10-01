@@ -83,6 +83,38 @@ entry:
 	lw r3, TIMER_FREQUENCY(r9)
 	bne r4, r3, fail
 
+	; ---- the device table: every device, in address order, with its ID
+	li r28, 20
+	lw r4, BI_DEVICES(r10)
+	li r3, DEVICE_COUNT
+	bne r4, r3, fail
+	li r28, 21
+	lw r12, BI_DEVICE_TABLE(r10)
+	mv r4, r12
+	li r3, BOOT_INFO + BOOT_INFO_SIZE
+	bne r4, r3, fail
+	li r28, 22                  ; the first one is the PIC
+	lw r4, DT_ADDRESS(r12)
+	li r3, PIC
+	bne r4, r3, fail
+	lw r4, DT_ID(r12)
+	li r3, ID_PIC
+	bne r4, r3, fail
+	li r28, 23
+	li r13, DEVICE_COUNT
+	li r14, 0                   ; the previous address
+.device:
+	lw r9, DT_ADDRESS(r12)
+	mv r4, r9
+	bgeu r14, r4, fail          ; ascending
+	lw r3, DT_ID(r12)
+	lw r4, IO_ID(r9)            ; what the device itself says
+	bne r4, r3, fail
+	mv r14, r9
+	addi r12, r12, 8
+	addi r13, r13, -1
+	bnez r13, .device
+
 	li r28, 18                  ; all of the image is loaded
 	la r9, last_word
 	lw r4, 0(r9)
