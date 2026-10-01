@@ -38,7 +38,7 @@
 #define NET_SOCKET_RX_SIZE 0x28 // R: bytes in the receive buffer
 #define NET_SOCKET_TX_FREE 0x2C // R: free bytes in the send buffer
 
-#define NET_STATUS_LINK 0x01 // started with --net
+#define NET_STATUS_LINK 0x01 // started without --no-net
 #define NET_STATUS_LISTEN 0x02 // the host can take connections
 #define NET_STATUS_UDP 0x04 // the host can do UDP
 
@@ -76,7 +76,7 @@
 #define NET_ERROR_COMMAND 1 // unknown command
 #define NET_ERROR_STATE 2 // not in this state
 #define NET_ERROR_ADDRESS 3 // DMA outside RAM (or ROM, for reads)
-#define NET_ERROR_LINK 4 // no --net
+#define NET_ERROR_LINK 4 // --no-net
 #define NET_ERROR_UNSUPPORTED 5 // LISTEN or UDP in a browser
 #define NET_ERROR_NETWORK 6 // the host's network failed
 #define NET_ERROR_LENGTH 7 // the datagram is too long
@@ -108,7 +108,7 @@ typedef struct netcard {
 	pic_t* pic;
 	uint8_t irq;
 	bus_t dma; // reads RAM or ROM, writes RAM
-	bool link; // connected to the host's network (--net)
+	bool link; // connected to the host's network (not --no-net)
 	uint32_t local_addr; // where LISTEN and UDP on a port listen
 	net_socket_t socket[NET_SOCKET_COUNT];
 	uint32_t dns_status;

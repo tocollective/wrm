@@ -1,10 +1,9 @@
 ; ============================================================================
-;  Network card with --net, on the host's loopback only: a TCP connection
+;  Network card with a link, on the host's loopback only: a TCP connection
 ;  between two sockets of the machine (LISTEN, CONNECT, SEND, RECEIVE, the
 ;  other end closing, a refused connection), UDP datagrams between two
 ;  sockets, states and errors, the IRQ line, a DNS lookup of an address
 ; ============================================================================
-; @args --net
 
 	.include "../common/harness.asm"
 

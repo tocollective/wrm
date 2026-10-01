@@ -1,7 +1,7 @@
 // Network card: waiting versions of its commands, by polling.
 //
 // The card has TCP/IP in hardware: a socket connects, sends and receives
-// bytes, and the host's network does the rest (the emulator needs --net).
+// bytes, and the host's network does the rest (unless the emulator runs with --no-net).
 // Its state changes as the emulator services the network, between the
 // CPU's instructions, so the helpers here poll the socket's registers.
 
@@ -12,7 +12,7 @@ import {
 } from "defs.m"
 import { putc, printDec } from "lib.m"
 
-/// The link is up: the emulator runs with --net.
+/// The link is up: the emulator runs without --no-net.
 let netLinked(): Bool {
     return net.status & NET_LINK != 0
 }

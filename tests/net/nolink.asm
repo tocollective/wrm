@@ -1,7 +1,8 @@
 ; ============================================================================
-;  Network card without --net: the link is down, so every command fails
+;  Network card with --no-net: the link is down, so every command fails
 ;  with error 4 and a DNS lookup fails at once; the registers still work
 ; ============================================================================
+; @args --no-net
 
 	.include "../common/harness.asm"
 

@@ -1,5 +1,5 @@
 // [11] Network: a DNS lookup and an HTTP request, through the network
-// card's TCP/IP in hardware. Needs the emulator's --net; without it the
+// card's TCP/IP in hardware. Needs a link: with the emulator's --no-net the
 // demo says so and goes on.
 
 import { puts, putc, show, strlen } from "../lib.m"
@@ -15,7 +15,7 @@ let mut reply: UByte[512]
 let demoNet(): Void {
     puts("\n[11] network\n")
     if !netLinked() {
-        puts("no link: run the emulator with --net to try it\n")
+        puts("no link: run the emulator without --no-net to try it\n")
         return
     }
 

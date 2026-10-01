@@ -206,8 +206,8 @@ Writes reach the host file as each sector completes.
 
 The floppy moves data at 62500 bytes per second, the rate of a 1.44MB
 drive, whatever the clock rate: one word every W = clock rate × 4 /
-62500 ticks, rounded down (3072 ticks at 48 MHz, so a sector takes
-393216 ticks, about 8ms). The first word moves W ticks after the store
+62500 ticks, rounded down (2048 ticks at 32 MHz, so a sector takes
+262144 ticks, about 8ms). The first word moves W ticks after the store
 to `COMMAND`, and each next one W ticks after it. Reading a 64KB boot
 image takes about a second.
 
@@ -465,7 +465,7 @@ software opens up to 8 sockets and moves bytes, the card does the rest
 through the host's network. Software needs no TCP/IP stack of its own,
 and doesn't see packets, MAC addresses or IP configuration.
 
-The card is connected only when the emulator is started with `--net`
+The card is connected unless the emulator is started with `--no-net`
 (see [README](../README.md#running)); otherwise the link is down and
 every command fails with error 4. Addresses are IPv4, as a word with the
 first byte of the dotted form on top: `127.0.0.1` is `0x7F000001`.
@@ -534,12 +534,12 @@ by the emulator, every few milliseconds of host time: `STATE`, `EVENTS`,
   turns the socket into a connected one, with the other end in
   `PEER_ADDR` and `PEER_PORT`, and sets `EVENTS.connected`. The socket
   stops listening then: to take another connection, `LISTEN` on another
-  socket. The host listens on the address given with `--net`,
+  socket. The host listens on the address given with `--net=ADDR`,
   `127.0.0.1` by default, so only programs on the host can connect.
 - **`UDP`** opens a UDP socket on `LOCAL_PORT`. With `0` the host picks
   the port (and `LOCAL_PORT` shows it) and listens on all its
   addresses, as any UDP client does; another port is opened on the
-  `--net` address, like `LISTEN`.
+  `--net=ADDR` address, like `LISTEN`.
 - **`SEND`** on a connection moves as many of the `COUNT` bytes as
   `TX_FREE` allows into the send buffer (16KB); `ADDRESS` goes up and
   `COUNT` down by the bytes moved, so a `COUNT` left over is sent with
@@ -574,7 +574,7 @@ bytes before it have been moved.
 | `1`     | unknown command                                               |
 | `2`     | the command can't be used in the socket's state               |
 | `3`     | the DMA reached memory it can't: not RAM (or ROM, for `SEND`) |
-| `4`     | the link is down: the emulator runs without `--net`           |
+| `4`     | the link is down: the emulator runs with `--no-net`           |
 | `5`     | not available on this host: `LISTEN` or UDP in a browser      |
 | `6`     | the host's network failed: refused, unreachable, the port is taken, the connection broke |
 | `7`     | the UDP datagram is longer than 8192 bytes                    |
@@ -769,7 +769,7 @@ The boot info block describes the machine:
 
 ## Clock
 
-The system clock runs at 48 MHz by default (`clock_rate` in the config).
+The system clock runs at 32 MHz by default (`clock_rate` in the config).
 On every tick the timer advances first, then the hard disks move a word
 each, then the video card moves a DMA word and counts the tick towards
 the end of the frame, then the floppy counts the tick towards its next

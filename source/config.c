@@ -14,14 +14,14 @@ static config_t config = {
 	.hdd_path = { NULL, NULL },
 	.floppy_path = NULL,
 	.mute = false,
-	.clock_rate = 48000000ULL, // 48 MHz
+	.clock_rate = 32000000ULL, // 32 MHz
 	.ram_size = { 1024 * 1024 }, // 1MB in slot 0
 	.make_dump = false,
 	.window_scale = 1,
 	.step_mode = false,
 	.headless = false,
 	.trace_path = NULL,
-	.net = false,
+	.net = true,
 	.net_bind = 0x7F000001, // 127.0.0.1: only the host can connect
 };
 
@@ -30,35 +30,34 @@ config_t* config_get(void) {
 }
 
 static void config_usage(const char* program) {
-	printf(
-			"WRM.081632 %s\n"
-			"usage: %s [options]\n"
-			"  --rom PATH        firmware image (default: %s)\n"
-			"  --ram SIZE[,...]  RAM per slot, up to %d slots: 1M, 2M, 4M, "
-			"8M, 16M or 32M\n"
-			"                    (default: 1M)\n"
-			"  --clock HZ        clock rate, with an optional k, M or G "
-			"suffix (default: 48M)\n"
-			"  --hdd PATH        disk image for disk 0; a second --hdd "
-			"attaches disk 1\n"
-			"  --floppy PATH     disk image in the floppy drive; a file "
-			"dropped on the\n"
-			"                    window replaces it at run time\n"
-			"  --mute            no sound\n"
-			"  --net[=ADDR]      connect the network card to the host's "
-			"network; it listens\n"
-			"                    on ADDR (default: 127.0.0.1)\n"
-			"  --headless        no window; exit when the machine powers off "
-			"or halts\n"
-			"  --trace[=PATH]    log every retired instruction to PATH "
-			"(default: stderr)\n"
-			"  --debug           dump the CPU state when the machine stops or "
-			"quits\n"
-			"  -h, --help        show this help\n",
-			config.version,
-			program,
-			config.firm_path,
-			CONFIG_RAM_SLOT_COUNT);
+	printf("WRM.081632 %s\n"
+		   "usage: %s [options]\n"
+		   "  --rom PATH        firmware image (default: %s)\n"
+		   "  --ram SIZE[,...]  RAM per slot, up to %d slots: 1M, 2M, 4M, "
+		   "8M, 16M or 32M\n"
+		   "                    (default: 1M)\n"
+		   "  --clock HZ        clock rate, with an optional k, M or G "
+		   "suffix (default: 32M)\n"
+		   "  --hdd PATH        disk image for disk 0; a second --hdd "
+		   "attaches disk 1\n"
+		   "  --floppy PATH     disk image in the floppy drive; a file "
+		   "dropped on the\n"
+		   "                    window replaces it at run time\n"
+		   "  --mute            no sound\n"
+		   "  --no-net          cut the network card off the host's network\n"
+		   "  --net=ADDR        the network card listens on ADDR "
+		   "(default: 127.0.0.1)\n"
+		   "  --headless        no window; exit when the machine powers off "
+		   "or halts\n"
+		   "  --trace[=PATH]    log every retired instruction to PATH "
+		   "(default: stderr)\n"
+		   "  --debug           dump the CPU state when the machine stops or "
+		   "quits\n"
+		   "  -h, --help        show this help\n",
+		   config.version,
+		   program,
+		   config.firm_path,
+		   CONFIG_RAM_SLOT_COUNT);
 }
 
 // Parses a whole number with an optional k/K, m/M or g/G suffix, which
@@ -147,7 +146,6 @@ static void config_parse_net(const char* text) {
 		if (i < 3 && *p++ != '.') error("--net: invalid address '%s'", text);
 	}
 	if (*p) error("--net: invalid address '%s'", text);
-	config.net = true;
 	config.net_bind = addr;
 }
 
@@ -187,8 +185,8 @@ void config_parse(int argc, char* argv[]) {
 			config.trace_path = "-";
 		} else if (strncmp(arg, "--trace=", 8) == 0 && arg[8]) {
 			config.trace_path = arg + 8;
-		} else if (strcmp(arg, "--net") == 0) {
-			config.net = true;
+		} else if (strcmp(arg, "--no-net") == 0) {
+			config.net = false;
 		} else if (strncmp(arg, "--net=", 6) == 0) {
 			config_parse_net(arg + 6);
 		} else if (strcmp(arg, "--debug") == 0) {

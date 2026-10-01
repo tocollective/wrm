@@ -18,7 +18,7 @@ dd if=/dev/zero of=firmware.rom  bs=1m  count=32
 python3 tools/m.py --rom firmware/main.m -o firmware.s
 python3 tools/asm.py firmware.s -o firmware.rom
 bin/wrm081632 [--rom PATH] [--ram SIZE[,...]] [--clock HZ] [--hdd PATH]
-              [--floppy PATH] [--mute] [--net[=ADDR]] [--headless]
+              [--floppy PATH] [--mute] [--no-net] [--net=ADDR] [--headless]
               [--trace[=PATH]] [--debug]
 ```
 
@@ -26,11 +26,12 @@ bin/wrm081632 [--rom PATH] [--ram SIZE[,...]] [--clock HZ] [--hdd PATH]
 |--------------------|----------------------------------------------------------|
 | `--rom PATH`       | firmware image, `firmware.rom` by default                |
 | `--ram SIZE[,...]` | RAM in slots 0–3, mapped back to back from address 0: `1M`, `2M`, `4M`, `8M`, `16M` or `32M` each (`--ram 4M,4M`); `1M` by default |
-| `--clock HZ`       | clock rate, with an optional `k`, `M` or `G` suffix; `48M` by default |
+| `--clock HZ`       | clock rate, with an optional `k`, `M` or `G` suffix; `32M` by default |
 | `--hdd PATH`       | disk image for disk 0; a second `--hdd` attaches disk 1 (see [Booting from disk](#booting-from-disk)) |
 | `--floppy PATH`    | disk image in the floppy drive; a file dropped on the window replaces it while the machine runs |
 | `--mute`           | no sound from the beeper and the audio card               |
-| `--net[=ADDR]`     | connect the network card to the host's network (see [Network](#network)); listening sockets bind to `ADDR`, `127.0.0.1` by default |
+| `--no-net`         | cut the network card off the host's network (see [Network](#network)) |
+| `--net=ADDR`       | listening sockets of the network card bind to `ADDR`, `127.0.0.1` by default |
 | `--headless`       | no window and no sound (the video card, the beeper and the audio card still run, but nothing is shown or heard); the UART console still uses stdin and stdout |
 | `--trace[=PATH]`   | log every instruction that reaches write-back to `PATH`, or to stderr (see [Debugging](#debugging)) |
 | `--debug`          | dump the CPU state when the machine stops or the emulator quits |
@@ -63,9 +64,9 @@ The title bar says when the machine has it. See
 
 The network card has TCP/IP in hardware, like the WIZnet W5500: software
 opens up to 8 TCP or UDP sockets and looks up host names, and the
-emulator maps them to sockets of the host. It is cut off unless the
-emulator runs with `--net`, so a guest never reaches the network by
-itself. Sockets the guest listens on are opened on `127.0.0.1` (only
+emulator maps them to sockets of the host. It is connected unless the
+emulator runs with `--no-net`, which keeps a guest off the network.
+Sockets the guest listens on are opened on `127.0.0.1` (only
 programs on the host can connect) unless `--net=ADDR` names another
 address, e.g. `--net=0.0.0.0` for all of them. See
 [docs/SPECIFICATION.md](docs/SPECIFICATION.md#network-card).
@@ -172,7 +173,7 @@ runs every ROM through it as a test of its own.
 | `video`    | the video card: modes, palette, drawing engine, DMA, VBLANK |
 | `sound`    | the beeper's registers and `DURATION` timing; the audio card's voices, loops, signals and DMA faults |
 | `mouse`    | the mouse's registers (headless, so without events)         |
-| `net`      | the network card without a link, and with `--net` over the host's loopback: TCP, UDP, DNS |
+| `net`      | the network card without a link (`--no-net`), and with one over the host's loopback: TCP, UDP, DNS |
 
 A test includes `tests/common/harness.asm` and defines `test_main`. It
 sets `r28` to the number of each check and ends with `j pass`, or

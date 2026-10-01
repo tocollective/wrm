@@ -7,7 +7,7 @@
 	.include "../common/harness.asm"
 
 BUF             = 0x2000            ; samples in RAM, whatever they hold
-FRAME_TICKS     = 1000              ; ticks per output frame at 48 MHz
+FRAME_TICKS     = 666               ; ticks per output frame at 32 MHz
 TIMEOUT         = 1000000           ; cycles to wait for the card
 VOICE7          = AUDIO + AUDIO_VOICE0 + 7 * AUDIO_VOICE_SIZE
 
