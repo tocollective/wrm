@@ -1086,8 +1086,9 @@ write that were already written. VRAM is zero at power-on.
 ## Boot protocol
 
 After reset the firmware in ROM runs. The firmware in `firmware/` beeps,
-then checks the floppy and then disk 0 for a boot image. It loads the
-first one it finds and jumps to it; if there is none, it runs its demos. This section is the contract between the
+initializes the screen console, then checks the floppy and disk 0 for a
+boot image. It loads the first one it finds and jumps to it; if there is
+none, it opens a diagnostic menu. This section is the contract between the
 firmware and the image it boots, such as an OS loader. The calling
 conventions are in [ABI.md](ABI.md).
 
@@ -1106,7 +1107,7 @@ The firmware loads sectors 0 to `SECTORS` − 1 to physical address
 `0x00010000`. The header comes along, so an image is assembled at
 `0x00010000` as a whole (see [README](../README.md#booting-from-disk)).
 A disk that doesn't start with `MAGIC` is not bootable. The firmware
-doesn't boot from a disk, and prints why on the UART, if the header is
+doesn't boot from a disk, and shows why on the screen, if the header is
 invalid, the image runs past the end of the disk or doesn't fit in RAM,
 or the disk reports an error; it goes on to the next drive. A drive
 without a disk is skipped silently.

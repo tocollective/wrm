@@ -1,6 +1,6 @@
 ; ============================================================================
 ;  Boot protocol: the firmware (firmware/main.m) skips a floppy without a
-;  boot image (it prints "boot: floppy: no boot image") and boots disk 0,
+;  boot image (it shows the error on the screen) and boots disk 0,
 ;  where tests/common/boot_image.asm checks the state and reports
 ; ============================================================================
 ; @rom ../../firmware/main.m

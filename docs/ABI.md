@@ -6,8 +6,8 @@ runtime functions and the object file format. They are meant
 for compilers, libraries and operating systems. The hardware itself fixes
 only `r0` = 0; `JAL` and `JALR` can link through any register.
 
-The firmware in `firmware/` follows the register roles. Its demos keep
-`sp` only 4-byte aligned, because they have no 8-byte data.
+The firmware in `firmware/` follows these register roles and keeps its
+stack 8-byte aligned at calls.
 
 ## Data types
 

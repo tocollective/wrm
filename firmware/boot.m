@@ -1,59 +1,101 @@
 // Booting from the floppy or disk 0 (docs/SPECIFICATION.md#boot-protocol).
 
 import {
-    pic, timer, floppy, disk0, DiskRegs, BootHeader, BootInfo, DeviceEntry,
+    pic, timer, floppy, disk0, Disk, BootHeader, BootInfo, DeviceEntry,
     DISK_PRESENT, DISK_DONE, DISK_READ, SECTOR_SIZE,
     BOOT_MAGIC, BOOT_INFO_MAGIC, BOOT_INFO, BOOT_INFO_END, BOOT_STACK_TOP, BOOT_LOAD,
     CR_PTBR, CR_IVEC, CR_STATUS, STATUS_EXL,
 } from "defs.m"
-import { puts, putc, printDec } from "lib.m"
+import { write, writeHex } from "console.m"
+import { videoPalette } from "video.m"
 
 extern let ramSize(): UWord
 extern let probeDevices(table: UWord, max: UWord): UWord
 extern let onStack(fn: (): Void, top: UWord): Void
 extern let bootJump(entry: UWord): Void
 
-/// Runs a DISK_READ or DISK_WRITE and waits for it by polling STATUS.
+enum DiskError: UWord {
+    UnknownCommand = 1,
+    NoDisk,
+    PastEnd,
+    BadAddress,
+    ReadOnly,
+    HostIO,
+    BadDescriptor,
+}
+
+/// Runs a disk command and waits for it by polling STATUS.
 /// Returns ERROR, 0 on success.
-let diskIo(d: *volatile mut DiskRegs, command: UWord, sector: UWord, count: UWord,
+let diskIo(d: Disk, command: UWord, sector: UWord, count: UWord,
            address: UWord): UWord {
     d.sector = sector
     d.count = count
     d.address = address
     d.command = command
     while d.status & DISK_DONE == 0 {}
+    fence()                        // DMA writes to RAM precede reads below
     d.status = DISK_DONE            // acknowledge: drops the IRQ line
     return d.error
 }
 
 /// Loads the boot image from the first drive that holds one, the floppy
 /// and then disk 0, and jumps to it. Returns only if there is nothing to
-/// boot: no disks (silently), no boot image or an error (after printing
+/// boot: no disks (silently), no boot image or an error (after showing
 /// why, for each drive). Runs on its own stack below BOOT_LOAD, so the
 /// image can't overwrite it wherever the caller's stack is.
 let boot(): Void {
-    onStack(bootDrives, BOOT_STACK_TOP)
+    onStack((): Void {
+        bootDisk(floppy, "floppy")
+        bootDisk(disk0, "disk 0")
+    }, BOOT_STACK_TOP)
 }
 
-let bootDrives(): Void {
-    bootDisk(floppy, "floppy")
-    bootDisk(disk0, "disk 0")
+let machineRamSize(): UWord { return ramSize() }
+
+let machineDevices(table: UWord, max: UWord): UWord {
+    return probeDevices(table, max)
 }
 
 /// "boot: <drive><why>"
 let fail(drive: *UByte, why: *UByte): Void {
-    puts("boot: ")
-    puts(drive)
-    puts(why)
+    write("boot: ")
+    write(drive)
+    write(why)
 }
 
 let diskError(drive: *UByte, error: UWord): Void {
-    fail(drive, ": disk error ")
-    printDec(error)
-    putc('\n')
+    fail(drive, ": disk error: ")
+    switch error as DiskError {
+        case DiskError.UnknownCommand:
+            write("unknown command")
+            break
+        case DiskError.NoDisk:
+            write("no disk")
+            break
+        case DiskError.PastEnd:
+            write("past end of disk")
+            break
+        case DiskError.BadAddress:
+            write("bad RAM address")
+            break
+        case DiskError.ReadOnly:
+            write("read-only disk")
+            break
+        case DiskError.HostIO:
+            write("host I/O failure")
+            break
+        case DiskError.BadDescriptor:
+            write("bad DMA descriptor")
+            break
+        default:
+            write("unknown error")
+    }
+    write(" (")
+    writeHex(error)
+    write(")\n")
 }
 
-let bootDisk(d: *volatile mut DiskRegs, drive: *UByte): Void {
+let bootDisk(d: Disk, drive: *UByte): Void {
     if d.status & DISK_PRESENT == 0 return
 
     // sector 0 starts with the header
@@ -104,7 +146,12 @@ let bootDisk(d: *volatile mut DiskRegs, drive: *UByte): Void {
     info.devices = probeDevices(table, (BOOT_INFO_END - table) / sizeof(DeviceEntry))
     info.deviceTable = table
 
+    write("Booting from ")
+    write(drive)
+    write(".\n")
+
     // the state after reset, except for what the protocol passes on
+    videoPalette()
     pic.enable = 0
     mtcr(CR_PTBR, 0)
     mtcr(CR_IVEC, 0)
@@ -112,4 +159,4 @@ let bootDisk(d: *volatile mut DiskRegs, drive: *UByte): Void {
     bootJump(BOOT_LOAD + entry)
 }
 
-export { boot, diskIo }
+export { boot, machineRamSize, machineDevices }

@@ -5,26 +5,29 @@
 // and a character is then one EXPAND command from there (a glyph cache,
 // as on the 2D accelerators of the 90s).
 //
-// The screen console is 80x30 characters in 640x480, 8 bpp, and scrolls
-// with a COPY. It is separate from the UART: puts and friends in lib.m
-// still write to the UART only.
+// The screen console uses 640x480, 8 bpp. Its width leaves room for the
+// current BMP at the upper right, so scrolling does not move the image.
 
 import {
     video, VIDEO_DONE, VIDEO_ENABLE, VIDEO_640X480, VIDEO_8BPP,
     VIDEO_FILL, VIDEO_COPY, VIDEO_EXPAND, VIDEO_LOAD, VRAM_SIZE,
 } from "defs.m"
-import { FONT } from "font.m"
+import { FontData, FONT } from "font.m"
+import { BmpInfo, bmpInfo, bmpDraw } from "bmp.m"
+import { logoBmp, logoBmpEnd } from "logo.m"
 
 let CON_MODE: UWord = VIDEO_640X480 | VIDEO_8BPP
 let CON_PITCH: UWord = 640
-let CON_COLS: UWord = 80
+let LOGO_MARGIN: UWord = 8
+let LOGO_PALETTE0: UWord = 208
+let LOGO_PALETTE1: UWord = 15
 let CON_ROWS: UWord = 30
 let CON_FG: UWord = 7               // palette entries
 let CON_BG: UWord = 0
 
 // the font stays at the end of VRAM, past the frame of any mode
-let FONT_VRAM: UWord = VRAM_SIZE - 0x1000
-let FONT_SIZE: UWord = 256 * 16
+let FONT_VRAM: UWord = VRAM_SIZE - sizeof(FontData)
+let FONT_SIZE: UWord = sizeof(FontData)
 let GLYPH_SIZE: UWord = 16 << 16 | 8
 
 let VGA_COLORS: UWord[16] = [
@@ -38,16 +41,30 @@ let CUBE_LEVELS: UWord[6] = [0, 95, 135, 175, 215, 255]
 // the console cursor, in characters
 let mut conX: UWord
 let mut conY: UWord
+let mut conCols: UWord
 
 /// Console mode, palette, font, cleared screen, display on.
-let videoInit(): Void {
+let videoInit(): Bool {
     video.control = 0               // display off while it is set up
     video.mode = CON_MODE
     video.start = 0
     videoPalette()
-    if videoLoad(&FONT as UWord, FONT_VRAM, FONT_SIZE) != 0 return
+
+    let data: *UByte = &logoBmp
+    let length: UWord = (&logoBmpEnd as UWord) - (data as UWord)
+    let mut info: BmpInfo = {}
+    if !bmpInfo(data, length, &mut info) return false
+    if info.width > CON_PITCH - 2 * LOGO_MARGIN return false
+    if info.height > 480 - LOGO_MARGIN return false
+    let logoX: UWord = CON_PITCH - info.width - LOGO_MARGIN
+    conCols = logoX / 8
+
+    if videoLoad(&FONT as UWord, FONT_VRAM, FONT_SIZE) != 0 return false
     conClear()
+    if !bmpDraw(data, length, logoX, LOGO_MARGIN,
+                LOGO_PALETTE0, LOGO_PALETTE1) return false
     video.control = VIDEO_ENABLE
+    return true
 }
 
 /// The 16 VGA colours, then the xterm 6x6x6 colour cube (16-231) and grey
@@ -108,7 +125,7 @@ let conClear(): Void {
     video.dstBase = 0
     video.dstPitch = CON_PITCH
     video.dstXY = 0
-    video.size = CON_ROWS * 16 << 16 | CON_COLS * 8
+    video.size = CON_ROWS * 16 << 16 | CON_PITCH
     video.fg = CON_BG
     video.command = VIDEO_FILL
     conX = 0
@@ -125,7 +142,7 @@ let conPutc(c: UByte): Void {
     video.dstPitch = CON_PITCH
     videoGlyph(c, conX * 8 | conY * 16 << 16, CON_FG, CON_BG, 0)
     conX++
-    if conX >= CON_COLS conNewline()
+    if conX >= conCols conNewline()
 }
 
 /// Moves the cursor to the next line, scrolling up by a line at the bottom
@@ -143,10 +160,10 @@ let conNewline(): Void {
     video.dstPitch = CON_PITCH
     video.srcXY = 16 << 16          // from the second line...
     video.dstXY = 0                 // ...to the first
-    video.size = (CON_ROWS - 1) * 16 << 16 | CON_COLS * 8
+    video.size = (CON_ROWS - 1) * 16 << 16 | conCols * 8
     video.command = VIDEO_COPY
     video.dstXY = (CON_ROWS - 1) * 16 << 16     // then clear the last line
-    video.size = 16 << 16 | CON_COLS * 8
+    video.size = 16 << 16 | conCols * 8
     video.fg = CON_BG
     video.command = VIDEO_FILL
 }
@@ -159,4 +176,5 @@ let conPuts(s: *UByte): Void {
     }
 }
 
-export { videoInit, videoLoad, videoGlyph, videoText, conClear, conPutc, conPuts }
+export { videoInit, videoPalette, videoLoad, videoGlyph, videoText,
+         conClear, conPutc, conPuts }

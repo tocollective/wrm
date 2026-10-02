@@ -1,345 +1,162 @@
-// The machine for the firmware: device registers (docs/SPECIFICATION.md)
-// as structs behind volatile pointers, their bits, control registers,
-// the MMU and the boot protocol. Declarations only, no code.
-
-// ---- devices ------------------------------------------------------------
+// Hardware used by the WRM ROM firmware. Register layouts follow
+// docs/SPECIFICATION.md; the boot structures follow its boot protocol.
 
 type PicRegs {
     pending: UWord,
-    enable:  UWord,
-    active:  UWord,
-    claim:   UWord,     // the lowest active line, 0xFFFFFFFF if none
+    enable: UWord,
+    active: UWord,
+    claim: UWord,
 }
 
 type KbdRegs {
-    status:  UWord,
-    data:    UWord,     // pops an event: bit 31 = released, low 16 bits = usage ID
-    control: UWord,
-}
-
-type UartRegs {
-    data:    UWord,
-    status:  UWord,
+    status: UWord,
+    data: UWord,
     control: UWord,
 }
 
 type TimerRegs {
-    countLo:   UWord,
-    countHi:   UWord,
-    frequency: UWord,   // ticks per second
-    reload:    UWord,
-    value:     UWord,
-    control:   UWord,
-    status:    UWord,
+    countLo: UWord,
+    countHi: UWord,
+    frequency: UWord,
+    reload: UWord,
+    value: UWord,
+    control: UWord,
+    status: UWord,
 }
 
 type PowerRegs {
-    off:        UWord,  // the low 8 bits are the exit code
-    reset:      UWord,
-    status:     UWord,  // the host asks to power off; writing 1 clears
-    resetCause: UWord,  // why the machine last started, RESET_*
+    off: UWord,
+    reset: UWord,
+    status: UWord,
+    resetCause: UWord,
 }
 
 type DiskRegs {
-    status:  UWord,
+    status: UWord,
     sectors: UWord,
-    sector:  UWord,
-    count:   UWord,
+    sector: UWord,
+    count: UWord,
     address: UWord,
     command: UWord,
-    error:   UWord,
+    error: UWord,
 }
 
+type Disk = *volatile mut DiskRegs
+
 type VideoRegs {
-    status:       UWord,    // 0x00
-    control:      UWord,
-    mode:         UWord,
-    width:        UWord,
-    height:       UWord,    // 0x10
-    bpp:          UWord,
-    pitch:        UWord,
-    vramSize:     UWord,
-    start:        UWord,    // 0x20
-    frame:        UWord,
+    status: UWord,
+    control: UWord,
+    mode: UWord,
+    width: UWord,
+    height: UWord,
+    bpp: UWord,
+    pitch: UWord,
+    vramSize: UWord,
+    start: UWord,
+    frame: UWord,
     paletteIndex: UWord,
-    paletteData:  UWord,    // each write moves to the next entry
-    reserved:     UWord[4], // 0x30
-    command:      UWord,    // 0x40
-    error:        UWord,
-    dstBase:      UWord,
-    dstPitch:     UWord,
-    dstXY:        UWord,    // 0x50: x | y << 16
-    srcBase:      UWord,
-    srcPitch:     UWord,
-    srcXY:        UWord,
-    size:         UWord,    // 0x60: width | height << 16
-    fg:           UWord,
-    bg:           UWord,
-    address:      UWord,
-    count:        UWord,    // 0x70
+    paletteData: UWord,
+    reserved: UWord[4],
+    command: UWord,
+    error: UWord,
+    dstBase: UWord,
+    dstPitch: UWord,
+    dstXY: UWord,
+    srcBase: UWord,
+    srcPitch: UWord,
+    srcXY: UWord,
+    size: UWord,
+    fg: UWord,
+    bg: UWord,
+    address: UWord,
+    count: UWord,
 }
 
 type BeeperRegs {
-    control:   UWord,
-    frequency: UWord,       // Hz
-    duration:  UWord,       // ticks, 0 = until turned off
-}
-
-type MouseRegs {
-    status:  UWord,
-    data:    UWord,     // pops an event, 0 if empty (mouse.m decodes it)
     control: UWord,
-}
-
-type EthRegs {
-    status:  UWord,         // 0x00
-    control: UWord,
-    pending: UWord,         // writing 1 to a bit clears it
-    macLo:   UWord,         // bytes 0-3 of the MAC address, byte 0 in bits 7:0
-    macHi:   UWord,         // 0x10: bytes 4-5
-    rxRing:  UWord,         // the receive ring, set while the card is off
-    rxSize:  UWord,         // its descriptors
-    rxNext:  UWord,         // the descriptor the next frame goes in
-    txRing:  UWord,         // 0x20: the send ring, set while the card is off
-    txSize:  UWord,
-    txNext:  UWord,         // the descriptor sent next
-    txKick:  UWord,         // any value: send what software has handed over
-}
-
-/// A descriptor of the Ethernet card's rings, in RAM: the card owns it
-/// while OWN is set in word.
-type EthDesc {
-    buffer: UWord,          // physical address of the frame's bytes
-    word:   UWord,          // length | ETH_DESC_ERROR | ETH_DESC_OWN
-}
-
-type AudioRegs {
-    status:  UWord,         // voices that signalled, writing 1 clears
-    fault:   UWord,         // voices stopped by a bad address, writing 1 clears
-    master:  UWord,         // left | right << 8, 0-255 each
-    voices:  UWord,
-    rate:    UWord,         // frames a second of the mix
-}
-
-/// A voice of the audio card: audioVoice[n] is voice n.
-type AudioVoiceRegs {
-    control:  UWord,        // 0x00
-    address:  UWord,        // of the sample's first frame
-    length:   UWord,        // in frames
-    loop:     UWord,        // the frame a loop goes back to
-    position: UWord,        // 0x10: the frame playing now
-    rate:     UWord,        // frames a second
-    volume:   UWord,        // left | right << 8, 0-255 each
-    reserved: UWord,        // the next voice at 0x20
-}
-
-type RtcRegs {
-    secondsLo:   UWord,     // since 1970-01-01 UTC; reading it latches the rest
-    secondsHi:   UWord,
-    nanoseconds: UWord,
-    utcOffset:   UWord,     // local time - UTC in seconds, signed
-    alarmLo:     UWord,     // 0x10
-    alarmHi:     UWord,
-    control:     UWord,
-    status:      UWord,     // writing 1 clears
+    frequency: UWord,
+    duration: UWord,
 }
 
 let pic: *volatile mut PicRegs = 0xFD00_0000 as *volatile mut PicRegs
 let kbd: *volatile mut KbdRegs = 0xFD00_1000 as *volatile mut KbdRegs
-let uart: *volatile mut UartRegs = 0xFD00_2000 as *volatile mut UartRegs
 let timer: *volatile mut TimerRegs = 0xFD00_3000 as *volatile mut TimerRegs
 let power: *volatile mut PowerRegs = 0xFD00_4000 as *volatile mut PowerRegs
-let disk0: *volatile mut DiskRegs = 0xFD00_5000 as *volatile mut DiskRegs
+let disk0: Disk = 0xFD00_5000 as Disk
 let video: *volatile mut VideoRegs = 0xFD00_7000 as *volatile mut VideoRegs
-let floppy: *volatile mut DiskRegs = 0xFD00_8000 as *volatile mut DiskRegs
+let floppy: Disk = 0xFD00_8000 as Disk
 let beeper: *volatile mut BeeperRegs = 0xFD00_9000 as *volatile mut BeeperRegs
-let mouse: *volatile mut MouseRegs = 0xFD00_A000 as *volatile mut MouseRegs
-let eth: *volatile mut EthRegs = 0xFD00_B000 as *volatile mut EthRegs
-let audio: *volatile mut AudioRegs = 0xFD00_C000 as *volatile mut AudioRegs
-let audioVoice: *volatile mut AudioVoiceRegs = 0xFD00_C100 as *volatile mut AudioVoiceRegs
-let rtc: *volatile mut RtcRegs = 0xFD00_D000 as *volatile mut RtcRegs
 
-let PIC_BASE: UWord = 0xFD00_0000      // the I/O region
-let ROM_BASE: UWord = 0xFE00_0000
-
-let IRQ_KBD: UWord = 0
-let IRQ_UART: UWord = 1
-let IRQ_TIMER: UWord = 2
-let IRQ_MOUSE: UWord = 7
-let IRQ_ETH: UWord = 8
-let IRQ_AUDIO: UWord = 9
-let IRQ_RTC: UWord = 10
-let IRQ_POWER: UWord = 11
-
-let IO_ID: UWord = 0xFFC               // every device's ID register
-
-let KBD_READY: UWord = 1 << 0
-let KBD_OVERFLOW: UWord = 1 << 1
-let KBD_FLUSH: UWord = 1 << 0
-
-let UART_RX_READY: UWord = 1 << 0
-let UART_TX_READY: UWord = 1 << 1
-let UART_FLUSH: UWord = 1 << 0
-let HOST_ESCAPE: UWord = 0x1B          // Esc typed in the host terminal
-
-let TIMER_ENABLE: UWord = 1 << 0
-let TIMER_PERIODIC: UWord = 1 << 1
-let TIMER_EXPIRED: UWord = 1 << 0
-
-let DISK_PRESENT: UWord = 1 << 0
+let KBD_READY: UWord = 1
+let DISK_PRESENT: UWord = 1
 let DISK_DONE: UWord = 1 << 3
 let DISK_READ: UWord = 1
 let SECTOR_SIZE: UWord = 512
 
-let VIDEO_BUSY: UWord = 1 << 0
 let VIDEO_DONE: UWord = 1 << 1
-let VIDEO_ENABLE: UWord = 1 << 0
-let VIDEO_320X240: UWord = 0           // MODE: resolution | depth
+let VIDEO_BUSY: UWord = 1
+let VIDEO_ENABLE: UWord = 1
 let VIDEO_640X480: UWord = 1
-let VIDEO_800X600: UWord = 2
-let VIDEO_1024X768: UWord = 3
-let VIDEO_1BPP: UWord = 0 << 4
-let VIDEO_4BPP: UWord = 1 << 4
 let VIDEO_8BPP: UWord = 2 << 4
-let VIDEO_16BPP: UWord = 3 << 4
-let VIDEO_32BPP: UWord = 4 << 4
-let VIDEO_FILL: UWord = 1              // commands
+let VIDEO_FILL: UWord = 1
 let VIDEO_COPY: UWord = 2
 let VIDEO_EXPAND: UWord = 3
 let VIDEO_LOAD: UWord = 4
-let VIDEO_TRANSPARENT: UWord = 1 << 8  // EXPAND: 0 bits are left alone
-let VIDEO_MEMORY: UWord = 1 << 9       // EXPAND: the bitmap is in RAM or ROM
+let VIDEO_MEMORY: UWord = 1 << 9
 let VRAM_SIZE: UWord = 0x40_0000
 
-let BEEPER_ON: UWord = 1 << 0
+let BEEPER_ON: UWord = 1
+let POWER_OFF_REQUEST: UWord = 1
+let IRQ_POWER: UWord = 11
 
-let MOUSE_READY: UWord = 1 << 0        // STATUS
-let MOUSE_OVERFLOW: UWord = 1 << 1
-let MOUSE_FLUSH: UWord = 1 << 0        // CONTROL
-let MOUSE_ENABLE: UWord = 1 << 1
-let MOUSE_LEFT: UWord = 1 << 0         // buttons of an event
-let MOUSE_RIGHT: UWord = 1 << 1
-let MOUSE_MIDDLE: UWord = 1 << 2
-
-let ETH_LINK: UWord = 1 << 0           // STATUS
-let ETH_ENABLE: UWord = 1 << 0         // CONTROL
-let ETH_DESC_LENGTH: UWord = 0xFFFF    // descriptor word
-let ETH_DESC_ERROR: UWord = 1 << 30
-let ETH_DESC_OWN: UWord = 1 << 31
-
-let VOICE_ON: UWord = 1 << 0           // voice CONTROL
-let VOICE_LOOP: UWord = 1 << 1
-let VOICE_16BIT: UWord = 1 << 2
-let VOICE_STEREO: UWord = 1 << 3
-let VOICE_SIGNAL_END: UWord = 1 << 4
-let VOICE_SIGNAL_HALF: UWord = 1 << 5
-let AUDIO_VOICES: UWord = 8
-
-let RTC_ARMED: UWord = 1 << 0          // CONTROL
-let RTC_ALARM: UWord = 1 << 0          // STATUS
-
-let POWER_OFF_REQUEST: UWord = 1 << 0  // STATUS
-let RESET_POWER_ON: UWord = 0          // RESET_CAUSE
-let RESET_SOFTWARE: UWord = 1
-let RESET_HOST: UWord = 2
-
-// ---- the CPU ---------------------------------------------------------------
-
-// control registers (docs/INSTRUCTIONS.md#control-registers)
 let CR_STATUS: UWord = 0
 let CR_EPC: UWord = 1
 let CR_IVEC: UWord = 2
 let CR_CAUSE: UWord = 4
 let CR_BADADDR: UWord = 5
 let CR_PTBR: UWord = 6
-let CR_CYCLE: UWord = 7
-let CR_CYCLEH: UWord = 8
-let CR_INSTRET: UWord = 9
-let CR_CPUID: UWord = 11
-
-let STATUS_IE: UWord = 1 << 0
-let STATUS_PUM: UWord = 1 << 3         // user mode after IRET
-let STATUS_EXL: UWord = 1 << 4         // in the handler: set on entry and at reset
-
-let CAUSE_INTERRUPT: UWord = 0
-let CAUSE_SYSCALL: UWord = 12
-
-// MMU (docs/INSTRUCTIONS.md#memory-management)
-let PTBR_EN: UWord = 1 << 0
-let PTE_V: UWord = 1 << 0
-let PTE_R: UWord = 1 << 1
-let PTE_W: UWord = 1 << 2
-let PTE_X: UWord = 1 << 3
-let PTE_U: UWord = 1 << 4
-let PAGE_SIZE: UWord = 0x1000
-let SUPERPAGE_SIZE: UWord = 0x40_0000
-
-// ---- the boot protocol (docs/SPECIFICATION.md#boot-protocol) ---------------
+let STATUS_EXL: UWord = 1 << 4
 
 type BootHeader {
-    magic:   UWord,
-    sectors: UWord,         // image size in sectors, from sector 0
-    entry:   UWord,         // offset from BOOT_LOAD
-    flags:   UWord,         // must be 0
+    magic: UWord,
+    sectors: UWord,
+    entry: UWord,
+    flags: UWord,
 }
 
 type BootInfo {
-    magic:       UWord,
-    size:        UWord,     // bytes of the block: later fields are new
-    ramSize:     UWord,
-    disk:        UWord,     // the boot disk's controller
+    magic: UWord,
+    size: UWord,
+    ramSize: UWord,
+    disk: UWord,
     diskSectors: UWord,
-    image:       UWord,     // = BOOT_LOAD
-    imageSize:   UWord,
-    clock:       UWord,     // ticks per second
-    devices:     UWord,     // entries in the device table
-    deviceTable: UWord,     // right after the block
+    image: UWord,
+    imageSize: UWord,
+    clock: UWord,
+    devices: UWord,
+    deviceTable: UWord,
 }
 
-/// An entry of the device table: a page of the I/O region and the ID
-/// register of the device there.
 type DeviceEntry {
     address: UWord,
-    id:      UWord,         // type << 16 | version << 8 | IRQ line
+    id: UWord,
 }
 
-let BOOT_MAGIC: UWord = 0x424D_5257    // "WRMB"
-let BOOT_INFO_MAGIC: UWord = 0x4F46_4E49   // "INFO"
+let BOOT_MAGIC: UWord = 0x424D_5257
+let BOOT_INFO_MAGIC: UWord = 0x4F46_4E49
 let BOOT_INFO: UWord = 0x0000_1000
-let BOOT_INFO_END: UWord = 0x0000_2000 // the device table ends below it
+let BOOT_INFO_END: UWord = 0x0000_2000
 let BOOT_STACK_TOP: UWord = 0x0001_0000
 let BOOT_LOAD: UWord = 0x0001_0000
 
-// USB HID usage IDs (page 0x07)
-let HID_A: UWord = 0x04
-let HID_ESCAPE: UWord = 0x29
-
 export {
-    PicRegs, KbdRegs, UartRegs, TimerRegs, PowerRegs, DiskRegs, VideoRegs, BeeperRegs,
-    MouseRegs, EthRegs, EthDesc, AudioRegs, AudioVoiceRegs, RtcRegs,
-    pic, kbd, uart, timer, power, disk0, video, floppy, beeper,
-    mouse, eth, audio, audioVoice, rtc,
-    PIC_BASE, ROM_BASE,
-    IRQ_KBD, IRQ_UART, IRQ_TIMER, IRQ_MOUSE, IRQ_ETH, IRQ_AUDIO, IRQ_RTC, IRQ_POWER, IO_ID,
-    KBD_READY, KBD_OVERFLOW, KBD_FLUSH,
-    UART_RX_READY, UART_TX_READY, UART_FLUSH, HOST_ESCAPE,
-    TIMER_ENABLE, TIMER_PERIODIC, TIMER_EXPIRED,
-    DISK_PRESENT, DISK_DONE, DISK_READ, SECTOR_SIZE,
-    VIDEO_BUSY, VIDEO_DONE, VIDEO_ENABLE, VIDEO_320X240, VIDEO_640X480, VIDEO_800X600, VIDEO_1024X768,
-    VIDEO_1BPP, VIDEO_4BPP, VIDEO_8BPP, VIDEO_16BPP, VIDEO_32BPP,
-    VIDEO_FILL, VIDEO_COPY, VIDEO_EXPAND, VIDEO_LOAD, VIDEO_TRANSPARENT, VIDEO_MEMORY, VRAM_SIZE,
-    BEEPER_ON,
-    MOUSE_READY, MOUSE_OVERFLOW, MOUSE_FLUSH, MOUSE_ENABLE, MOUSE_LEFT, MOUSE_RIGHT, MOUSE_MIDDLE,
-    ETH_LINK, ETH_ENABLE, ETH_DESC_LENGTH, ETH_DESC_ERROR, ETH_DESC_OWN,
-    VOICE_ON, VOICE_LOOP, VOICE_16BIT, VOICE_STEREO, VOICE_SIGNAL_END, VOICE_SIGNAL_HALF,
-    AUDIO_VOICES,
-    RTC_ARMED, RTC_ALARM,
-    POWER_OFF_REQUEST, RESET_POWER_ON, RESET_SOFTWARE, RESET_HOST,
-    CR_STATUS, CR_EPC, CR_IVEC, CR_CAUSE, CR_BADADDR, CR_PTBR, CR_CYCLE, CR_CYCLEH, CR_INSTRET,
-    CR_CPUID,
-    STATUS_IE, STATUS_PUM, STATUS_EXL, CAUSE_INTERRUPT, CAUSE_SYSCALL,
-    PTBR_EN, PTE_V, PTE_R, PTE_W, PTE_X, PTE_U, PAGE_SIZE, SUPERPAGE_SIZE,
-    BootHeader, BootInfo, DeviceEntry, BOOT_MAGIC, BOOT_INFO_MAGIC, BOOT_INFO, BOOT_INFO_END,
-    BOOT_STACK_TOP, BOOT_LOAD,
-    HID_A, HID_ESCAPE,
+    PicRegs, KbdRegs, TimerRegs, PowerRegs, DiskRegs, Disk, VideoRegs, BeeperRegs,
+    pic, kbd, timer, power, disk0, video, floppy, beeper,
+    KBD_READY, DISK_PRESENT, DISK_DONE, DISK_READ, SECTOR_SIZE,
+    VIDEO_BUSY, VIDEO_DONE, VIDEO_ENABLE, VIDEO_640X480, VIDEO_8BPP,
+    VIDEO_FILL, VIDEO_COPY, VIDEO_EXPAND, VIDEO_LOAD, VIDEO_MEMORY, VRAM_SIZE,
+    BEEPER_ON, POWER_OFF_REQUEST, IRQ_POWER,
+    CR_STATUS, CR_EPC, CR_IVEC, CR_CAUSE, CR_BADADDR, CR_PTBR, STATUS_EXL,
+    BootHeader, BootInfo, DeviceEntry, BOOT_MAGIC, BOOT_INFO_MAGIC,
+    BOOT_INFO, BOOT_INFO_END, BOOT_STACK_TOP, BOOT_LOAD,
 }

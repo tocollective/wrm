@@ -1,91 +1,138 @@
-// WRM.081632 demo firmware, in M.
-//
-// Boots from the floppy or disk 0 if one holds a boot image (--floppy,
-// --hdd, see docs/SPECIFICATION.md#boot-protocol); otherwise runs the
-// demos.
-//
-// A tour of the machine: every instruction group, the UART, the keyboard,
-// the PIC, polling, WFI, interrupts, the MMU and user mode, the timer and
-// the cycle counters, the video modes, the mouse, the network, the audio
-// card, the real-time clock, power off. The demos' output goes to the
-// UART, i.e. to the host's stdout; the screen shows a short banner, the
-// video modes and the mouse's pointer.
-//
-// Build (m/docs/COMPILER.md, "Цель: ROM"):
+// WRM.081632 ROM firmware. Build with:
 //   python3 tools/m.py --rom firmware/main.m -o firmware.rom
 //
-// Files:
-//   main.m           the order of the demos
-//   defs.m           device registers, the CPU, the boot protocol
-//   boot.m, .asm     booting from the floppy or disk 0
-//   lib.m            UART output and helpers (puts, show, sort, ...)
-//   video.m          video card setup, text, the screen console
-//   mouse.m          enabling the mouse, decoding its events
-//   net.m            the Ethernet card's driver, ARP, ping, UDP, DHCP, DNS
-//   audio.m          playing samples on the audio card's voices
-//   font.m           the 8x16 font, loaded into VRAM by videoInit
-//   trap.m, .asm     the trap entry and the dispatch of interrupts
-//   demos/*.m        one demo each; pcrel and the user program of mmu are
-//                    assembly (.asm next to them)
-//
-// The reset code is m/runtime/rom0.asm: it sets the stack, copies .data to
-// RAM, zeroes .bss and calls main; its result powers the machine off.
+// Reset is in m/runtime/rom0.asm. The firmware installs its own screen
+// trap handler as soon as main starts.
+// The boot hand-off and safe hardware probes are in boot.asm.
 
-import { beeper, timer, power, ROM_BASE, BEEPER_ON } from "defs.m"
-import { puts, show } from "lib.m"
-import { videoInit, conPuts } from "video.m"
-import { boot } from "boot.m"
-import { demoAlu } from "demos/alu.m"
-import { demoMemory } from "demos/memory.m"
-import { demoCalls } from "demos/calls.m"
-import { demoPcrel } from "demos/pcrel.m"
-import { demoPolling } from "demos/polling.m"
-import { demoInterrupts } from "demos/interrupts.m"
-import { demoMmu } from "demos/mmu.m"
-import { demoTimer } from "demos/timer.m"
-import { demoVideo } from "demos/video.m"
-import { demoMouse } from "demos/mouse.m"
-import { demoNet } from "demos/net.m"
-import { demoAudio } from "demos/audio.m"
-import { demoRtc } from "demos/rtc.m"
+import {
+    pic, kbd, timer, power, beeper,
+    KBD_READY, POWER_OFF_REQUEST, IRQ_POWER, BEEPER_ON,
+    BOOT_INFO, BOOT_INFO_END, DeviceEntry,
+} from "defs.m"
+import { consoleInit, write, writeChar, writeHex } from "console.m"
+import { boot, machineRamSize, machineDevices } from "boot.m"
+import { installTrap } from "trap.m"
 
-/// The end of the ROM image (m/runtime/rom0.asm).
-extern let __image_end: UByte
+let VERSION: *UByte = "WRM.081632 ROM 1.0.0\n"
 
-let main(argc: UWord, argv: *UByte[]): Word {
-    postBeep()
-    videoInit()                     // a boot image gets the screen console too
-    conPuts("WRM.081632 firmware\n\n")
-    boot()                          // returns if there is nothing to boot
-    conPuts("No boot image: running the demos.\nTheir output goes to the UART console.\n")
-
-    puts("\nWRM.081632 demo firmware\n========================\n")
-    show("firmware size, bytes", &__image_end as UWord - ROM_BASE)
-    show("reset cause", power.resetCause)   // 0 power-on, 1 RESET, 2 host
-
-    demoAlu()
-    demoMemory()
-    demoCalls()
-    demoPcrel()
-    demoPolling()
-    demoInterrupts()
-    demoMmu()
-    demoTimer()
-    demoVideo()
-    demoMouse()
-    demoNet()
-    demoAudio()
-    demoRtc()
-
-    puts("\nbye\n")
-    // while true {}
-    return 0                        // exit code 0: the emulator quits
+enum MenuCommand: UByte {
+    Invalid,
+    Retry = 'r',
+    Devices = 'd',
+    Help = 'h',
+    Power = 'p',
 }
 
-/// A short beep at power-on, like a PC after its self-test. The beeper
-/// times it by itself, so nothing waits for it to end.
-let postBeep(): Void {
-    beeper.frequency = 1000         // Hz
-    beeper.duration = timer.frequency / 10     // 1/10 s of ticks
+// USB HID usage IDs, keyboard page 0x07.
+enum KeyUsage: UWord {
+    D = 0x07,
+    H = 0x0B,
+    P = 0x13,
+    R = 0x15,
+}
+
+let main(argc: UWord, argv: *UByte[]): Word {
+    installTrap()
+    pic.enable = 0
+    beeper.frequency = 1000
+    beeper.duration = timer.frequency / 10
     beeper.control = BEEPER_ON
+
+    if !consoleInit() {
+        return 254
+    }
+
+    write(VERSION)
+    write("reset cause: ")
+    writeHex(power.resetCause)
+    write("\nRAM bytes: ")
+    writeHex(machineRamSize())
+    write("\n")
+
+    boot()
+    write("No boot image found. Diagnostic menu ready.\n")
+    menu()
+    return 0
+}
+
+let menu(): Void {
+    // The CPU keeps interrupts off. Enabling the PIC line lets the host
+    // deliver a power-button request, which this loop polls.
+    pic.enable = 1 << IRQ_POWER
+    showHelp()
+    while true {
+        write("wrm> ")
+        switch readCommand() {
+            case MenuCommand.Retry:
+                write("Retrying floppy, then disk 0...\n")
+                boot()
+                write("No boot image found.\n")
+                break
+            case MenuCommand.Devices:
+                showDevices()
+                break
+            case MenuCommand.Help:
+                showHelp()
+                break
+            case MenuCommand.Power:
+                write("Powering off.\n")
+                power.off = 0
+                return
+            default:
+                showHelp()
+        }
+    }
+}
+
+let showHelp(): Void {
+    write("r retry boot | d devices | h help | p power off\n")
+}
+
+let showDevices(): Void {
+    let table: UWord = BOOT_INFO
+    let count: UWord = machineDevices(table, (BOOT_INFO_END - table) / sizeof(DeviceEntry))
+    let entries: *DeviceEntry = table as *DeviceEntry
+    write("Devices (address, ID):\n")
+    for i: UWord in 0..count {
+        write("  ")
+        writeHex(entries[i].address)
+        write("  ")
+        writeHex(entries[i].id)
+        write("\n")
+    }
+}
+
+let readCommand(): MenuCommand {
+    while true {
+        if power.status & POWER_OFF_REQUEST != 0 {
+            power.status = POWER_OFF_REQUEST
+            write("\nPower button pressed.\n")
+            power.off = 0
+        }
+        if kbd.status & KBD_READY != 0 {
+            let event: UWord = kbd.data
+            if event & 0x8000_0000 != 0 continue // key release
+            let command: MenuCommand = keyCommand((event & 0xFFFF) as KeyUsage)
+            if command != MenuCommand.Invalid {
+                writeChar(command as UByte)
+                write("\n")
+                return command
+            }
+        }
+    }
+}
+
+let keyCommand(usage: KeyUsage): MenuCommand {
+    switch usage {
+        case KeyUsage.R:
+            return MenuCommand.Retry
+        case KeyUsage.D:
+            return MenuCommand.Devices
+        case KeyUsage.H:
+            return MenuCommand.Help
+        case KeyUsage.P:
+            return MenuCommand.Power
+    }
+    return MenuCommand.Invalid
 }

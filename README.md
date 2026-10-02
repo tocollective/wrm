@@ -15,10 +15,6 @@ and its share of the clock rate; below 100% the guest's time, which it
 counts in ticks, falls behind the host's. `--unthrottled` runs it as fast
 as the host can instead (see [Speed and determinism](#speed-and-determinism)).
 
-```sh
-dd if=/dev/zero of=firmware.rom  bs=1m  count=32
-```
-
 ## Running
 
 ```sh
@@ -120,8 +116,8 @@ privileges. Ping leaves the machine only where the host allows
 unprivileged ICMP sockets (macOS; Linux with
 `net.ipv4.ping_group_range`); the gateway always answers it. The card is
 connected unless the emulator runs with `--no-net`, which keeps a guest
-off the network. The firmware's network demo shows the way (DHCP, ARP,
-ping and DNS in `firmware/net.m`). See
+off the network. A booted system provides its own network driver and
+protocol stack. See
 [docs/SPECIFICATION.md](docs/SPECIFICATION.md#ethernet-card).
 
 The guest reaches the internet, but not the host itself or the networks
@@ -229,14 +225,17 @@ compiler makes one by default; padded to whole sectors, it is itself a
 bootable disk image:
 
 ```sh
-python3 tools/m.py firmware/disk/hello.m -o hdd0.img
+python3 tools/m.py m/examples/example.m -o hdd0.img
 bin/wrm081632 --hdd hdd0.img
 bin/wrm081632 --floppy hdd0.img     # the same image boots from the floppy
 ```
 
-Without a boot image on either drive the firmware runs its demos. The
-floppy's disk can be swapped at run time by dropping an image file on
-the window; the guest sees it in the drive's `STATUS`
+Without a boot image on either drive the firmware opens a diagnostic menu
+on the screen. Press `r` to retry booting after changing a disk, `d` to
+list detected devices, `h` for help, or `p` to power off. The menu uses
+the emulated keyboard; firmware messages are not sent to the UART. A
+floppy can be swapped at run time by dropping an image file on the
+window; the guest sees it in the drive's `STATUS`
 ([docs/SPECIFICATION.md](docs/SPECIFICATION.md#floppy-drive)).
 The calling conventions for code on the machine are in
 [docs/ABI.md](docs/ABI.md).

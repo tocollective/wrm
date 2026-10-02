@@ -124,9 +124,10 @@ class Build:
 			f.write(text)
 		self.add_asm(source)
 
-	def add_runtime(self, rom):
+	def add_runtime(self, rom, rom_trap=None):
 		for name in ROM_RUNTIME if rom else BOOT_RUNTIME:
-			self.add_asm(os.path.join(RUNTIME, name))
+			self.add_asm(rom_trap if rom_trap and name == "trap.asm"
+						 else os.path.join(RUNTIME, name))
 
 	def add_rt(self, include_dirs):
 		"""rt.m, compiled on its own (when the modules are objects)."""
@@ -246,7 +247,13 @@ def main(argv=None):
 		workdir = args.save_temps or tmp
 		os.makedirs(workdir, exist_ok=True)
 		build = Build(workdir, include_dirs, diag)
-		build.add_runtime(args.rom)   # crt0 or rom0 first: it starts the image
+		# A ROM entry may supply a device-specific early trap.
+		rom_trap = None
+		if args.rom and modules:
+			candidate = os.path.join(os.path.dirname(inputs[0]), "romtrap.asm")
+			if os.path.isfile(candidate):
+				rom_trap = candidate
+		build.add_runtime(args.rom, rom_trap)   # crt0 or rom0 first
 		if modules:
 			codegen = CodeGen(modules, diag)
 			for module in modules:
