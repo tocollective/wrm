@@ -2,7 +2,7 @@
 // kernelInit enables the stack guard through MMU; interrupts stay disabled.
 import { kernelInit } from "boot.m"
 import { panic, setPanicStage } from "panic.m"
-import { consoleInit, print, prints } from "console.m"
+import { consoleInit, print } from "console.m"
 
 let main(argc: UWord, argv: *UByte[]): Word {
     kernelInit()

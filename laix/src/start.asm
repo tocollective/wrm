@@ -2,8 +2,9 @@
 ; LA/IX boot runtime. This object must be FIRST in the boot link.
 ; Before the full entry is installed, diagnostics never use a stack or BSS.
     .text
-    .globl kernelStart, earlyTrapEntry, earlyPanic
-    .globl bootInfoAddress, kernelStackGuard, kernelStackBottom, kernelStackTop, trapSavedR1
+    .globl kernelStart, earlyTrapEntry, earlyPanic, earlyTrapPanic, earlyTrapReport
+    .globl earlyStop, earlyField, earlyString, earlyHex
+    .globl bootInfoAddress, kernelStackGuard, kernelStackBottom, kernelStackTop
 kernelHeader:
     .word BOOT_MAGIC
     .word __image_sectors
@@ -45,7 +46,11 @@ kernelStart:
     la r1, kernelStackBottom
     li r2, STACK_CANARY
     sw r2, 0(r1)
+    sw r1, KERNEL_STACK_BOTTOM(r0)
     la sp, kernelStackTop
+    sw sp, KERNEL_SP(r0)
+    sw sp, KERNEL_STACK_TOP(r0)
+    sw r0, TRAP_SAVED_R1(r0)        ; low entry state is outside the BSS zero loop
     mtcr fcsr, r0
     la r1, trapEntry
     mtcr ivec, r1
@@ -63,47 +68,55 @@ kernelStart:
 
 earlyTrapEntry:
     la r1, earlyFaultMessage
-    j earlyPanic
+    j earlyTrapPanic
 
-; r1 = trusted static ASCII message. No calls, pushes, globals or locks.
+; Early diagnostics: jump-only, no stack, BSS, calls, pushes or locks. Every
+; routine takes its continuation in a register and clobbers r1-r3, r6-r9, r12.
+
+; r1 = trusted static ASCII message, without a trap: CAUSE, EPC and BADADDR
+; are stale (reset or firmware values) and are not printed.
 earlyPanic:
     li r2, STATUS_EXL
     mtcr status, r2
     li r9, UART_BASE
-.message:
-    lbu r2, 0(r1)
-    beqz r2, .cause
-    sw r2, 0(r9)
-    addi r1, r1, 1
-    j .message
+    la r12, earlyStop
+    j earlyString
+
+; r1 = message after a trap: also prints its CAUSE, EPC and BADADDR.
+earlyTrapPanic:
+    li r2, STATUS_EXL
+    mtcr status, r2
+    la r13, earlyStop
+    j earlyTrapReport
+
+; r1 = message, r13 = continuation: the message, then the trap registers.
+; Leaves r9 = UART_BASE for further earlyField output.
+earlyTrapReport:
+    li r9, UART_BASE
+    la r12, .cause
+    j earlyString
 .cause:
     la r1, earlyCauseMessage
-    la r12, .cause_value
-    j earlyString
-.cause_value:
     mfcr r6, cause
     la r12, .epc
-    j earlyHex
+    j earlyField
 .epc:
     la r1, earlyEpcMessage
-    la r12, .epc_value
-    j earlyString
-.epc_value:
     mfcr r6, epc
     la r12, .badaddr
-    j earlyHex
+    j earlyField
 .badaddr:
     la r1, earlyBadaddrMessage
-    la r12, .badaddr_value
-    j earlyString
-.badaddr_value:
     mfcr r6, badaddr
-    la r12, .stop
-    j earlyHex
-.stop:
+    mv r12, r13
+    j earlyField
+
+; Ends every early panic. Boot failure must not look like success to a
+; headless caller.
+earlyStop:
+    li r9, UART_BASE
     li r2, ASCII_NEWLINE
     sw r2, 0(r9)
-    ; Boot failure must not look like success to a headless caller.
     li r9, POWER_BASE
     li r2, PANIC_EXIT_CODE
     sw r2, 0(r9)
@@ -111,7 +124,17 @@ earlyPanic:
     hlt
     j .halt
 
-; Jump-only formatting: r12 is the continuation, never a stack return.
+; r1 = label, r6 = value, r9 = UART_BASE, r12 = continuation: "label" then
+; the value in hex. r8 keeps the continuation while the label is printed.
+earlyField:
+    mv r8, r12
+    la r12, .value
+    j earlyString
+.value:
+    mv r12, r8
+    j earlyHex
+
+; r1 = NUL-terminated string, r9 = UART_BASE, r12 = continuation.
 earlyString:
 .next:
     lbu r2, 0(r1)
@@ -122,6 +145,7 @@ earlyString:
 .done:
     jr r12
 
+; r6 = value, r9 = UART_BASE, r12 = continuation: eight hex digits.
 earlyHex:
     li r7, HEX_TOP_SHIFT
 .digit:
@@ -139,7 +163,11 @@ earlyHex:
     bgez r7, .digit
     jr r12
 
+    ; This object is linked first: its page alignment starts the whole
+    ; .rodata and .data output sections on pages of their own, so the MMU
+    ; can map code RX, read-only data R and writable data RW (mmu.m).
     .rodata
+    .align PAGE_SIZE
 earlyFaultMessage:    .asciz "\nLA/IX EARLY PANIC: exception"
 earlyBootInfoMessage: .asciz "\nLA/IX EARLY PANIC: invalid boot info"
 earlyRamMessage:      .asciz "\nLA/IX EARLY PANIC: kernel does not fit in RAM"
@@ -147,6 +175,9 @@ earlyReturnedMessage: .asciz "\nLA/IX EARLY PANIC: main returned"
 earlyCauseMessage:    .asciz "\ncause="
 earlyEpcMessage:      .asciz " epc="
 earlyBadaddrMessage:  .asciz " badaddr="
+
+    .data
+    .align PAGE_SIZE
 
     .bss
     .align PAGE_SIZE
@@ -157,5 +188,3 @@ kernelStackBottom:
 kernelStackTop:
 bootInfoAddress:
     .space WORD_BYTES
-trapSavedR1:
-    .space WORD_BYTES                     ; one core, EXL held: entry scratch storage

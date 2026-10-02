@@ -1,11 +1,11 @@
 import { debugPrint } from "debug_uart.m"
 import { panic, setPanicStage } from "panic.m"
 import { trapLayoutValid } from "trap_frame.m"
-import { trapRegisterSelfTest, trapBreakCount } from "trap.m"
+import { trapRegisterSelfTest, trapExpect, trapExpectationMet } from "trap.m"
 import { memoryInit } from "memory.m"
 import { PAGE_SIZE, PAGE_MASK, WORD_BYTES, BOOT_INFO, BOOT_INFO_MAGIC,
-    BOOT_INFO_BYTES, BOOT_INFO_END, DEVICE_ENTRY_BYTES,
-    SYSCALL_UNSUPPORTED, ERRNO_ENOSYS } from "defs.m"
+    BOOT_INFO_BYTES, BOOT_INFO_LIMIT, DEVICE_ENTRY_BYTES, CAUSE_BREAKPOINT, CAUSE_SYSCALL,
+    SYSCALL_UNSUPPORTED, ERRNO_ENOSYS, CR_STATUS, STATUS_IE, PIC_ENABLE } from "defs.m"
 import { mmuInit } from "mmu.m"
 
 type KernelBootInfo {
@@ -30,8 +30,17 @@ extern let kernelStackBottom: UWord
 extern let kernelStackTop: UByte
 let mut kernelBootInfo: KernelBootInfo
 
+let kernelIrqsDisabled(): Bool {
+    let enable: *volatile UWord = PIC_ENABLE as *volatile UWord
+    return mfcr(CR_STATUS) & STATUS_IE == 0 && *enable == 0
+}
+
 let kernelInit(): Void {
     setPanicStage("boot-info")
+    if !kernelIrqsDisabled() {
+        panic("IRQs enabled before IRQ handling is ready", null)
+        return
+    }
     debugPrint("LA/IX: kernel entry\n")
     let info: *KernelBootInfo = bootInfoAddress as *KernelBootInfo
     if bootInfoAddress != BOOT_INFO || info.magic != BOOT_INFO_MAGIC ||
@@ -53,9 +62,11 @@ let kernelInit(): Void {
         panic("invalid kernel memory layout", null)
         return
     }
+    // start.asm has already written the entry state after BOOT_INFO_LIMIT:
+    // a table reaching it would be overwritten.
     if info.devices > (BOOT_INFO_BYTES - sizeof(KernelBootInfo)) / DEVICE_ENTRY_BYTES || info.deviceTable < BOOT_INFO + info.size ||
-        info.deviceTable > BOOT_INFO_END || info.deviceTable & (WORD_BYTES - 1) != 0 ||
-        info.devices > (BOOT_INFO_END - info.deviceTable) / DEVICE_ENTRY_BYTES {
+        info.deviceTable > BOOT_INFO_LIMIT || info.deviceTable & (WORD_BYTES - 1) != 0 ||
+        info.devices > (BOOT_INFO_LIMIT - info.deviceTable) / DEVICE_ENTRY_BYTES {
         panic("invalid device table", null)
         return
     }
@@ -67,23 +78,35 @@ let kernelInit(): Void {
     }
     setPanicStage("mmu-init")
     if !mmuInit() {
-        panic("could not enable kernel stack guard", null)
+        panic("could not enable kernel memory protection", null)
         return
     }
-    debugPrint("LA/IX: MMU enabled, kernel stack guard active\n")
+    debugPrint("LA/IX: MMU enabled, kernel stack guard active, kernel W^X\n")
     if !trapLayoutValid() {
         panic("TrapFrame layout mismatch", null)
         return
     }
     setPanicStage("trap-selftest")
-    let before: UWord = trapBreakCount()
+    trapExpect(CAUSE_BREAKPOINT)
+    breakpoint()
+    if !trapExpectationMet() {
+        panic("breakpoint did not return through trapDispatch", null)
+        return
+    }
+    // Arms its own BREAK and SYSCALL before raising each of them.
     let failed: Word = trapRegisterSelfTest()
-    if failed != 0 || trapBreakCount() != before + 1 {
+    if failed != 0 || !trapExpectationMet() {
         panic("trap context was not preserved (failure=$h)", null, failed)
         return
     }
-    if syscall(SYSCALL_UNSUPPORTED, 1, 2, 3, 4, 5, 6) != -ERRNO_ENOSYS {
+    trapExpect(CAUSE_SYSCALL)
+    if syscall(SYSCALL_UNSUPPORTED, 1, 2, 3, 4, 5, 6) != -ERRNO_ENOSYS ||
+        !trapExpectationMet() {
         panic("unknown syscall did not return -ENOSYS", null)
+        return
+    }
+    if !kernelIrqsDisabled() {
+        panic("trap return enabled IRQs", null)
         return
     }
     debugPrint("LA/IX: TrapFrame and syscall self-tests passed\n")

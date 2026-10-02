@@ -646,9 +646,10 @@ Entry            31                     12 11  8  7  6  5  4 3 2 1 0
    The physical address is `entry[31:12]` + `vaddr[11:0]`.
 
 A fetch needs `X`, a load needs `R`, a store needs `W`, otherwise it is a
-page fault. In user mode the page also needs `U`; supervisor mode can
-access every page. `U` is only checked in the entry that maps the page
-(a superpage directory entry or a page table entry). On a permitted
+page fault. In user mode the page also needs `U`; supervisor mode skips
+the `U` check but still needs `R`, `W` or `X`. `U` is only checked in the
+entry that maps the page (a superpage directory entry or a page table
+entry). On a permitted
 translation, the MMU sets `A` in the leaf PTE and sets `D` for a write.
 It writes the PTE back to physical memory, so leaf page tables must be in
 RAM unless their `A`/`D` bits were preset. A writeback failure is a page
@@ -689,5 +690,8 @@ global mappings and ASIDs reused for different address spaces.
 
 Both take effect for the next instruction: `MTCR PTBR` and `TLBI` refetch
 the instructions after them. Entries with `V` = 0 are never cached, so
-making an entry valid needs no `TLBI`. The number of TLB entries is not
-part of the architecture.
+making an entry valid needs no `TLBI`. A valid entry is cached by the
+walk before its permissions are checked, so adding a permission (`W` to a
+page after a store page fault, `U` or `X`) also needs a `TLBI`: without it
+the retried access faults again. The number of TLB entries is not part of
+the architecture.

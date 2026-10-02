@@ -26,7 +26,7 @@ display_t* display_create(void) {
 	if (!display) error("Failed to allocate display!");
 
 	const SDL_WindowFlags flags = SDL_WINDOW_RESIZABLE;
-	display->window = SDL_CreateWindow(DISPLAY_TITLE, 800, 600, flags);
+	display->window = SDL_CreateWindow(DISPLAY_TITLE, 640, 480, flags);
 	if (!display->window) error(SDL_GetError());
 
 	display->renderer = SDL_CreateRenderer(display->window, NULL);
@@ -91,8 +91,8 @@ static void display_update(display_t* display, const videocard_t* videocard) {
 
 // Where a width x height frame is shown in the window: scaled to fit, with
 // the aspect ratio kept, in the middle.
-static SDL_FRect display_frame_rect(const display_t* display,
-									const float width, const float height) {
+static SDL_FRect display_frame_rect(const display_t* display, const float width,
+									const float height) {
 	int window_width, window_height;
 	SDL_GetWindowSize(display->window, &window_width, &window_height);
 	const float ratio =
@@ -112,10 +112,9 @@ static uint32_t display_clamp(const float value, const uint32_t size) {
 	return (uint32_t)value;
 }
 
-void display_frame_point(const display_t* display, const float x,
-						 const float y, const uint32_t width,
-						 const uint32_t height, uint32_t* frame_x,
-						 uint32_t* frame_y) {
+void display_frame_point(const display_t* display, const float x, const float y,
+						 const uint32_t width, const uint32_t height,
+						 uint32_t* frame_x, uint32_t* frame_y) {
 	const SDL_FRect rect =
 		display_frame_rect(display, (float)width, (float)height);
 	*frame_x = display_clamp((x - rect.x) * (float)width / rect.w, width);

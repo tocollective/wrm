@@ -1,5 +1,6 @@
 import { VIDEO_BASE, VIDEO_BUSY, VIDEO_ENABLE, VIDEO_MODE_640_480, VIDEO_8BPP,
     VIDEO_XY_SHIFT, VIDEO_FILL, VIDEO_COPY, VIDEO_EXPAND, SCREEN_WIDTH, SCREEN_HEIGHT,
+    SCREEN_BPP, SCREEN_PITCH,
     CELL_WIDTH, GLYPH_HEIGHT, GLYPH_BYTES, GLYPH_ROW_BYTES, PALETTE_BLACK, PALETTE_WHITE,
     PALETTE_BACKGROUND, PALETTE_FOREGROUND, UNICODE_MAX, UNICODE_SURROGATE_MIN,
     UNICODE_SURROGATE_MAX, UNICODE_REPLACEMENT, DECIMAL_BASE, HEX_TOP_SHIFT,
@@ -41,6 +42,7 @@ let FLOAT_FIXED_MIN_EXPONENT: Word = -4
 import { font, loadFont, glyphIndex } from "font/font.m"
 import { fontData, fontDataEnd } from "font/data.m"
 import { CACHE_BASE, CACHE_BYTES, CACHE_GLYPHS, glyphCacheInit, cacheGlyph } from "font/glyph_cache.m"
+import { debugPrint } from "debug_uart.m"
 
 // Video MMIO layout from docs/SPECIFICATION.md (Video card).
 type Video {
@@ -77,31 +79,70 @@ let mut column: UWord
 let mut row: UWord
 let mut outputFailed: Bool
 
+// The console stops drawing at its first failure and says why, once, on the
+// UART, which stays the kernel's diagnostic channel.
+let consoleFail(reason: *UByte, args: ...): Void {
+    if outputFailed return
+    outputFailed = true
+    debugPrint("LA/IX: console failed: ")
+    debugPrint(reason, args)
+    debugPrint("\n")
+}
+
+// FILL, COPY and EXPAND from VRAM finish within the store: no BUSY wait.
+// ERROR means nothing was drawn.
+let engineCommand(command: UWord): Bool {
+    video.command = command
+    let error: UWord = video.error
+    if error != 0 {
+        consoleFail("engine command $h, error $h", command, error)
+        return false
+    }
+    return true
+}
+
 let consoleInit(): Bool {
+    outputFailed = false
+    // Only DMA commands set BUSY: wait for one the firmware may have left.
     while video.status & VIDEO_BUSY != 0 {}
     video.control = 0
     video.mode = VIDEO_MODE_640_480 | VIDEO_8BPP
+    // The engine checks rectangles against its own pitches, not the mode:
+    // a mode the card did not take would draw a wrong screen without errors.
+    if video.width != SCREEN_WIDTH || video.height != SCREEN_HEIGHT ||
+        video.bpp != SCREEN_BPP || video.pitch != SCREEN_PITCH {
+        consoleFail("mode $h not taken ($ux$u, $u bpp)", video.mode, video.width,
+            video.height, video.bpp)
+        return false
+    }
     video.start = 0
     video.paletteIndex = 0
     video.paletteData = PALETTE_BLACK
     video.paletteData = PALETTE_WHITE
 
     video.dstBase = 0
-    video.dstPitch = SCREEN_WIDTH
+    video.dstPitch = SCREEN_PITCH
     video.dstXY = 0
     video.size = SCREEN_HEIGHT << VIDEO_XY_SHIFT | SCREEN_WIDTH
     video.fg = PALETTE_BACKGROUND
-    video.command = VIDEO_FILL
-    if video.error != 0 return false
+    if !engineCommand(VIDEO_FILL) return false
 
     let fontSize: UWord = (&fontDataEnd as UWord) - (&fontData as UWord)
-    if !loadFont(&fontData, fontSize) return false
-    if video.vramSize < CACHE_BASE + CACHE_BYTES return false
-    if !glyphCacheInit(font.count) return false
+    if !loadFont(&fontData, fontSize) {
+        consoleFail("invalid font index")
+        return false
+    }
+    if video.vramSize < CACHE_BASE + CACHE_BYTES {
+        consoleFail("VRAM of $h bytes is too small", video.vramSize)
+        return false
+    }
+    if !glyphCacheInit(font.count) {
+        consoleFail("glyph bitmaps unavailable on the boot disk")
+        return false
+    }
 
     column = 0
     row = 0
-    outputFailed = false
     video.control = VIDEO_ENABLE
     return true
 }
@@ -114,17 +155,17 @@ let newline(): Void {
     }
     // COPY supports overlap, so scroll by one character row.
     video.dstBase = 0
-    video.dstPitch = SCREEN_WIDTH
+    video.dstPitch = SCREEN_PITCH
     video.dstXY = 0
     video.srcBase = 0
-    video.srcPitch = SCREEN_WIDTH
+    video.srcPitch = SCREEN_PITCH
     video.srcXY = GLYPH_HEIGHT << VIDEO_XY_SHIFT
     video.size = SCROLL_HEIGHT << VIDEO_XY_SHIFT | SCREEN_WIDTH
-    video.command = VIDEO_COPY
+    if !engineCommand(VIDEO_COPY) return
     video.dstXY = SCROLL_HEIGHT << VIDEO_XY_SHIFT
     video.size = GLYPH_HEIGHT << VIDEO_XY_SHIFT | SCREEN_WIDTH
     video.fg = PALETTE_BACKGROUND
-    video.command = VIDEO_FILL
+    if !engineCommand(VIDEO_FILL) return
 }
 
 let putChar(c: UWord): Void {
@@ -140,16 +181,16 @@ let putChar(c: UWord): Void {
     let mut glyph: UWord = glyphIndex(c)
     if glyph == font.count glyph = font.fallback
     let advance: UWord = font.index[glyph].advance
-    while video.status & VIDEO_BUSY != 0 {}
     let slot: UWord = cacheGlyph(glyph)
     if slot == CACHE_GLYPHS {
-        outputFailed = true
+        consoleFail("glyph $h not readable from the boot disk", glyph)
         return
     }
     let cells: UWord = advance / CELL_WIDTH
     if column + cells > SCREEN_COLUMNS newline()
+    if outputFailed return
     video.dstBase = 0
-    video.dstPitch = SCREEN_WIDTH
+    video.dstPitch = SCREEN_PITCH
     video.dstXY = row * GLYPH_HEIGHT << VIDEO_XY_SHIFT | column * CELL_WIDTH
     video.srcBase = CACHE_BASE + slot * GLYPH_BYTES
     video.srcPitch = GLYPH_ROW_BYTES
@@ -157,7 +198,7 @@ let putChar(c: UWord): Void {
     video.size = GLYPH_HEIGHT << VIDEO_XY_SHIFT | advance
     video.fg = PALETTE_FOREGROUND
     video.bg = PALETTE_BACKGROUND
-    video.command = VIDEO_EXPAND
+    if !engineCommand(VIDEO_EXPAND) return
     column += cells
     if column == SCREEN_COLUMNS newline()
 }

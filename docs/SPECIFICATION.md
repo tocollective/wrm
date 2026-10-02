@@ -192,7 +192,7 @@ whatever software does with the first.
 | `0`           | power-on                  |
 | `1`           | a write to `RESET`        |
 | `2`           | the host's reset key (Ctrl+Alt+R) |
-| `3`           | reserved: a double fault  |
+| `3`           | reserved: a double fault halts the CPU instead, see [Exceptions](INSTRUCTIONS.md#exceptions) |
 | `4`           | the [watchdog](#watchdog) |
 
 ### Disks
@@ -250,12 +250,13 @@ until software writes 1 to it or starts the next command. `ERROR`, and the error
 | `1`     | unknown command, or `LIST` with `FLUSH`                       |
 | `2`     | no disk                                                       |
 | `3`     | `SECTOR` + `COUNT` runs past the end of the disk              |
-| `4`     | `ADDRESS` (`LIST` with `COMMAND.LIST`) is not a multiple of 4, or the transfer reached memory that isn't RAM |
+| `4`     | `ADDRESS` (`LIST` with `COMMAND.LIST`) is not a multiple of 4, or the transfer reached memory that isn't RAM or the VRAM window |
 | `5`     | write to a read-only disk image                               |
 | `6`     | the host failed to read, write or flush the image             |
 | `7`     | a descriptor's address or length is not a multiple of 4, or its length is 0 |
 
-The DMA reaches only RAM. It uses physical addresses and ignores the MMU.
+The DMA reaches RAM and the [VRAM window](#vram-window). It uses physical
+addresses and ignores the MMU.
 A word in ROM, in the I/O region or at an unmapped address stops the
 transfer with error 4. `ADDRESS` then points at that word, and `SECTOR`
 and `COUNT` at the sector it belongs to. A read has already stored the
@@ -475,8 +476,9 @@ the command fails with error 2 and draws nothing. `COPY` works like
 are copied as if through a buffer, so it can scroll. With different
 pitches the result of an overlap is undefined.
 
-`LOAD` reads RAM or ROM, so data can come straight from the firmware.
-`STORE` writes RAM only; it is the only way to read VRAM back. `ADDRESS`,
+`LOAD` reads RAM, ROM or the VRAM window, so data can come straight from
+the firmware. `STORE` writes RAM or the VRAM window; it is the engine's way
+to copy VRAM to RAM (the CPU can also read the VRAM window). `ADDRESS`,
 the VRAM offset and `COUNT` must be multiples of 4, and the VRAM range
 must lie inside VRAM. A DMA command that can't run finishes at once with
 the error; `COUNT` = 0 finishes at once without one. Otherwise `BUSY` is
@@ -529,7 +531,8 @@ VRAM is also mapped at `0xFC000000`–`0xFC3FFFFF`: byte N of VRAM is at
 cost in ticks beyond the access, and see the same bytes as the engine
 and the display: a store there shows at the end of the frame like a
 pixel the engine draws. DMA reaches it too, so a disk can read an image
-straight into VRAM and `LOAD` can copy within VRAM. Instructions can't
+straight into VRAM and `LOAD` can copy within VRAM; wherever a device's
+DMA reaches RAM, it reaches the VRAM window as well. Instructions can't
 run from it and page tables can't be in it.
 
 `LL` and `SC` work on it, but the engine's writes don't clear a
@@ -738,7 +741,8 @@ free receive descriptor wait, up to 64, and the next ones are lost.
 the card is off. Turning it on sets `RX_NEXT` and `TX_NEXT` to 0. The
 card sets `RX` when it has stored a frame, `TX` when it has sent one,
 `LOST` when a frame was lost, and `FAULT` when its DMA reached memory
-that isn't RAM (or ROM, for what it reads): then it stops at that
+that isn't RAM or the VRAM window (or ROM, for what it reads): then it
+stops at that
 descriptor and turns itself off. IRQ 8 is asserted while a bit of
 `PENDING` is set whose IRQ `CONTROL` enables (`FAULT` with either).
 Frames that come while the card is off are dropped.
@@ -811,7 +815,7 @@ registers can be changed while the voice plays and take effect with the
 next frame.
 
 The DMA uses physical addresses and ignores the MMU. A frame that is not
-in RAM or ROM, or a 16-bit value at an odd address, stops the voice: bit
+in RAM, ROM or the VRAM window, or a 16-bit value at an odd address, stops the voice: bit
 0 of its `CONTROL` is cleared and bit N of `FAULT` is set (without a
 signal).
 
@@ -878,7 +882,8 @@ number generator, so they are fit for keys. The device has no IRQ.
 | `0x00` | `DATA`   | R      | 32 random bits; every read gives new ones       |
 | `0x04` | `STATUS` | R      | bit 0 = seeded: the bits are not from the host  |
 
-A read of `DATA` never blocks and never returns the same bits twice; a
+A read of `DATA` never blocks and always uses up the next bits: a word is
+never handed out twice, though two random words can happen to be equal. A
 byte or half-word read gets the low bits and uses up the word as well.
 
 With a seed (`--seed=N`, or `--deterministic`, see the README) the bits
@@ -1010,7 +1015,7 @@ fails with error 6, and so does `OPEN` with `WRITE`; `WRITE` and
 | `8`     | all 16 handles are open                                         |
 | `9`     | a directory where a file has to be, or the other way round      |
 | `10`    | the directory is not empty                                      |
-| `11`    | the DMA reached memory it can't: not RAM, or not RAM or ROM for `WRITE` and paths |
+| `11`    | the DMA reached memory it can't: not RAM or the VRAM window, or also not ROM for `WRITE` and paths |
 | `12`    | `COUNT` is too small for the record                             |
 | `13`    | the host refused or failed, e.g. no permission or no space      |
 | `14`    | a symbolic link leads out of the folder                         |
@@ -1060,8 +1065,10 @@ runs once the CPU has halted, the watchdog neither.
 
 ## Reset
 
-On reset all registers are zero and `pc = 0xFE000000`, so execution starts
-at the first byte of the firmware image. The CPU is in supervisor mode,
+On reset all registers are zero except `STATUS` = `0x10`, and
+`pc = 0xFE000000`, so execution starts at the first byte of the firmware
+image. `EXL` is set: a fault halts the CPU until software installs a
+handler, see [Exceptions](INSTRUCTIONS.md#exceptions). The CPU is in supervisor mode,
 the MMU is off and its TLB empty. `CYCLE` and `INSTRET` start from zero.
 
 The power controller's `RESET` does the same at run time: the CPU and all

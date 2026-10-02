@@ -101,11 +101,13 @@ class KernelContractTests(unittest.TestCase):
 
     def test_assembly_opcodes_and_jump_targets(self):
         paths = (LAIX / "src/start.asm", LAIX / "src/trap.asm", LAIX / "src/font/data.asm",
-                 LAIX / "tests/trap_fault.asm", LAIX / "tests/stack_guard.asm")
+                 LAIX / "tests/trap_fault.asm", LAIX / "tests/stack_guard.asm",
+                 LAIX / "tests/null_call.asm", LAIX / "tests/text_write.asm",
+                 LAIX / "tests/data_exec.asm")
         parsers = [parse_asm(path) for path in paths]
         labels = {label for parser in parsers for statement in parser.stmts
                   for label in statement.labels}
-        labels.update(("main", "trapDispatch"))
+        labels.update(("main", "trapDispatch", "trapExpect", "trapBadStack"))
         jumps = {"j", "call", "beq", "bne", "blt", "bge", "bltu", "bgeu",
                  "beqz", "bnez", "bltz", "bgez", "bgtz", "blez"}
         for parser in parsers:
@@ -141,8 +143,12 @@ class KernelContractTests(unittest.TestCase):
         for field in ("EPC", "STATUS", "CAUSE", "BADADDR", "FCSR", "PTBR"):
             self.assertIn(("r1", f"TF_{field}(sp)"), saved)
         self.assertFalse(any(st.op in ("ret", "tlbi", "tlbi.all") for st in body))
-        # Unsupported user entry must branch away before writing any stack.
-        branch = next(i for i, st in enumerate(body) if st.op == "bnez")
+        # Origin must be checked before any memory access.
+        branch = next(i for i, st in enumerate(body) if st.op == "beqz")
+        self.assertEqual(body[branch].args, ["sp", ".kernel_stack"])
+        self.assertEqual((body[branch - 1].op, body[branch - 1].args),
+                         ("andi", ["sp", "sp", "STATUS_PUM"]))
+        self.assertLess(branch, next(i for i, st in enumerate(body) if st.op == "lw"))
         self.assertLess(branch, next(i for i, st in enumerate(body) if st.op == "sw"))
 
     def test_fatal_output_has_no_screen_or_disk_dependency(self):
@@ -155,6 +161,30 @@ class KernelContractTests(unittest.TestCase):
         self.assertFalse(any(st.op == "call" for st in early))
         self.assertFalse(any("sp" in arg for st in early for arg in st.args))
 
+    def test_early_panic_prints_trap_registers_only_after_a_trap(self):
+        start = parse_asm(LAIX / "src/start.asm")
+        statements = [st for st in start.stmts if st.op or st.labels]
+        def block(label):
+            # A routine runs to the next global label, a local label to the next label.
+            begin = next(i for i, st in enumerate(statements) if label in st.labels)
+            ends = (lambda st: st.labels) if "." in label else (
+                lambda st: any("." not in name for name in st.labels))
+            end = next(i for i, st in enumerate(statements[begin + 1:], begin + 1) if ends(st))
+            return [st for st in statements[begin:end] if st.op]
+        # Boot info and RAM failures have no trap: CAUSE, EPC and BADADDR are
+        # stale there.
+        self.assertFalse(any(st.op == "mfcr" for st in block("earlyPanic")))
+        self.assertEqual((block("earlyPanic")[-1].op, block("earlyPanic")[-1].args),
+                         ("j", ["earlyString"]))
+        for label in ("kernelStart.bad_info", "kernelStart.bad_ram"):
+            jump = block(label)
+            self.assertEqual(len(jump), 2, label)
+            self.assertEqual((jump[-1].op, jump[-1].args), ("j", ["earlyPanic"]))
+        self.assertEqual((block("earlyTrapEntry")[-1].op, block("earlyTrapEntry")[-1].args),
+                         ("j", ["earlyTrapPanic"]))
+        reported = {st.args[1] for st in block("earlyTrapReport") if st.op == "mfcr"}
+        self.assertEqual(reported, {"cause", "epc", "badaddr"})
+
     def test_stack_bounds_checked_before_frame_allocation(self):
         statements = parse_asm(LAIX / "src/trap.asm").stmts
         allocate = next(i for i, st in enumerate(statements)
@@ -162,10 +192,43 @@ class KernelContractTests(unittest.TestCase):
         checks = [st for st in statements[:allocate] if st.op in ("bltu", "bnez")
                   and st.args[-1] == ".bad_stack"]
         self.assertEqual([st.op for st in checks], ["bltu", "bltu", "bnez"])
-        self.assertTrue(any(st.op == "la" and st.args == ["r1", "kernelStackBottom"]
+        self.assertTrue(any(st.op == "lw" and st.args == ["r1", "KERNEL_STACK_BOTTOM(r0)"]
                             for st in statements[:allocate]))
-        self.assertTrue(any(st.op == "la" and st.args == ["r1", "kernelStackTop"]
+        self.assertTrue(any(st.op == "lw" and st.args == ["r1", "KERNEL_STACK_TOP(r0)"]
                             for st in statements[:allocate]))
+
+    def test_start_page_aligns_rodata_and_data_for_wx(self):
+        # start.o is linked first, so the alignment of its own sections starts
+        # the .rodata and .data output sections on fresh pages (mmu.m W^X).
+        script = (LAIX / "build.sh").read_text()
+        self.assertIn('set -- "$obj_dir/start.o"', script)
+        statements = [st for st in parse_asm(LAIX / "src/start.asm").stmts if st.op]
+        for name in (".rodata", ".data"):
+            with self.subTest(section=name):
+                i = next(i for i, st in enumerate(statements)
+                         if st.op == ".section" and st.section_spec[0] == name)
+                self.assertEqual((statements[i + 1].op, statements[i + 1].args),
+                                 (".align", ["PAGE_SIZE"]))
+
+    def test_low_entry_state_reserved_and_initialized_before_ivec(self):
+        parser = parse_asm(LAIX / "src/start.asm")
+        constants = asm_constants(parser)
+        slots = [constants[name] for name in ("KERNEL_SP", "KERNEL_STACK_BOTTOM",
+                                              "KERNEL_STACK_TOP", "TRAP_SAVED_R1")]
+        end = constants["BOOT_INFO_END"]
+        self.assertEqual(slots, list(range(end - 16, end, 4)))
+        # Reachable by signed offset(r0), outside the unmapped NULL page and
+        # above everything boot info and its device table may use.
+        self.assertTrue(all(constants["PAGE_SIZE"] <= slot < 8192 and slot % 4 == 0
+                            for slot in slots))
+        self.assertEqual(min(slots), constants["BOOT_INFO_LIMIT"])
+        statements = parser.stmts
+        install = next(i for i, st in enumerate(statements)
+                       if st.op == "la" and st.args == ["r1", "trapEntry"])
+        stores = {(st.args[0], st.args[1]) for st in statements[:install] if st.op == "sw"}
+        for pair in (("sp", "KERNEL_SP(r0)"), ("sp", "KERNEL_STACK_TOP(r0)"),
+                     ("r1", "KERNEL_STACK_BOTTOM(r0)"), ("r0", "TRAP_SAVED_R1(r0)")):
+            self.assertIn(pair, stores)
 
 
 if __name__ == "__main__":

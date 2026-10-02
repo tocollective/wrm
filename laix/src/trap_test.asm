@@ -25,10 +25,12 @@ TEST_SAVE_R29 = TEST_SAVE_BASE + 19 * WORD_BYTES
 TEST_SAVE_RA = TEST_SAVE_BASE + 20 * WORD_BYTES
 TEST_SAVE_FCSR = TEST_SAVE_RA + WORD_BYTES
 TEST_SAVE_SP = TEST_SAVE_FCSR + WORD_BYTES
-TEST_FRAME_BYTES = TEST_SAVE_SP + STACK_ALIGNMENT
+TEST_SAVE_KIND = TEST_SAVE_SP + WORD_BYTES
+TEST_FRAME_BYTES = TEST_SAVE_KIND + WORD_BYTES
+TEST_REG_SYSCALL = 9
 TEST_FAIL_SP = GPR_COUNT
 TEST_FAIL_FCSR = GPR_COUNT + 1
-; Boot-time context check through the real BREAK -> M -> IRET path.
+; Boot-time context checks through armed BREAK and unknown SYSCALL -> M -> IRET.
 ; Result 0 = OK, 1..31 = damaged GPR, 32 = SP, 33 = FCSR.
 ; Retains callee-saved registers, tp and the caller's FCSR as required.
     .text
@@ -59,6 +61,14 @@ trapRegisterSelfTest:
     mfcr r1, fcsr
     sw r1, TEST_SAVE_FCSR(sp)
     sw sp, TEST_SAVE_SP(sp)
+    sw r0, TEST_SAVE_KIND(sp)           ; 0 = BREAK, 1 = unknown SYSCALL
+.seed:
+    li r1, CAUSE_BREAKPOINT            ; arm only the trap this pass raises
+    lw r2, TEST_SAVE_KIND(sp)
+    beqz r2, .expect
+    li r1, CAUSE_SYSCALL
+.expect:
+    call trapExpect                    ; clobbers caller-saved state, seeded below
     li r1, TEST_FCSR                   ; RUP and NX, distinguish from kernel FCSR
     mtcr fcsr, r1
     li r1, TEST_GPR_SEED + 1
@@ -91,7 +101,16 @@ trapRegisterSelfTest:
     li r28, TEST_GPR_SEED + 28
     li r29, TEST_GPR_SEED + 29
     li ra, TEST_GPR_SEED + 31
+    lw r1, TEST_SAVE_KIND(sp)
+    beqz r1, .break
+    li r9, SYSCALL_UNSUPPORTED
+    li r1, TEST_GPR_SEED + 1
+    syscall
+    j .capture
+.break:
+    li r1, TEST_GPR_SEED + 1
     break
+.capture:
     ; Capture every returned register before using any as temporaries.
     sw r0, TF_R0(sp)
     sw r1, TF_R1(sp)
@@ -135,6 +154,17 @@ trapRegisterSelfTest:
 .zero:
     li r4, 0
 .compare:
+    lw r5, TEST_SAVE_KIND(sp)
+    beqz r5, .compare_value
+    li r5, REG_RESULT
+    bne r1, r5, .syscall_number
+    li r4, -ERRNO_ENOSYS
+    j .compare_value
+.syscall_number:
+    li r5, TEST_REG_SYSCALL
+    bne r1, r5, .compare_value
+    li r4, SYSCALL_UNSUPPORTED
+.compare_value:
     bne r3, r4, .done
     addi r1, r1, 1
     addi r2, r2, WORD_BYTES
@@ -152,6 +182,12 @@ trapRegisterSelfTest:
     mfcr r3, fcsr
     li r4, TEST_FCSR
     bne r3, r4, .done
+    lw r1, TEST_SAVE_KIND(sp)
+    bnez r1, .passed
+    li r1, 1
+    sw r1, TEST_SAVE_KIND(sp)
+    j .seed
+.passed:
     li r1, 0
 .done:
     lw r2, TEST_SAVE_FCSR(sp)

@@ -14,7 +14,8 @@ let memoryInit(ramSize: UWord): Bool {
     let reservedEnd: UWord = (usedEnd + PAGE_MASK) & ~PAGE_MASK
     let ramEnd: UWord = ramSize & ~PAGE_MASK
     if reservedEnd > ramEnd return false
-    // Reserve low firmware/boot memory, the loaded image and ALL BSS,
+    // Reserve low firmware/boot memory (including the entry-state words),
+    // the loaded image and ALL BSS,
     // including the guard page, kernel stack and bootstrap page tables.
     kernelReservedEnd = reservedEnd
     kernelRamEnd = ramEnd
