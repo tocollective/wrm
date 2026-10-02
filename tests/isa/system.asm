@@ -81,15 +81,16 @@ test_main:
 	mfcr r4, 3
 	bne r4, r1, fail
 
-	; ---- STATUS: only IE, PIE, UM, PUM, EXL exist
+	; ---- STATUS: only IE, PIE, UM, PUM, EXL, SS, PSS exist (SS steps
+	; nothing while EXL is set)
 	li r28, 20
-	li r1, 0xFFFFFFFA           ; PIE, PUM, EXL and every undefined bit
+	li r1, 0xFFFFFFFA           ; PIE, PUM, EXL, SS, PSS and every undefined bit
 	mtcr status, r1
 	mfcr r4, status
-	li r3, 0x1A
+	li r3, 0x7A
 	bne r4, r3, fail
 	li r28, 21
-	li r1, 0xFFFFFFE0
+	li r1, 0xFFFFFF80
 	mtcr status, r1
 	mfcr r4, status
 	bnez r4, fail

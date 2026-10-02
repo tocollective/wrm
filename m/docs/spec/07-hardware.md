@@ -78,7 +78,8 @@ let putc(c: UByte): Void {
   кодируется в `imm14` инструкции. Переменная — ошибка.
 - Номера (INSTRUCTIONS, «Control registers»): `STATUS` 0, `EPC` 1,
   `IVEC` 2, `SCRATCH` 3, `CAUSE` 4, `BADADDR` 5, `PTBR` 6, `CYCLE` 7,
-  `CYCLEH` 8, `INSTRET` 9, `INSTRETH` 10, `CPUID` 11. Язык имён не
+  `CYCLEH` 8, `INSTRET` 9, `INSTRETH` 10, `CPUID` 11, `TADDR0` 12,
+  `TCTRL0` 13, `TADDR1` 14, `TCTRL1` 15. Язык имён не
   вводит: их объявляют константами.
 - `mtcr` не переставляется с обращениями к памяти: после `mtcr(PTBR, ...)`
   следующие обращения уже идут через новую таблицу страниц.

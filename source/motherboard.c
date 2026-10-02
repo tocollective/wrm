@@ -54,6 +54,165 @@ static ram_t* motherboard_find_ram(motherboard_t* mb, const uint32_t address,
 	return NULL;
 }
 
+// Points each chunk of the RAM region at the memory of its slot.
+static void motherboard_map_ram(motherboard_t* mb) {
+	uint32_t chunk = 0;
+	for (int i = 0; i < RAM_SLOT_COUNT; i++) {
+		const ram_slot_t* slot = &mb->ram_slot[i];
+		if (!slot->installed) continue;
+		for (size_t offset = 0; offset < slot->ram->size;
+			 offset += MB_RAM_CHUNK_SIZE)
+			mb->ram_map[chunk++] = slot->ram->data + offset;
+	}
+}
+
+// Host memory of a RAM access that stays within a chunk (every aligned
+// one does), NULL otherwise.
+static uint8_t* motherboard_ram(motherboard_t* mb, const uint32_t address,
+								const uint8_t size) {
+	const uint32_t chunk = address >> MB_RAM_CHUNK_SHIFT;
+	const uint32_t offset = address & (MB_RAM_CHUNK_SIZE - 1);
+	if (chunk >= MB_RAM_CHUNKS || offset + size > MB_RAM_CHUNK_SIZE)
+		return NULL;
+	uint8_t* data = mb->ram_map[chunk];
+	return data ? data + offset : NULL;
+}
+
+// Memory is little-endian; size is 1, 2 or 4.
+static uint32_t motherboard_load(const uint8_t* p, const uint8_t size) {
+	switch (size) {
+		case 1:
+			return p[0];
+		case 2:
+			return (uint32_t)p[0] | (uint32_t)p[1] << 8;
+	}
+	return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16
+		 | (uint32_t)p[3] << 24;
+}
+
+static void motherboard_store(uint8_t* p, const uint8_t size,
+							  const uint32_t value) {
+	p[0] = value & 0xFF;
+	if (size == 1) return;
+	p[1] = (value >> 8) & 0xFF;
+	if (size == 2) return;
+	p[2] = (value >> 16) & 0xFF;
+	p[3] = value >> 24;
+}
+
+// ---- clocked devices --------------------------------------------------------
+
+static void motherboard_timed_run(motherboard_t* mb, const int device,
+								  const uint64_t ticks) {
+	switch (device) {
+		case MB_TIMED_PIT:
+			pit_run(mb->pit, ticks);
+			return;
+		case MB_TIMED_VIDEO:
+			videocard_run(mb->videocard, ticks);
+			return;
+		case MB_TIMED_FLOPPY:
+			disk_run(mb->floppy, ticks);
+			return;
+		case MB_TIMED_BEEPER:
+			beeper_run(mb->beeper, ticks);
+			return;
+		case MB_TIMED_AUDIO:
+			audiocard_run(mb->audiocard, ticks);
+			return;
+		case MB_TIMED_RTC:
+			rtc_run(mb->rtc, ticks);
+			return;
+	}
+	disk_run(mb->disk[device - MB_TIMED_DISK0], ticks);
+}
+
+// ticks from now until the device's next event, TICKS_NEVER if none
+static uint64_t motherboard_timed_next(const motherboard_t* mb,
+									   const int device) {
+	switch (device) {
+		case MB_TIMED_PIT:
+			return pit_next_event(mb->pit);
+		case MB_TIMED_VIDEO:
+			return videocard_next_event(mb->videocard);
+		case MB_TIMED_FLOPPY:
+			return disk_next_event(mb->floppy);
+		case MB_TIMED_BEEPER:
+			return TICKS_NEVER; // no IRQ, no DMA
+		case MB_TIMED_AUDIO:
+			return audiocard_next_event(mb->audiocard);
+		case MB_TIMED_RTC:
+			return rtc_next_event(mb->rtc);
+	}
+	return disk_next_event(mb->disk[device - MB_TIMED_DISK0]);
+}
+
+// Runs the ticks the device is behind, up to the current one.
+static void motherboard_sync(motherboard_t* mb, const int device) {
+	const uint64_t behind = mb->tick - mb->synced[device];
+	if (behind == 0) return;
+	motherboard_timed_run(mb, device, behind);
+	mb->synced[device] = mb->tick;
+}
+
+// Works out when the device runs next; it is up to date.
+static void motherboard_schedule(motherboard_t* mb, const int device) {
+	const uint64_t next = motherboard_timed_next(mb, device);
+	mb->due[device] = next == TICKS_NEVER ? TICKS_NEVER : mb->tick + next;
+	if (mb->due[device] < mb->next_due) mb->next_due = mb->due[device];
+}
+
+// Before the host looks at the devices: brings them all up to date.
+static void motherboard_sync_all(motherboard_t* mb) {
+	for (int i = 0; i < MB_TIMED_COUNT; i++) motherboard_sync(mb, i);
+}
+
+// After the host may have changed the devices: works out every next event.
+static void motherboard_schedule_all(motherboard_t* mb) {
+	mb->next_due = TICKS_NEVER;
+	for (int i = 0; i < MB_TIMED_COUNT; i++) {
+		motherboard_sync(mb, i);
+		motherboard_schedule(mb, i);
+	}
+}
+
+// Runs the devices whose event is on the current tick, in tick order.
+static void motherboard_run_due(motherboard_t* mb) {
+	mb->next_due = TICKS_NEVER;
+	for (int i = 0; i < MB_TIMED_COUNT; i++) {
+		if (mb->due[i] <= mb->tick) {
+			motherboard_sync(mb, i);
+			const uint64_t next = motherboard_timed_next(mb, i);
+			mb->due[i] = next == TICKS_NEVER ? TICKS_NEVER : mb->tick + next;
+		}
+		if (mb->due[i] < mb->next_due) mb->next_due = mb->due[i];
+	}
+}
+
+// The clocked device in the I/O page at page, -1 if there is none.
+static int motherboard_timed_device(const uint32_t page) {
+	switch (page) {
+		case MB_PIT_BASE:
+			return MB_TIMED_PIT;
+		case MB_VIDEO_BASE:
+			return MB_TIMED_VIDEO;
+		case MB_FLOPPY_BASE:
+			return MB_TIMED_FLOPPY;
+		case MB_BEEPER_BASE:
+			return MB_TIMED_BEEPER;
+		case MB_AUDIO_BASE:
+			return MB_TIMED_AUDIO;
+		case MB_RTC_BASE:
+			return MB_TIMED_RTC;
+	}
+	const uint32_t index = (page - MB_DISK0_BASE) / MB_IO_PAGE_SIZE;
+	if (page >= MB_DISK0_BASE && index < DISK_COUNT)
+		return MB_TIMED_DISK0 + (int)index;
+	return -1;
+}
+
+// ---- I/O --------------------------------------------------------------------
+
 // Device registers are 32-bit and must be accessed at a multiple of 4;
 // narrower accesses see the low bits.
 static uint32_t motherboard_io_mask(const uint8_t size) {
@@ -117,6 +276,11 @@ static bool motherboard_io_read(motherboard_t* mb, const uint32_t address,
 		return false;
 	}
 
+	// a clocked device catches up first, and may need to run at another
+	// tick after the access
+	const int timed = motherboard_timed_device(page);
+	if (timed >= 0) motherboard_sync(mb, timed);
+
 	bool fail = true;
 	disk_t* disk = motherboard_find_disk(mb, page);
 	if (disk) fail = disk_read(disk, offset, size, value);
@@ -158,21 +322,16 @@ static bool motherboard_io_read(motherboard_t* mb, const uint32_t address,
 			fail = rtc_read(mb->rtc, offset, size, value);
 			break;
 	}
+	if (timed >= 0) motherboard_schedule(mb, timed);
 	if (!fail) *value &= motherboard_io_mask(size);
 	return fail;
 }
 
 // returns true on bus error
-static bool motherboard_io_write(motherboard_t* mb, const uint32_t address,
-								 const uint8_t size, const uint32_t value) {
-	const uint32_t page = address & ~(MB_IO_PAGE_SIZE - 1);
-	const uint32_t offset = address & (MB_IO_PAGE_SIZE - 1);
-	if (offset & 3) return true;
-	if (offset == MB_IO_ID) {
-		uint32_t id;
-		return !motherboard_device_id(page, &id); // read-only
-	}
-
+static bool motherboard_io_write_device(motherboard_t* mb, const uint32_t page,
+										const uint32_t offset,
+										const uint8_t size,
+										const uint32_t value) {
 	disk_t* disk = motherboard_find_disk(mb, page);
 	if (disk) return disk_write(disk, offset, size, value);
 	switch (page) {
@@ -205,30 +364,46 @@ static bool motherboard_io_write(motherboard_t* mb, const uint32_t address,
 }
 
 // returns true on bus error
+static bool motherboard_io_write(motherboard_t* mb, const uint32_t address,
+								 const uint8_t size, const uint32_t value) {
+	const uint32_t page = address & ~(MB_IO_PAGE_SIZE - 1);
+	const uint32_t offset = address & (MB_IO_PAGE_SIZE - 1);
+	if (offset & 3) return true;
+	if (offset == MB_IO_ID) {
+		uint32_t id;
+		return !motherboard_device_id(page, &id); // read-only
+	}
+
+	// as for a read: the write may start a transfer, or stop a timer
+	const int timed = motherboard_timed_device(page);
+	if (timed >= 0) motherboard_sync(mb, timed);
+	const bool fail = motherboard_io_write_device(mb, page, offset, size, value);
+	if (timed >= 0) motherboard_schedule(mb, timed);
+	return fail;
+}
+
+// returns true on bus error
 static bool motherboard_bus_read(void* ctx, const uint32_t address,
 								 const uint8_t size, uint32_t* value) {
 	motherboard_t* mb = ctx;
 
+	const uint8_t* host = motherboard_ram(mb, address, size);
+	if (host) {
+		*value = motherboard_load(host, size);
+		return false;
+	}
+
 	if (address >= MB_ROM_BASE) {
 		const size_t offset = address - MB_ROM_BASE;
 		if (offset + size > mb->rom->size) return true;
-		switch (size) {
-			case 1:
-				*value = rom_peek8(mb->rom, offset);
-				return false;
-			case 2:
-				*value = rom_peek16(mb->rom, offset);
-				return false;
-			case 4:
-				*value = rom_peek32(mb->rom, offset);
-				return false;
-		}
-		return true;
+		*value = motherboard_load(mb->rom->data + offset, size);
+		return false;
 	}
 
 	if (address >= MB_IO_BASE)
 		return motherboard_io_read(mb, address, size, value);
 
+	// unaligned, across two chunks
 	size_t offset = 0;
 	ram_t* ram = motherboard_find_ram(mb, address, &offset);
 	if (!ram || offset + size > ram->size) return true;
@@ -262,6 +437,14 @@ static bool motherboard_bus_write(void* ctx, const uint32_t address,
 								  const uint8_t size, const uint32_t value) {
 	motherboard_t* mb = ctx;
 
+	uint8_t* host = motherboard_ram(mb, address, size);
+	if (host) {
+		motherboard_store(host, size, value);
+		if (mb->cpu->reservation_valid)
+			cpu_invalidate_reservation(mb->cpu, address, size);
+		return false;
+	}
+
 	if (address >= MB_ROM_BASE) return true; // ROM is read-only
 	if (address >= MB_IO_BASE) {
 		const bool failed = motherboard_io_write(mb, address, size, value);
@@ -269,6 +452,7 @@ static bool motherboard_bus_write(void* ctx, const uint32_t address,
 		return failed;
 	}
 
+	// unaligned, across two chunks
 	size_t offset = 0;
 	ram_t* ram = motherboard_find_ram(mb, address, &offset);
 	if (!ram || offset + size > ram->size) return true;
@@ -386,6 +570,7 @@ motherboard_t* motherboard_create(void) {
 	}
 
 	if (motherboard_ram_slots_check(mb)) error("Can't run without RAM.");
+	motherboard_map_ram(mb);
 
 	mb->rom = rom_create(ROM_MAX_SIZE);
 	rom_load(mb->rom, cfg->firm_path);
@@ -491,6 +676,7 @@ void motherboard_destroy(motherboard_t* mb) {
 
 void motherboard_reset(motherboard_t* mb, const power_reset_cause_t cause) {
 	if (!mb) return;
+	motherboard_sync_all(mb); // the ticks before the reset still happened
 	cpu_reset(mb->cpu);
 	keyboard_reset(mb->keyboard);
 	uart_reset(mb->uart);
@@ -505,21 +691,46 @@ void motherboard_reset(motherboard_t* mb, const power_reset_cause_t cause) {
 	audiocard_reset(mb->audiocard);
 	rtc_reset(mb->rtc);
 	pic_reset(mb->pic);
+	motherboard_schedule_all(mb);
 }
 
-void motherboard_tick(motherboard_t* mb) {
-	if (!mb) return;
-	pit_tick(mb->pit);
-	for (int i = 0; i < DISK_COUNT; i++) disk_tick(mb->disk[i]);
-	videocard_tick(mb->videocard);
-	disk_tick(mb->floppy);
-	beeper_tick(mb->beeper);
-	audiocard_tick(mb->audiocard);
-	rtc_tick(mb->rtc);
-	cpu_set_irq(mb->cpu, pic_irq(mb->pic));
-	cpu_update(mb->cpu);
+bool motherboard_stopped(const motherboard_t* mb) {
+	return mb->cpu->halted || mb->power->request == POWER_REQUEST_OFF;
+}
 
-	// requested by a store the CPU has just made
-	if (mb->power->request == POWER_REQUEST_RESET)
-		motherboard_reset(mb, POWER_RESET_CAUSE_SOFTWARE);
+// Every tick the devices that are due run first, then the CPU sees the IRQ
+// line and advances its pipeline.
+uint64_t motherboard_run(motherboard_t* mb, const uint64_t ticks) {
+	if (!mb) return 0;
+	cpu_t* cpu = mb->cpu;
+	const uint64_t start = mb->tick;
+	const uint64_t end = start + ticks;
+	motherboard_schedule_all(mb); // the host may have changed the devices
+	while (mb->tick < end && !motherboard_stopped(mb) && !cpu->debug.stopped) {
+		// Asleep in WFI with the IRQ line low: only a device event can
+		// raise it, so the ticks up to the next one just count cycles
+		// (unless the debugger is to stop the CPU there: breakpoints and
+		// watchpoints can't hit before it wakes).
+		if (cpu->waiting && !cpu->debug.pause && !cpu->debug.stepping
+			&& !pic_irq(mb->pic)) {
+			const uint64_t until =
+				mb->next_due - 1 < end ? mb->next_due - 1 : end;
+			if (until > mb->tick) {
+				cpu_sleep(cpu, until - mb->tick);
+				mb->tick = until;
+				continue;
+			}
+		}
+
+		mb->tick++;
+		if (mb->tick >= mb->next_due) motherboard_run_due(mb);
+		cpu_set_irq(cpu, pic_irq(mb->pic));
+		cpu_update(cpu);
+
+		// requested by a store the CPU has just made
+		if (mb->power->request == POWER_REQUEST_RESET)
+			motherboard_reset(mb, POWER_RESET_CAUSE_SOFTWARE);
+	}
+	motherboard_sync_all(mb);
+	return mb->tick - start;
 }

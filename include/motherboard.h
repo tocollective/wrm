@@ -84,10 +84,33 @@ typedef struct ram_slot {
 	bool installed;
 } ram_slot_t;
 
+// The RAM region seen in 1MB chunks, the smallest slot: every slot starts
+// and ends on a chunk, so an access within a chunk is within one slot.
+#define MB_RAM_CHUNK_SHIFT 20
+#define MB_RAM_CHUNK_SIZE (1u << MB_RAM_CHUNK_SHIFT)
+#define MB_RAM_CHUNKS (RAM_SLOT_COUNT * 32) // slots of up to 32MB
+
+// Devices that run on the clock, in the order they tick. Each one runs
+// only when it has to: on the tick of its next event (a DMA word, the end
+// of a frame, a timer expiring; see the devices' *_next_event) and before
+// the CPU accesses its registers. In between it falls behind and catches
+// up in one go, exactly as if it had ticked every time.
+typedef enum mb_timed {
+	MB_TIMED_PIT,
+	MB_TIMED_DISK0, // disk N is MB_TIMED_DISK0 + N
+	MB_TIMED_VIDEO = MB_TIMED_DISK0 + DISK_COUNT,
+	MB_TIMED_FLOPPY,
+	MB_TIMED_BEEPER,
+	MB_TIMED_AUDIO,
+	MB_TIMED_RTC,
+	MB_TIMED_COUNT,
+} mb_timed_t;
+
 typedef struct motherboard {
 	sys_clock_t* clock;
 	cpu_t* cpu;
 	ram_slot_t ram_slot[RAM_SLOT_COUNT];
+	uint8_t* ram_map[MB_RAM_CHUNKS]; // host memory of each chunk, NULL = none
 	rom_t* rom;
 	pic_t* pic;
 	keyboard_t* keyboard;
@@ -102,6 +125,11 @@ typedef struct motherboard {
 	netcard_t* netcard;
 	audiocard_t* audiocard;
 	rtc_t* rtc;
+
+	uint64_t tick; // clock ticks since power-on, the one running included
+	uint64_t synced[MB_TIMED_COUNT]; // the tick each device has run up to
+	uint64_t due[MB_TIMED_COUNT]; // the tick it runs next, or TICKS_NEVER
+	uint64_t next_due; // the earliest of them
 } motherboard_t;
 
 motherboard_t* motherboard_create(void);
@@ -110,7 +138,11 @@ void motherboard_destroy(motherboard_t* mb);
 // Resets the CPU and every device; RAM keeps its contents. cause is what
 // the power controller's RESET_CAUSE then reads.
 void motherboard_reset(motherboard_t* mb, const power_reset_cause_t cause);
-// Advances the machine by one clock tick.
-void motherboard_tick(motherboard_t* mb);
+// Runs the machine for that many clock ticks, or until it stops (powered
+// off, halted, or by the debugger); returns the ticks run. On return every device is up to
+// date, so the host can look at them and feed them input.
+uint64_t motherboard_run(motherboard_t* mb, const uint64_t ticks);
+// Nothing will run any more: powered off, or the CPU is halted.
+bool motherboard_stopped(const motherboard_t* mb);
 
 #endif // WRM_MOTHERBOARD_H

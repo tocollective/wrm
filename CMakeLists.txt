@@ -104,6 +104,23 @@ else()
     target_compile_options(${PROJECT_NAME} PRIVATE -Wall -Wextra)
 endif()
 
+# Sanitizers for our own code, e.g. -DWRM081632_SANITIZE=address,undefined:
+# the guest drives device registers and DMA, so a bad index there is a
+# bug in the host process. Any report stops the emulator with an error.
+set(WRM081632_SANITIZE "" CACHE STRING
+    "Sanitizers to build the emulator with (GCC/Clang -fsanitize=...)")
+if(WRM081632_SANITIZE)
+    if(MSVC)
+        message(FATAL_ERROR "WRM081632_SANITIZE needs GCC or Clang")
+    endif()
+    target_compile_options(${PROJECT_NAME} PRIVATE
+        -fsanitize=${WRM081632_SANITIZE}
+        -fno-sanitize-recover=all
+        -fno-omit-frame-pointer)
+    target_link_options(${PROJECT_NAME} PRIVATE
+        -fsanitize=${WRM081632_SANITIZE})
+endif()
+
 # the network card's sockets: Winsock on Windows; elsewhere they are in
 # libc (on the web Emscripten turns them into WebSockets)
 if(WIN32)

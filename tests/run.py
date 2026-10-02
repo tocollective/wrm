@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Runs the WRM.081632 test ROMs.
+r"""Runs the WRM.081632 test ROMs.
 
 Each tests/<group>/<name>.asm is assembled with tools/asm.py and run in the
 emulator with --headless. The harness (tests/common/harness.asm) prints
@@ -18,6 +18,10 @@ A test can set up the machine with comment lines in its source:
   ; @args ARGS      more emulator options, e.g. --ram 4M,2M
   ; @rom FILE.m     run a ROM compiled from M (relative to the test, e.g.
                     the firmware) instead of the test itself
+  ; @input EVENT    a line of the input script (--input, see
+                    include/input.h), e.g. "@input 1000 key 4 down"
+  ; @stdin TEXT     bytes for the emulator's stdin, the UART's RX line,
+                    with \n, \t, \\ and \xNN escapes; several add up
 Each @hdd attaches the next disk, 0 then 1.
 
 usage: tests/run.py [--emulator PATH] [tests...]
@@ -63,8 +67,9 @@ def test_name(path):
 
 def read_directives(path):
 	"""Returns the @hdd specs, the @floppy spec (or None), the @args
-	options and the @rom source (or None) of a test."""
-	hdds, floppy, args, rom = [], None, [], None
+	options, the @rom source (or None), the @input lines and the @stdin
+	bytes of a test."""
+	hdds, floppy, args, rom, script, stdin = [], None, [], None, [], b""
 	with open(path, encoding="utf-8") as f:
 		for line in f:
 			m = DIRECTIVE.match(line)
@@ -79,9 +84,13 @@ def read_directives(path):
 				args += shlex.split(value)
 			elif name == "rom":
 				rom = value
+			elif name == "input":
+				script.append(value)
+			elif name == "stdin":
+				stdin += value.encode("latin-1").decode("unicode_escape").encode("latin-1")
 			else:
 				raise ValueError(f"unknown directive @{name}")
-	return hdds, floppy, args, rom
+	return hdds, floppy, args, rom, script, stdin
 
 
 def pattern_disk(sectors):
@@ -107,7 +116,7 @@ def run_test(path, emulator, timeout, workdir):
 	base = os.path.join(workdir, test_name(path).replace("/", "_"))
 	rom = base + ".rom"
 	try:
-		hdds, floppy, extra, rom_source = read_directives(path)
+		hdds, floppy, extra, rom_source, script, stdin = read_directives(path)
 	except ValueError as e:
 		return False, str(e), ""
 	source = path
@@ -136,11 +145,15 @@ def run_test(path, emulator, timeout, workdir):
 		if error is not None:
 			return False, f"can't make the disk image for @floppy {floppy}", error
 		command += ["--floppy", image]
+	if script:
+		script_path = base + ".input"
+		with open(script_path, "w", encoding="utf-8") as f:
+			f.write("\n".join(script) + "\n")
+		command += ["--input", script_path]
 	command += extra
 
 	try:
-		run = subprocess.run(command,
-							 stdin=subprocess.DEVNULL, capture_output=True,
+		run = subprocess.run(command, input=stdin, capture_output=True,
 							 timeout=timeout)
 	except subprocess.TimeoutExpired as e:
 		output = (e.stdout or b"") + (e.stderr or b"")

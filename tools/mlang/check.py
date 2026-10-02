@@ -1394,8 +1394,8 @@ class Checker:
 			if not count(1 if name == "mfcr" else 2):
 				return ERROR
 			n = self.const_int(args[0], UWORD, f"the register number of '{name}'")
-			if n is not None and not 0 <= n <= 11:
-				self.error(args[0].loc, f"there is no control register {n} (0 to 11)")
+			if n is not None and not 0 <= n <= 15:
+				self.error(args[0].loc, f"there is no control register {n} (0 to 15)")
 			if name == "mfcr":
 				return UWORD
 			self.check_value(args[1], UWORD)

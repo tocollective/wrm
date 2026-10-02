@@ -5,9 +5,17 @@
 
 #include "config.h"
 #include "console.h"
+#include "snapshot.h"
 
 // How often the title shows the speed the machine really runs at.
 #define APPLICATION_SPEED_PERIOD_NS 1000000000ULL // 1s
+
+// Unthrottled, an iteration of the main loop runs the machine for about
+// this much host time, which leaves time to draw a frame at 60Hz...
+#define APPLICATION_UNTHROTTLED_NS 12000000ULL // 12ms
+// ... in slices of machine time, between which the host's input comes in:
+// at fixed ticks, so a deterministic run gets it at the same ones
+#define APPLICATION_SLICES_PER_SECOND 100 // 10ms
 
 // Points the CPU trace at the file or stream given by --trace.
 static void application_open_trace(application_t* app) {
@@ -36,6 +44,15 @@ application_t* application_create(int argc, char* argv[]) {
 		app->machine->motherboard->beeper->connected = app->speaker != NULL;
 		app->machine->motherboard->audiocard->connected = app->speaker != NULL;
 	}
+	const config_t* cfg = config_get();
+	if (cfg->snapshot_path && !snapshot_load(app->machine, cfg->snapshot_path))
+		error("Failed to start from the snapshot %s", cfg->snapshot_path);
+	if (cfg->monitor_port)
+		app->monitor = monitor_create(app->machine, cfg->monitor_port);
+	if (cfg->pause && app->monitor)
+		app->machine->motherboard->cpu->debug.stopped = CPU_STOP_PAUSE;
+	else if (cfg->pause)
+		warning("--pause without a monitor: the machine runs");
 	app->running = true;
 	console_open();
 	return app;
@@ -48,6 +65,7 @@ void application_destroy(application_t* app) {
 	// --debug: also when quitting while the machine still runs
 	if (config_get()->debug && !app->stop_reported)
 		cpu_dump(app->machine->motherboard->cpu, stderr);
+	monitor_destroy(app->monitor);
 	speaker_destroy(app->speaker);
 	display_destroy(app->display);
 	machine_destroy(app->machine);
@@ -105,6 +123,8 @@ static void application_update_speed(application_t* app) {
 	char status[sizeof(app->display->status)];
 	if (machine_stopped(app->machine)) {
 		snprintf(status, sizeof(status), "stopped");
+	} else if (machine_held(app->machine)) {
+		snprintf(status, sizeof(status), "paused");
 	} else {
 		const double hz = (double)ticks * 1e9 / (double)elapsed;
 		const double rate = (double)app->machine->motherboard->clock->rate;
@@ -132,12 +152,37 @@ static void application_capture_mouse(application_t* app, const bool capture) {
 	app->mouse_y = 0;
 }
 
+// Runs the machine at the clock rate, or as fast as the host can.
+static void application_run_machine(application_t* app) {
+	if (!config_get()->unthrottled) {
+		application_update_console(app);
+		machine_update(app->machine);
+		return;
+	}
+	const uint64_t rate = app->machine->motherboard->clock->rate;
+	uint64_t slice = rate / APPLICATION_SLICES_PER_SECOND;
+	if (slice == 0) slice = 1;
+	const uint64_t deadline = SDL_GetTicksNS() + APPLICATION_UNTHROTTLED_NS;
+	do {
+		application_update_console(app);
+		machine_run(app->machine, slice);
+	} while (!machine_stopped(app->machine) && !machine_held(app->machine)
+			 && SDL_GetTicksNS() < deadline);
+}
+
 bool application_update(application_t* app) {
-	application_update_console(app);
+	monitor_poll(app->monitor);
 	// the guest has disabled the mouse: the pointer goes back to the host
 	if (!app->machine->motherboard->mouse->enabled)
 		application_capture_mouse(app, false);
-	machine_update(app->machine);
+	const bool held = machine_held(app->machine);
+	// going on after a stop: the clock doesn't make up for the pause
+	if (app->held && !held) clock_reset(app->machine->motherboard->clock);
+	app->held = held;
+	if (!held)
+		application_run_machine(app);
+	else if (!app->display) // headless: nothing to wait for but the monitor
+		SDL_Delay(1);
 	application_update_speed(app);
 	display_render(app->display, app->machine->motherboard->videocard);
 	speaker_play(app->speaker,
@@ -254,13 +299,31 @@ bool application_process_events(application_t* app, SDL_Event* event) {
 		case SDL_EVENT_KEY_DOWN:
 		case SDL_EVENT_KEY_UP: {
 			// Ctrl+Alt gives the pointer back; the keys still reach the
-			// guest, except R of Ctrl+Alt+R, which resets the machine
+			// guest, except R of Ctrl+Alt+R, which resets the machine, and
+			// S and L, which save and load a snapshot
 			if (event->type == SDL_EVENT_KEY_DOWN
 				&& (event->key.mod & SDL_KMOD_CTRL)
 				&& (event->key.mod & SDL_KMOD_ALT)) {
 				application_capture_mouse(app, false);
 				if (event->key.scancode == SDL_SCANCODE_R) {
 					if (!event->key.repeat) application_reset(app);
+					break;
+				}
+				if (event->key.scancode == SDL_SCANCODE_S) {
+					if (!event->key.repeat
+						&& snapshot_save(app->machine,
+										 APPLICATION_SNAPSHOT_PATH))
+						print("Saved %s", APPLICATION_SNAPSHOT_PATH);
+					break;
+				}
+				if (event->key.scancode == SDL_SCANCODE_L) {
+					if (!event->key.repeat
+						&& snapshot_load(app->machine,
+										 APPLICATION_SNAPSHOT_PATH)) {
+						app->stop_reported = false;
+						app->off_requested = false;
+						print("Loaded %s", APPLICATION_SNAPSHOT_PATH);
+					}
 					break;
 				}
 			}

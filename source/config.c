@@ -23,6 +23,14 @@ static config_t config = {
 	.trace_path = NULL,
 	.net = true,
 	.net_bind = 0x7F000001, // 127.0.0.1: only the host can connect
+	.unthrottled = false,
+	.deterministic = false,
+	.rtc_virtual = false,
+	.rtc_epoch = 0,
+	.input_path = NULL,
+	.monitor_port = 0,
+	.pause = false,
+	.snapshot_path = NULL,
 };
 
 config_t* config_get(void) {
@@ -49,6 +57,24 @@ static void config_usage(const char* program) {
 		   "(default: 127.0.0.1)\n"
 		   "  --headless        no window; exit when the machine powers off "
 		   "or halts\n"
+		   "  --unthrottled     run as fast as the host can, not at the "
+		   "clock rate\n"
+		   "  --deterministic   the same input gives the same run: implies "
+		   "--unthrottled\n"
+		   "                    and a virtual RTC, polls the network at "
+		   "fixed ticks\n"
+		   "  --rtc=SECONDS     the RTC starts at SECONDS after 1970-01-01 "
+		   "UTC and counts\n"
+		   "                    clock ticks (default with --deterministic: "
+		   "0)\n"
+		   "  --input PATH      feed the keyboard, UART, mouse and power "
+		   "button from an\n"
+		   "                    input script at the clock ticks it gives\n"
+		   "  --monitor[=PORT]  a debugging console on 127.0.0.1:PORT "
+		   "(default: %d)\n"
+		   "  --pause           start stopped, until the monitor goes on\n"
+		   "  --load PATH       start from a snapshot saved by the monitor "
+		   "or Ctrl+Alt+S\n"
 		   "  --trace[=PATH]    log every retired instruction to PATH "
 		   "(default: stderr)\n"
 		   "  --debug           dump the CPU state when the machine stops or "
@@ -57,7 +83,8 @@ static void config_usage(const char* program) {
 		   config.version,
 		   program,
 		   config.firm_path,
-		   CONFIG_RAM_SLOT_COUNT);
+		   CONFIG_RAM_SLOT_COUNT,
+		   CONFIG_MONITOR_PORT);
 }
 
 // Parses a whole number with an optional k/K, m/M or g/G suffix, which
@@ -149,6 +176,22 @@ static void config_parse_net(const char* text) {
 	config.net_bind = addr;
 }
 
+static void config_parse_rtc(const char* text) {
+	uint64_t seconds = 0;
+	if (!config_parse_number(text, 1000, &seconds)
+		|| seconds > UINT64_MAX / 1000000000ULL / 2)
+		error("--rtc: invalid time '%s'", text);
+	config.rtc_virtual = true;
+	config.rtc_epoch = seconds;
+}
+
+static void config_parse_port(const char* text) {
+	uint64_t port = 0;
+	if (!config_parse_number(text, 1000, &port) || port == 0 || port > 65535)
+		error("--monitor: invalid port '%s'", text);
+	config.monitor_port = (uint16_t)port;
+}
+
 static void config_parse_clock(const char* text) {
 	uint64_t rate = 0;
 	if (!config_parse_number(text, 1000, &rate) || rate == 0
@@ -191,6 +234,24 @@ void config_parse(int argc, char* argv[]) {
 			config_parse_net(arg + 6);
 		} else if (strcmp(arg, "--debug") == 0) {
 			config.debug = true;
+		} else if (strcmp(arg, "--unthrottled") == 0) {
+			config.unthrottled = true;
+		} else if (strcmp(arg, "--deterministic") == 0) {
+			config.deterministic = true;
+			config.unthrottled = true;
+			config.rtc_virtual = true;
+		} else if (strncmp(arg, "--rtc=", 6) == 0) {
+			config_parse_rtc(arg + 6);
+		} else if (strcmp(arg, "--input") == 0) {
+			config.input_path = config_value(argc, argv, &i);
+		} else if (strcmp(arg, "--monitor") == 0) {
+			config.monitor_port = CONFIG_MONITOR_PORT;
+		} else if (strncmp(arg, "--monitor=", 10) == 0) {
+			config_parse_port(arg + 10);
+		} else if (strcmp(arg, "--pause") == 0) {
+			config.pause = true;
+		} else if (strcmp(arg, "--load") == 0) {
+			config.snapshot_path = config_value(argc, argv, &i);
 		} else if (strcmp(arg, "-h") == 0 || strcmp(arg, "--help") == 0) {
 			config_usage(program);
 			exit(0);

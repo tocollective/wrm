@@ -758,6 +758,12 @@ next comparison.
 `STATUS.ALARM` stays set, and the IRQ line asserted, until software
 writes 1 to it. Clearing `CONTROL` bit 0 does not clear it.
 
+With a virtual time (`--rtc=SECONDS`, or `--deterministic`, see the
+README) the clock doesn't ask the host: the time is `SECONDS` plus the
+clock ticks since power-on, the alarm compares against it the same way,
+and `UTC_OFFSET` is 0. A run then reads the same times whenever and
+however fast it happens.
+
 ## Reset
 
 On reset all registers are zero and `pc = 0xFE000000`, so execution starts
@@ -881,6 +887,13 @@ towards its next frame, then the real-time clock counts the tick
 towards its next alarm comparison, then the CPU samples the IRQ line and
 advances its pipeline by one stage. Nothing runs once the CPU has
 halted or the machine is powered off.
+
+The emulator gets the same result with less work: a device runs only on
+the ticks where it does something software can see without reading its
+registers (an IRQ line changes, a DMA word moves, a frame ends) and
+catches up on the ticks in between, in the same order, just before the
+CPU reads or writes it. While the CPU waits in `WFI` with the IRQ line
+low, the cycles up to the next such tick only count.
 
 ## Pipeline
 

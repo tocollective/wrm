@@ -3,8 +3,16 @@
 #include <SDL3/SDL_time.h>
 #include <SDL3/SDL_timer.h>
 
-// host wall clock time in ns since the epoch, 0 if unknown or before it
-static uint64_t rtc_host_ns(void) {
+// the time in ns since the epoch: the host's wall clock (0 if unknown or
+// before the epoch), or the virtual time
+static uint64_t rtc_now_ns(const rtc_t* rtc) {
+	if (rtc->virtual_ticks) {
+		const uint64_t ticks = *rtc->virtual_ticks;
+		const uint64_t seconds = ticks / rtc->frequency;
+		const uint64_t rest = ticks % rtc->frequency; // < 2^32
+		return (rtc->virtual_epoch + seconds) * SDL_NS_PER_SECOND
+			 + rest * SDL_NS_PER_SECOND / rtc->frequency;
+	}
 	SDL_Time now = 0;
 	if (!SDL_GetCurrentTime(&now) || now < 0) return 0;
 	return (uint64_t)now;
@@ -15,20 +23,21 @@ static void rtc_update_irq(rtc_t* rtc) {
 }
 
 static void rtc_latch(rtc_t* rtc) {
-	const uint64_t now = rtc_host_ns();
+	const uint64_t now = rtc_now_ns(rtc);
 	rtc->seconds = now / SDL_NS_PER_SECOND;
 	rtc->nanoseconds = (uint32_t)(now % SDL_NS_PER_SECOND);
 
 	SDL_DateTime local;
-	rtc->utc_offset = SDL_TimeToDateTime((SDL_Time)now, &local, true)
-					  ? local.utc_offset
-					  : 0;
+	rtc->utc_offset = 0;
+	if (!rtc->virtual_ticks
+		&& SDL_TimeToDateTime((SDL_Time)now, &local, true))
+		rtc->utc_offset = local.utc_offset;
 }
 
 // one-shot: the alarm goes off once the time reaches ALARM
 static void rtc_check_alarm(rtc_t* rtc) {
 	if (!(rtc->control & RTC_CONTROL_ALARM)) return;
-	if (rtc_host_ns() / SDL_NS_PER_SECOND < rtc->alarm) return;
+	if (rtc_now_ns(rtc) / SDL_NS_PER_SECOND < rtc->alarm) return;
 	rtc->control &= ~RTC_CONTROL_ALARM;
 	rtc->fired = true;
 	rtc_update_irq(rtc);
@@ -39,6 +48,7 @@ rtc_t* rtc_create(pic_t* pic, const uint8_t irq, const uint32_t frequency) {
 	if (!rtc) error("Failed to allocate RTC!");
 	rtc->pic = pic;
 	rtc->irq = irq;
+	rtc->frequency = frequency ? frequency : 1;
 	rtc->period = frequency / RTC_CHECKS_PER_SECOND;
 	if (rtc->period == 0) rtc->period = 1;
 	rtc_reset(rtc);
@@ -61,12 +71,30 @@ void rtc_reset(rtc_t* rtc) {
 	rtc_update_irq(rtc);
 }
 
-void rtc_tick(rtc_t* rtc) {
-	// the host's clock is only asked while the alarm is armed
-	if (!(rtc->control & RTC_CONTROL_ALARM)) return;
-	if (++rtc->ticks < rtc->period) return;
-	rtc->ticks = 0;
-	rtc_check_alarm(rtc);
+void rtc_set_virtual(rtc_t* rtc, const uint64_t* ticks, const uint64_t epoch) {
+	if (!rtc) return;
+	rtc->virtual_ticks = ticks;
+	rtc->virtual_epoch = epoch;
+	rtc_latch(rtc);
+}
+
+// The clock is only asked while the alarm is armed, every period ticks.
+void rtc_run(rtc_t* rtc, uint64_t ticks) {
+	while (ticks > 0 && (rtc->control & RTC_CONTROL_ALARM)) {
+		const uint64_t due = rtc->period - rtc->ticks;
+		if (ticks < due) {
+			rtc->ticks += (uint32_t)ticks;
+			return;
+		}
+		ticks -= due;
+		rtc->ticks = 0;
+		rtc_check_alarm(rtc);
+	}
+}
+
+uint64_t rtc_next_event(const rtc_t* rtc) {
+	if (!(rtc->control & RTC_CONTROL_ALARM)) return TICKS_NEVER;
+	return rtc->period - rtc->ticks;
 }
 
 bool rtc_read(rtc_t* rtc, const uint32_t offset, const uint8_t size,

@@ -526,7 +526,7 @@ static void videocard_vblank(videocard_t* videocard) {
 	videocard_update_irq(videocard);
 }
 
-void videocard_tick(videocard_t* videocard) {
+static void videocard_tick(videocard_t* videocard) {
 	const uint32_t op = videocard->command & VIDEO_COMMAND_OP_MASK;
 	if (videocard->busy && op == VIDEO_COMMAND_EXPAND)
 		videocard_line_tick(videocard);
@@ -535,6 +535,22 @@ void videocard_tick(videocard_t* videocard) {
 	if (++videocard->ticks < videocard->ticks_per_frame) return;
 	videocard->ticks = 0;
 	videocard_vblank(videocard);
+}
+
+void videocard_run(videocard_t* videocard, uint64_t ticks) {
+	// a DMA command moves a word every tick
+	for (; ticks > 0 && videocard->busy; ticks--) videocard_tick(videocard);
+	while (ticks >= videocard->ticks_per_frame - videocard->ticks) {
+		ticks -= videocard->ticks_per_frame - videocard->ticks;
+		videocard->ticks = 0;
+		videocard_vblank(videocard);
+	}
+	videocard->ticks += (uint32_t)ticks;
+}
+
+uint64_t videocard_next_event(const videocard_t* videocard) {
+	if (videocard->busy) return 1;
+	return videocard->ticks_per_frame - videocard->ticks;
 }
 
 // ---- bus ----------------------------------------------------------------

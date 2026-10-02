@@ -7,7 +7,7 @@ The opcode is always the lowest byte.
 
 - `r0`–`r31` — 32-bit general purpose registers, `r0` always reads as zero.
 - `pc` — program counter, reset value `0xFE000000` (start of ROM).
-- `cr0`–`cr11` — control registers, see [Control registers](#control-registers).
+- `cr0`–`cr15` — control registers, see [Control registers](#control-registers).
 
 ## Privilege modes
 
@@ -61,7 +61,7 @@ and `SARI`, where it is zero-extended. Shift amounts use the low 5 bits.
 | `0x00` | `HLT`           | N      | halt the CPU (S)                       |
 | `0x01` | `NOP`           | N      | do nothing                             |
 | `0x02` | `WFI`           | N      | wait for interrupt (S)                 |
-| `0x03` | `IRET`          | N      | `pc = EPC`, `IE = PIE`, `UM = PUM`, `EXL = 0` (S) |
+| `0x03` | `IRET`          | N      | `pc = EPC`, `IE = PIE`, `UM = PUM`, `SS = PSS`, `EXL = 0` (S) |
 | `0x04` | `MFCR rd, cr`   | I      | `rd = cr[imm14]` (`rs1` is reserved) (S, except counters) |
 | `0x05` | `MTCR cr, rs1`  | I      | `cr[imm14] = rs1` (`rd` is reserved) (S) |
 | `0x06` | `TLBI rs1, mode`| I      | drop TLB entries, `mode` = `imm14`, see [TLB](#tlb) (`rd` is reserved) (S) |
@@ -274,7 +274,7 @@ float constant, and `.float` emits them as data.
 
 | Number | Name      | Reset | Description                                  |
 |--------|-----------|-------|----------------------------------------------|
-| `0`    | `STATUS`  | `0x10` | bit 0 = `IE` (interrupts enabled), bit 1 = `PIE` (previous `IE`), bit 2 = `UM` (user mode), bit 3 = `PUM` (previous `UM`), bit 4 = `EXL` (in the handler, see [Exceptions](#exceptions)); other bits read as zero |
+| `0`    | `STATUS`  | `0x10` | bit 0 = `IE` (interrupts enabled), bit 1 = `PIE` (previous `IE`), bit 2 = `UM` (user mode), bit 3 = `PUM` (previous `UM`), bit 4 = `EXL` (in the handler, see [Exceptions](#exceptions)), bit 5 = `SS` (single step), bit 6 = `PSS` (previous `SS`), see [Debugging](#debugging); other bits read as zero |
 | `1`    | `EPC`     | `0`   | address `IRET` returns to                    |
 | `2`    | `IVEC`    | `0`   | interrupt handler address                    |
 | `3`    | `SCRATCH` | `0`   | free for software, e.g. to save a register in the handler |
@@ -286,6 +286,10 @@ float constant, and `.float` emits them as data.
 | `9`    | `INSTRET` | `0`   | instructions retired since reset, low 32 bits (read-only) |
 | `10`   | `INSTRETH`| `0`   | instructions retired since reset, high 32 bits (read-only) |
 | `11`   | `CPUID`   | see below | the ISA version and its extensions (read-only) |
+| `12`   | `TADDR0`  | `0`   | trigger 0: address, see [Triggers](#triggers) |
+| `13`   | `TCTRL0`  | `0`   | trigger 0: what it matches                    |
+| `14`   | `TADDR1`  | `0`   | trigger 1: address                            |
+| `15`   | `TCTRL1`  | `0`   | trigger 1: what it matches                    |
 
 ### Taking an interrupt
 
@@ -296,9 +300,10 @@ The CPU has one level-triggered IRQ input driven by the PIC (see
 1. `EPC` = address of the next instruction that has not executed yet,
 2. `PIE` = `IE`, `IE` = 0,
 3. `PUM` = `UM`, `UM` = 0 (supervisor mode),
-4. `EXL` = 1,
-5. `CAUSE` = 0,
-6. `pc` = `IVEC`.
+4. `PSS` = `SS`, `SS` = 0,
+5. `EXL` = 1,
+6. `CAUSE` = 0,
+7. `pc` = `IVEC`.
 
 Interrupts and [exceptions](#exceptions) share the handler; it tells them
 apart by `CAUSE`.
@@ -371,9 +376,10 @@ control registers, supervisor only; an OS passes on what user code needs.
 | 2   | `LL` and `SC`                                              |
 | 3   | `MULH`, `MULHU` and `MULHSU`                               |
 | 4   | `TLBI` modes 1 and 2, see [TLB](#tlb)                      |
+| 5   | [debugging](#debugging): `STATUS.SS` and the triggers      |
 
 Other bits read as zero. This CPU implements all of them: `CPUID` reads
-`0x0100001F`.
+`0x0100003F`.
 
 ## Exceptions
 
@@ -386,9 +392,10 @@ except:
 1. `EPC` = address of the faulting instruction,
 2. `PIE` = `IE`, `IE` = 0,
 3. `PUM` = `UM`, `UM` = 0,
-4. `EXL` = 1,
-5. `CAUSE` = fault code, `BADADDR` = see the table,
-6. `pc` = `IVEC`.
+4. `PSS` = `SS`, `SS` = 0,
+5. `EXL` = 1,
+6. `CAUSE` = fault code, `BADADDR` = see the table,
+7. `pc` = `IVEC`.
 
 `IRET` retries the faulting instruction; to skip it (e.g. after emulating
 it, or to return from `SYSCALL`) the handler adds 4 to `EPC` first.
@@ -428,6 +435,8 @@ between the two.
 | `11`    | privileged instruction in user mode | instruction word      |
 | `12`    | `SYSCALL`               | `0`                               |
 | `13`    | `BREAK`                 | `0`                               |
+| `14`    | single step (not a fault: `EPC` is the next instruction, see [Debugging](#debugging)) | address of the instruction that ran |
+| `15`    | a trigger matched       | `pc` for a fetch, the virtual address for a load or store |
 
 `BREAK` is an unprivileged software breakpoint. Its exception points `EPC`
 at the `BREAK` instruction; the handler can advance `EPC` by 4 to skip it.
@@ -438,6 +447,58 @@ RAM and ROM: a fetch from the I/O region (`0xFD000000`–`0xFDFFFFFF`) is a
 fetch bus error and never reaches the device, even when the page is
 mapped with `X`. Since the CPU fetches ahead of branches, this keeps a
 fetch that is later squashed from reading a device register.
+
+## Debugging
+
+A debugger running in the supervisor (or a monitor in the firmware) can
+stop a program after every instruction and at any address, also in ROM,
+where it can't write `BREAK`. Both stop it with a trap to the handler, like
+the other exceptions, and neither happens while `EXL` is set: the handler
+itself is never stepped or stopped, and can't halt the CPU that way.
+
+### Single step
+
+While `STATUS.SS` is set and `EXL` clear, each instruction that completes
+is followed by a single step trap (`CAUSE` = 14): `EPC` is the address of
+the next instruction, the one that would run now, and `BADADDR` the
+address of the one that ran. An instruction that faults doesn't complete:
+its fault is taken instead. The trap saves `SS` in `PSS` and clears it, so
+the handler isn't stepped; `IRET` restores it.
+
+What counts is `SS` as the instruction starts: after `MTCR STATUS` that
+sets `SS` the trap comes after the next instruction, after one that clears
+it the trap still follows it. `HLT` halts without a trap; `WFI` takes the
+trap instead of waiting.
+
+To step a program, the debugger sets `PSS` in the `STATUS` it returns with
+and executes `IRET`: the instruction at `EPC` runs, then the handler is
+entered again with `EPC` pointing past it.
+
+### Triggers
+
+Two triggers watch virtual addresses: trigger 0 is `TADDR0` and `TCTRL0`,
+trigger 1 is `TADDR1` and `TCTRL1`.
+
+| Bits  | `TCTRL` field | Meaning                                         |
+|-------|---------------|-------------------------------------------------|
+| 0     | `X`           | match instruction fetches                       |
+| 1     | `R`           | match loads (`LB`–`LW`, `LL`)                   |
+| 2     | `W`           | match stores (`SB`–`SW`, `SC`)                  |
+| 12:8  | `SIZE`        | the range is 2<sup>`SIZE`</sup> bytes, aligned, that holds `TADDR` |
+
+Other bits read as zero. Like `MTCR STATUS`, `MTCR` to a trigger register
+takes effect for the next instruction. A trigger matches an access that
+touches any byte of its range; with none of `X`, `R`, `W` set it is off (the value after
+reset). A match is a fault (`CAUSE` = 15), raised before the instruction
+has any effect: `EPC` is the instruction, `BADADDR` the address that
+matched — `pc` for a fetch, the virtual address for a load or store. A
+load or store is checked after its alignment and before the MMU, so a
+misaligned access faults as such and a match comes before a page fault; a
+fetch is checked after it is made, so a fetch fault comes first.
+
+`IRET` back to the instruction matches again. To go on, the handler turns
+the trigger off, sets `PSS` and returns; on the single step trap it turns
+the trigger on again and clears `PSS`.
 
 ## Memory management
 

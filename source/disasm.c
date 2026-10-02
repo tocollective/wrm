@@ -58,6 +58,10 @@ static const char* const disasm_cr_names[CPU_CR_COUNT] = {
 	[CPU_CR_INSTRET] = "instret",
 	[CPU_CR_INSTRETH] = "instreth",
 	[CPU_CR_CPUID] = "cpuid",
+	[CPU_CR_TADDR0] = "taddr0",
+	[CPU_CR_TCTRL0] = "tctrl0",
+	[CPU_CR_TADDR1] = "taddr1",
+	[CPU_CR_TCTRL1] = "tctrl1",
 };
 
 const char* disasm_cr_name(const uint32_t cr) {
@@ -83,7 +87,8 @@ static bool disasm_is_encodable(const cpu_instruction_t* in) {
 			return !in->rs1 && in->imm < CPU_CR_COUNT;
 		case CPU_OP_MTCR:
 			// the counters and CPUID are read-only
-			return !in->rd && in->imm < CPU_CR_CYCLE;
+			return !in->rd && in->imm < CPU_CR_COUNT
+				   && (in->imm < CPU_CR_CYCLE || in->imm > CPU_CR_CPUID);
 		case CPU_OP_TLBI:
 			return !in->rd && in->imm < CPU_TLBI_MODE_COUNT
 				   && (in->imm != CPU_TLBI_ALL || !in->rs1);

@@ -43,8 +43,10 @@ beeper_t* beeper_create(const uint32_t clock_rate);
 void beeper_destroy(beeper_t* beeper);
 
 void beeper_reset(beeper_t* beeper);
-// advances the beeper by one clock tick
-void beeper_tick(beeper_t* beeper);
+// Advances the beeper by that many clock ticks. It has no IRQ line: what
+// changes is only seen through its registers and in the samples, so it
+// never needs to run before they are read.
+void beeper_run(beeper_t* beeper, const uint64_t ticks);
 
 // bus side: offset is relative to the device base; return true on bus error
 bool beeper_read(beeper_t* beeper, const uint32_t offset, const uint8_t size,

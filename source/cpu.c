@@ -29,13 +29,18 @@
 // - Fetches use bus.fetch, which never reaches a device: IF runs ahead of
 //   branch resolution, and a fetch down the wrong path must have no side
 //   effects.
+// - STATUS.SS traps after an instruction retires (in WB). Triggers match
+//   fetches in IF and loads and stores in MEM, and fault like the others.
+// - The emulator's debugger (cpu_debug_t) stops the CPU where an
+//   interrupt would be taken: after WB, before MEM can touch memory.
 // - MFCR, MTCR and IRET wait in ID until the older instructions have left
 //   EX and MEM, so control registers are read in EX and written in WB
 //   without forwarding.
-// - The mode (STATUS.UM) and the translation only change in WB, and every
-//   change squashes the younger instructions: a trap, IRET (which jumps to
-//   EPC when it retires), MTCR STATUS, MTCR PTBR and TLBI. So each stage
-//   can check privileges against the current mode.
+// - The mode (STATUS.UM), the translation and the triggers only change in
+//   WB, and every change squashes the younger instructions: a trap, IRET
+//   (which jumps to EPC when it retires), MTCR STATUS, MTCR PTBR, MTCR to a
+//   trigger register and TLBI. So each stage can check privileges and
+//   triggers against the current state.
 
 static uint32_t sign_extend(const uint32_t value, const int bits) {
 	const uint32_t sign = 1u << (bits - 1);
@@ -161,11 +166,17 @@ static uint32_t cpu_execute_fp(const uint8_t opcode, const uint32_t a,
 	return 0;
 }
 
+static uint32_t cpu_decode_slot(const uint32_t raw);
+
 cpu_t* cpu_create(const bus_t bus) {
 	cpu_t* cpu = (cpu_t*)calloc(1, sizeof(cpu_t));
 	if (!cpu) error("Failed to allocate CPU!");
 	cpu->bus = bus;
 	cpu->mmu = mmu_create(bus);
+	// every slot holds a decoded word: the words below the size of the
+	// cache land in their own slot
+	for (uint32_t raw = 0; raw < CPU_DECODE_CACHE_SIZE; raw++)
+		cpu->decoded[cpu_decode_slot(raw)] = cpu_decode(raw);
 	cpu_reset(cpu);
 	return cpu;
 }
@@ -194,6 +205,10 @@ void cpu_reset(cpu_t* cpu) {
 	cpu->cycles = 0;
 	cpu->retired = 0;
 	cpu->reservation_valid = false;
+	cpu->trigger_kinds = 0;
+	// breakpoints, watchpoints and a stop stay
+	cpu->debug.skip = false;
+	cpu->debug.watch_hit = false;
 }
 
 static cpu_format_t cpu_opcode_format(const uint8_t opcode) {
@@ -286,6 +301,11 @@ static cpu_format_t cpu_opcode_format(const uint8_t opcode) {
 	return CPU_FORMAT_INVALID;
 }
 
+static uint8_t cpu_opcode_access_size(const uint8_t opcode);
+static bool cpu_has_reserved_bits(const cpu_instruction_t* in);
+static bool cpu_cr_is_illegal(const cpu_instruction_t* in);
+static uint16_t cpu_decode_flags(const cpu_instruction_t* in);
+
 cpu_instruction_t cpu_decode(const uint32_t raw) {
 	cpu_instruction_t in = { 0 };
 	in.raw = raw;
@@ -330,30 +350,49 @@ cpu_instruction_t cpu_decode(const uint32_t raw) {
 		} break;
 	}
 
+	in.flags = cpu_decode_flags(&in);
+	in.size = cpu_opcode_access_size(in.opcode);
+	if (in.format == CPU_FORMAT_INVALID || cpu_has_reserved_bits(&in)
+		|| cpu_cr_is_illegal(&in))
+		in.fault = CPU_CAUSE_ILLEGAL_INSTRUCTION;
+	else if (in.opcode == CPU_OP_SYSCALL)
+		in.fault = CPU_CAUSE_SYSCALL;
+	else if (in.opcode == CPU_OP_BREAK)
+		in.fault = CPU_CAUSE_BREAK;
+	return in;
+}
+
+static uint32_t cpu_decode_slot(const uint32_t raw) {
+	return (raw ^ (raw >> 10) ^ (raw >> 20)) & (CPU_DECODE_CACHE_SIZE - 1);
+}
+
+static const cpu_instruction_t* cpu_decode_cached(cpu_t* cpu,
+												 const uint32_t raw) {
+	cpu_instruction_t* in = &cpu->decoded[cpu_decode_slot(raw)];
+	if (in->raw != raw) *in = cpu_decode(raw);
 	return in;
 }
 
 // These instructions produce rd in MEM, too late for EX/MEM forwarding.
 static bool cpu_result_in_mem(const cpu_instruction_t* in) {
-	return (in->opcode >= CPU_OP_LB && in->opcode <= CPU_OP_LW)
-		   || in->opcode == CPU_OP_LL || in->opcode == CPU_OP_SC;
+	return in->flags & CPU_IN_RESULT_IN_MEM;
 }
 
 static bool cpu_is_store(const cpu_instruction_t* in) {
-	return in->opcode >= CPU_OP_SB && in->opcode <= CPU_OP_SW;
+	return in->flags & CPU_IN_STORE;
 }
 
 static bool cpu_is_atomic_write(const cpu_instruction_t* in) {
 	return in->opcode == CPU_OP_SC;
 }
 
-static bool cpu_is_branch(const cpu_instruction_t* in) {
-	return in->opcode >= CPU_OP_BEQ && in->opcode <= CPU_OP_BGEU;
-}
-
 // bytes a load or store accesses, 0 for other instructions
 static uint8_t cpu_access_size(const cpu_instruction_t* in) {
-	switch (in->opcode) {
+	return in->size;
+}
+
+static uint8_t cpu_opcode_access_size(const uint8_t opcode) {
+	switch (opcode) {
 		case CPU_OP_LB:
 		case CPU_OP_LBU:
 		case CPU_OP_SB:
@@ -377,8 +416,7 @@ static uint32_t cpu_size_mask(const uint8_t size) {
 
 // instructions that touch control registers
 static bool cpu_is_serializing(const cpu_instruction_t* in) {
-	return in->opcode == CPU_OP_MFCR || in->opcode == CPU_OP_MTCR
-		   || in->opcode == CPU_OP_IRET;
+	return in->flags & CPU_IN_SERIALIZING;
 }
 
 // CYCLE, CYCLEH, INSTRET, INSTRETH
@@ -437,7 +475,7 @@ static bool cpu_cr_is_illegal(const cpu_instruction_t* in) {
 }
 
 // supervisor-only instructions
-static bool cpu_is_privileged(const cpu_instruction_t* in) {
+static bool cpu_opcode_is_privileged(const cpu_instruction_t* in) {
 	switch (in->opcode) {
 		case CPU_OP_HLT:
 		case CPU_OP_WFI:
@@ -456,25 +494,47 @@ static bool cpu_user_mode(const cpu_t* cpu) {
 }
 
 static bool cpu_writes_rd(const cpu_instruction_t* in) {
-	switch (in->format) {
-		case CPU_FORMAT_R:
-		case CPU_FORMAT_U:
-			return true;
-		case CPU_FORMAT_I:
-			return !cpu_is_store(in) && !cpu_is_branch(in)
-				   && in->opcode != CPU_OP_MTCR && in->opcode != CPU_OP_TLBI;
-		default:
-			return false;
-	}
+	return in->flags & CPU_IN_WRITES_RD;
 }
 
 static bool cpu_reads_reg(const cpu_instruction_t* in, const uint8_t reg) {
-	const bool rs1 = in->format == CPU_FORMAT_R || in->format == CPU_FORMAT_I;
-	const bool rs2 = in->format == CPU_FORMAT_R;
-	const bool rd = cpu_is_store(in) || cpu_is_branch(in)
-					|| in->opcode == CPU_OP_FMADD || in->opcode == CPU_OP_FMSUB;
-	return (rs1 && in->rs1 == reg) || (rs2 && in->rs2 == reg)
-		   || (rd && in->rd == reg);
+	return ((in->flags & CPU_IN_READS_RS1) && in->rs1 == reg)
+		   || ((in->flags & CPU_IN_READS_RS2) && in->rs2 == reg)
+		   || ((in->flags & CPU_IN_READS_RD) && in->rd == reg);
+}
+
+// CPU_IN_* of a decoded instruction
+static uint16_t cpu_decode_flags(const cpu_instruction_t* in) {
+	const uint8_t op = in->opcode;
+	const bool store = op >= CPU_OP_SB && op <= CPU_OP_SW;
+	const bool branch = op >= CPU_OP_BEQ && op <= CPU_OP_BGEU;
+	uint16_t flags = 0;
+	switch (in->format) {
+		case CPU_FORMAT_R:
+			flags |= CPU_IN_WRITES_RD | CPU_IN_READS_RS1 | CPU_IN_READS_RS2;
+			break;
+		case CPU_FORMAT_U:
+			flags |= CPU_IN_WRITES_RD;
+			break;
+		case CPU_FORMAT_I:
+			flags |= CPU_IN_READS_RS1;
+			if (!store && !branch && op != CPU_OP_MTCR && op != CPU_OP_TLBI)
+				flags |= CPU_IN_WRITES_RD;
+			break;
+		default:
+			break;
+	}
+	if (store || branch || op == CPU_OP_FMADD || op == CPU_OP_FMSUB)
+		flags |= CPU_IN_READS_RD;
+	if ((op >= CPU_OP_LB && op <= CPU_OP_LW) || op == CPU_OP_LL
+		|| op == CPU_OP_SC)
+		flags |= CPU_IN_RESULT_IN_MEM;
+	if (store) flags |= CPU_IN_STORE;
+	if (branch) flags |= CPU_IN_BRANCH;
+	if (op == CPU_OP_MFCR || op == CPU_OP_MTCR || op == CPU_OP_IRET)
+		flags |= CPU_IN_SERIALIZING;
+	if (cpu_opcode_is_privileged(in)) flags |= CPU_IN_PRIVILEGED;
+	return flags;
 }
 
 static void cpu_latch_fault(cpu_latch_t* latch, const cpu_cause_t cause,
@@ -513,6 +573,10 @@ const char* cpu_cause_name(const uint8_t cause) {
 			return "syscall";
 		case CPU_CAUSE_BREAK:
 			return "breakpoint";
+		case CPU_CAUSE_STEP:
+			return "single step";
+		case CPU_CAUSE_WATCH:
+			return "trigger";
 	}
 	return "unknown fault";
 }
@@ -541,15 +605,17 @@ static void cpu_refetch(cpu_t* cpu, const uint32_t pc) {
 	memset(&cpu->pipeline, 0, sizeof(cpu->pipeline));
 }
 
-// Enters the handler in supervisor mode:
-// EPC = epc, PIE = IE, PUM = UM, IE = UM = 0, EXL = 1, pc = IVEC.
+// Enters the handler in supervisor mode: EPC = epc, PIE = IE, PUM = UM,
+// PSS = SS, IE = UM = SS = 0, EXL = 1, pc = IVEC.
 // Never called with EXL set, so IRET restores it by clearing it.
 static void cpu_trap(cpu_t* cpu, const cpu_cause_t cause, const uint32_t epc) {
 	cpu->reservation_valid = false;
+	cpu->waiting = false;
 	const uint32_t status = cpu->cr[CPU_CR_STATUS];
 	uint32_t next = CPU_STATUS_EXL;
 	if (status & CPU_STATUS_IE) next |= CPU_STATUS_PIE;
 	if (status & CPU_STATUS_UM) next |= CPU_STATUS_PUM;
+	if (status & CPU_STATUS_SS) next |= CPU_STATUS_PSS;
 	cpu->cr[CPU_CR_STATUS] = next;
 	cpu->cr[CPU_CR_CAUSE] = cause;
 	cpu->cr[CPU_CR_EPC] = epc;
@@ -633,14 +699,17 @@ static void cpu_trace_wb(const cpu_t* cpu, const cpu_latch_t* wb) {
 	fputc('\n', cpu->trace);
 }
 
-// Trace line for an interrupt taken before the instruction at epc.
-static void cpu_trace_interrupt(const cpu_t* cpu, const uint32_t epc) {
+// Trace line for a trap that isn't an instruction's fault (an interrupt,
+// a single step), taken before the instruction at epc.
+static void cpu_trace_trap(const cpu_t* cpu, const uint32_t epc,
+						   const char* what) {
 	fprintf(cpu->trace,
-			"%10llu  %08X  --------  %-*s  ! interrupt\n",
+			"%10llu  %08X  --------  %-*s  ! %s\n",
 			(unsigned long long)cpu->cycles,
 			(unsigned)epc,
 			CPU_TEXT_WIDTH,
-			"");
+			"",
+			what);
 }
 
 static uint32_t cpu_read_cr(const cpu_t* cpu, const uint32_t cr) {
@@ -670,10 +739,146 @@ static void cpu_write_cr(cpu_t* cpu, const uint32_t cr, const uint32_t value) {
 			cpu->reservation_valid = false;
 			mmu_set_ptbr(cpu->mmu, value);
 			break;
+		case CPU_CR_TCTRL0:
+		case CPU_CR_TCTRL1:
+			cpu->cr[cr] = value & CPU_TCTRL_MASK;
+			cpu->trigger_kinds = 0;
+			for (int i = 0; i < CPU_TRIGGER_COUNT; i++)
+				cpu->trigger_kinds |=
+					cpu->cr[CPU_CR_TCTRL0 + 2 * i] & CPU_TCTRL_MASK & 0xFF;
+			break;
 		default:
 			cpu->cr[cr] = value;
 			break;
 	}
+}
+
+// Whether a trigger of the kind (CPU_TCTRL_X/R/W) matches size bytes at
+// address. Triggers don't match while EXL is set, like interrupts: there a
+// fault would halt.
+static bool cpu_trigger_hit(const cpu_t* cpu, const uint32_t address,
+							const uint32_t size, const uint32_t kind) {
+	if (!(cpu->trigger_kinds & kind)) return false;
+	if (cpu->cr[CPU_CR_STATUS] & CPU_STATUS_EXL) return false;
+	for (int i = 0; i < CPU_TRIGGER_COUNT; i++) {
+		const uint32_t control = cpu->cr[CPU_CR_TCTRL0 + 2 * i];
+		if (!(control & kind)) continue;
+		const uint32_t bits =
+			(control & CPU_TCTRL_SIZE_MASK) >> CPU_TCTRL_SIZE_SHIFT;
+		const uint64_t length = 1ULL << bits;
+		const uint64_t base = cpu->cr[CPU_CR_TADDR0 + 2 * i] & ~(length - 1);
+		if (address < base + length && base < (uint64_t)address + size)
+			return true;
+	}
+	return false;
+}
+
+// ---- the emulator's debugging ---------------------------------------------
+
+static void cpu_debug_update(cpu_t* cpu) {
+	cpu_debug_t* debug = &cpu->debug;
+	debug->active = debug->breakpoint_count || debug->watchpoint_count
+				 || debug->pause || debug->stepping || debug->watch_hit;
+}
+
+// A load or store has accessed memory: a watchpoint may match.
+static void cpu_debug_access(cpu_t* cpu, const uint32_t pc,
+							 const uint32_t address, const uint8_t size,
+							 const uint8_t access) {
+	cpu_debug_t* debug = &cpu->debug;
+	for (int i = 0; i < debug->watchpoint_count; i++) {
+		const cpu_watchpoint_t* watch = &debug->watchpoint[i];
+		if (!(watch->access & access)) continue;
+		if ((uint64_t)address >= (uint64_t)watch->address + watch->length
+			|| (uint64_t)watch->address >= (uint64_t)address + size)
+			continue;
+		debug->watch_hit = true;
+		debug->hit_pc = pc;
+		debug->hit_address = address;
+		debug->hit_access = access;
+		debug->active = true;
+		return;
+	}
+}
+
+static bool cpu_debug_is_breakpoint(const cpu_t* cpu, const uint32_t pc) {
+	for (int i = 0; i < cpu->debug.breakpoint_count; i++)
+		if (cpu->debug.breakpoint[i] == pc) return true;
+	return false;
+}
+
+bool cpu_debug_add_breakpoint(cpu_t* cpu, const uint32_t address) {
+	cpu_debug_t* debug = &cpu->debug;
+	if (cpu_debug_is_breakpoint(cpu, address)) return true;
+	if (debug->breakpoint_count == CPU_BREAKPOINT_COUNT) return false;
+	debug->breakpoint[debug->breakpoint_count++] = address;
+	cpu_debug_update(cpu);
+	return true;
+}
+
+bool cpu_debug_add_watchpoint(cpu_t* cpu, const uint32_t address,
+							  const uint32_t length, const uint8_t access) {
+	cpu_debug_t* debug = &cpu->debug;
+	if (debug->watchpoint_count == CPU_WATCHPOINT_COUNT) return false;
+	debug->watchpoint[debug->watchpoint_count++] = (cpu_watchpoint_t){
+		.address = address,
+		.length = length ? length : 1,
+		.access = access,
+	};
+	cpu_debug_update(cpu);
+	return true;
+}
+
+int cpu_debug_remove(cpu_t* cpu, const uint32_t address) {
+	cpu_debug_t* debug = &cpu->debug;
+	int removed = 0;
+	for (int i = 0; i < debug->breakpoint_count;) {
+		if (debug->breakpoint[i] != address) {
+			i++;
+			continue;
+		}
+		debug->breakpoint[i] = debug->breakpoint[--debug->breakpoint_count];
+		removed++;
+	}
+	for (int i = 0; i < debug->watchpoint_count;) {
+		if (debug->watchpoint[i].address != address) {
+			i++;
+			continue;
+		}
+		debug->watchpoint[i] = debug->watchpoint[--debug->watchpoint_count];
+		removed++;
+	}
+	cpu_debug_update(cpu);
+	return removed;
+}
+
+void cpu_debug_remove_all(cpu_t* cpu) {
+	cpu->debug.breakpoint_count = 0;
+	cpu->debug.watchpoint_count = 0;
+	cpu_debug_update(cpu);
+}
+
+void cpu_debug_pause(cpu_t* cpu) {
+	if (!cpu || cpu->debug.stopped) return;
+	if (cpu->halted) { // nothing runs anyway
+		cpu->debug.stopped = CPU_STOP_PAUSE;
+		return;
+	}
+	cpu->debug.pause = true;
+	cpu_debug_update(cpu);
+}
+
+void cpu_debug_resume(cpu_t* cpu, const uint64_t steps) {
+	if (!cpu) return;
+	cpu_debug_t* debug = &cpu->debug;
+	debug->stopped = CPU_STOP_NONE;
+	debug->pause = false;
+	debug->skip = true;
+	debug->skip_pc = cpu->pc; // the pipeline is empty
+	debug->skip_retired = cpu->retired;
+	debug->stepping = steps > 0;
+	debug->step_target = cpu->retired + steps;
+	cpu_debug_update(cpu);
 }
 
 // Returns the newest in-flight value of reg, falling back to value
@@ -713,6 +918,8 @@ static void cpu_stage_if(cpu_t* cpu, cpu_latch_t* out) {
 		cpu_latch_fault(out, CPU_CAUSE_FETCH_PAGE_FAULT, cpu->pc);
 	} else if (cpu->bus.fetch(cpu->bus.ctx, physical, 4, &raw)) {
 		cpu_latch_fault(out, CPU_CAUSE_FETCH_BUS_ERROR, cpu->pc);
+	} else if (cpu_trigger_hit(cpu, cpu->pc, 4, CPU_TCTRL_X)) {
+		cpu_latch_fault(out, CPU_CAUSE_WATCH, cpu->pc);
 	}
 	out->in.raw = raw;
 
@@ -729,7 +936,7 @@ static bool cpu_stage_id(cpu_t* cpu, cpu_latch_t* out) {
 		return false;
 	}
 
-	const cpu_instruction_t in = cpu_decode(id->in.raw);
+	const cpu_instruction_t in = *cpu_decode_cached(cpu, id->in.raw);
 
 	// MEM-result dependency: wait until the producer leaves MEM
 	const cpu_latch_t* ex = &cpu->pipeline.id_ex;
@@ -748,17 +955,13 @@ static bool cpu_stage_id(cpu_t* cpu, cpu_latch_t* out) {
 	out->a = cpu->gpr[in.rs1];
 	out->b = cpu->gpr[in.rs2];
 	out->d = cpu->gpr[in.rd];
-	if (in.format == CPU_FORMAT_INVALID || cpu_has_reserved_bits(&in)
-		|| cpu_cr_is_illegal(&in))
+	// LL with rs2 set has a reserved bit set
+	if (in.fault == CPU_CAUSE_ILLEGAL_INSTRUCTION)
 		cpu_latch_fault(out, CPU_CAUSE_ILLEGAL_INSTRUCTION, in.raw);
-	else if (cpu_is_privileged(&in) && cpu_user_mode(cpu))
+	else if ((in.flags & CPU_IN_PRIVILEGED) && cpu_user_mode(cpu))
 		cpu_latch_fault(out, CPU_CAUSE_PRIVILEGED_INSTRUCTION, in.raw);
-	else if (in.opcode == CPU_OP_SYSCALL)
-		cpu_latch_fault(out, CPU_CAUSE_SYSCALL, 0);
-	else if (in.opcode == CPU_OP_BREAK)
-		cpu_latch_fault(out, CPU_CAUSE_BREAK, 0);
-	else if (in.opcode == CPU_OP_LL && in.rs2 != 0)
-		cpu_latch_fault(out, CPU_CAUSE_ILLEGAL_INSTRUCTION, in.raw);
+	else if (in.fault) // SYSCALL, BREAK
+		cpu_latch_fault(out, (cpu_cause_t)in.fault, 0);
 	return false;
 }
 
@@ -965,6 +1168,10 @@ static void cpu_stage_mem(cpu_t* cpu, cpu_latch_t* out) {
 						address);
 		return;
 	}
+	if (cpu_trigger_hit(cpu, address, size, store ? CPU_TCTRL_W : CPU_TCTRL_R)) {
+		cpu_latch_fault(out, CPU_CAUSE_WATCH, address);
+		return;
+	}
 
 	uint32_t physical = 0;
 	if ((in->opcode == CPU_OP_SC ? mmu_translate_probe : mmu_translate)(cpu->mmu,
@@ -990,6 +1197,8 @@ static void cpu_stage_mem(cpu_t* cpu, cpu_latch_t* out) {
 				cpu_latch_fault(out, CPU_CAUSE_STORE_PAGE_FAULT, address);
 			else if (cpu->bus.write(cpu->bus.ctx, physical, 4, mem->b))
 				cpu_latch_fault(out, CPU_CAUSE_STORE_BUS_ERROR, address);
+			else if (cpu->debug.watchpoint_count)
+				cpu_debug_access(cpu, mem->pc, address, 4, MMU_ACCESS_WRITE);
 		}
 		return;
 	}
@@ -997,6 +1206,8 @@ static void cpu_stage_mem(cpu_t* cpu, cpu_latch_t* out) {
 		const uint32_t mask = cpu_size_mask(size);
 		if (cpu->bus.write(cpu->bus.ctx, physical, size, mem->d & mask))
 			cpu_latch_fault(out, CPU_CAUSE_STORE_BUS_ERROR, address);
+		else if (cpu->debug.watchpoint_count)
+			cpu_debug_access(cpu, mem->pc, address, size, MMU_ACCESS_WRITE);
 		return;
 	}
 
@@ -1005,6 +1216,8 @@ static void cpu_stage_mem(cpu_t* cpu, cpu_latch_t* out) {
 		cpu_latch_fault(out, CPU_CAUSE_LOAD_BUS_ERROR, address);
 		return;
 	}
+	if (cpu->debug.watchpoint_count)
+		cpu_debug_access(cpu, mem->pc, address, size, MMU_ACCESS_READ);
 	if (in->opcode == CPU_OP_LL) {
 		cpu->reservation_address = physical;
 		cpu->reservation_valid = true;
@@ -1022,6 +1235,9 @@ static void cpu_stage_mem(cpu_t* cpu, cpu_latch_t* out) {
 			break;
 	}
 }
+
+static bool cpu_retire(cpu_t* cpu, const cpu_latch_t* wb);
+static uint32_t cpu_next_pc(const cpu_t* cpu);
 
 // returns true when the pipeline was flushed (halted, waiting, trapped or
 // refetching)
@@ -1046,10 +1262,32 @@ static bool cpu_stage_wb(cpu_t* cpu) {
 		return true;
 	}
 
+	// SS as the instruction started: a single step trap follows it
+	const uint32_t status = cpu->cr[CPU_CR_STATUS];
+	const bool step = (status & (CPU_STATUS_SS | CPU_STATUS_EXL))
+					  == CPU_STATUS_SS;
+
 	if (cpu_writes_rd(&wb->in) && wb->in.rd != CPU_GPR_ZERO)
 		cpu->gpr[wb->in.rd] = wb->result;
 	cpu->retired++;
 
+	// a flush clears the latch wb points at
+	const uint32_t pc = wb->pc;
+	const bool flushed = cpu_retire(cpu, wb);
+	if (cpu->halted || !step) return flushed;
+
+	// before the next instruction: the oldest one in flight (younger ones
+	// are on the right path, a branch is resolved before it retires)
+	const uint32_t next = flushed ? cpu->pc : cpu_next_pc(cpu);
+	if (cpu->trace) cpu_trace_trap(cpu, next, "single step");
+	cpu->cr[CPU_CR_BADADDR] = pc;
+	cpu_trap(cpu, CPU_CAUSE_STEP, next);
+	return true;
+}
+
+// The effects of an instruction besides its result, when it retires;
+// returns true when the pipeline was flushed.
+static bool cpu_retire(cpu_t* cpu, const cpu_latch_t* wb) {
 	switch (wb->in.opcode) {
 		case CPU_OP_HLT:
 			cpu_halt(cpu, wb->pc + 4, 0);
@@ -1059,7 +1297,10 @@ static bool cpu_stage_wb(cpu_t* cpu) {
 			return true;
 		case CPU_OP_MTCR:
 			cpu_write_cr(cpu, wb->in.imm, wb->result);
-			if (wb->in.imm == CPU_CR_STATUS || wb->in.imm == CPU_CR_PTBR) {
+			// the next instructions are fetched again under the new mode,
+			// translation or triggers
+			if (wb->in.imm == CPU_CR_STATUS || wb->in.imm == CPU_CR_PTBR
+				|| wb->in.imm >= CPU_CR_TADDR0) {
 				cpu_refetch(cpu, wb->pc + 4);
 				return true;
 			}
@@ -1080,11 +1321,13 @@ static bool cpu_stage_wb(cpu_t* cpu) {
 			cpu_refetch(cpu, wb->pc + 4);
 			return true;
 		case CPU_OP_IRET: {
-			// IE = PIE, UM = PUM, EXL = 0
+			// IE = PIE, UM = PUM, SS = PSS, EXL = 0
 			uint32_t status = cpu->cr[CPU_CR_STATUS];
-			status &= ~(CPU_STATUS_IE | CPU_STATUS_UM | CPU_STATUS_EXL);
+			status &= ~(CPU_STATUS_IE | CPU_STATUS_UM | CPU_STATUS_SS
+						| CPU_STATUS_EXL);
 			if (status & CPU_STATUS_PIE) status |= CPU_STATUS_IE;
 			if (status & CPU_STATUS_PUM) status |= CPU_STATUS_UM;
+			if (status & CPU_STATUS_PSS) status |= CPU_STATUS_SS;
 			cpu->cr[CPU_CR_STATUS] = status;
 			cpu_refetch(cpu, cpu->cr[CPU_CR_EPC]);
 			return true;
@@ -1109,9 +1352,15 @@ static bool cpu_interrupt(cpu_t* cpu) {
 	if (!cpu->irq || !(status & CPU_STATUS_IE) || (status & CPU_STATUS_EXL))
 		return false;
 	const uint32_t epc = cpu_next_pc(cpu);
-	if (cpu->trace) cpu_trace_interrupt(cpu, epc);
+	if (cpu->trace) cpu_trace_trap(cpu, epc, "interrupt");
 	cpu_trap(cpu, CPU_CAUSE_INTERRUPT, epc);
 	return true;
+}
+
+void cpu_sleep(cpu_t* cpu, const uint64_t cycles) {
+	if (!cpu || cpu->halted || !cpu->waiting) return;
+	cpu->cycles += cycles;
+	cpu->irq = false;
 }
 
 void cpu_set_irq(cpu_t* cpu, const bool level) {
@@ -1129,11 +1378,42 @@ void cpu_invalidate_reservation(cpu_t* cpu, const uint32_t physical,
 		cpu->reservation_valid = false;
 }
 
+// Between two instructions, like an interrupt: stops for the debugger
+// when it has to. In WFI it doesn't wait for a breakpoint, which only
+// counts once the CPU runs on. returns true when it has stopped
+static bool cpu_debug_check(cpu_t* cpu, const bool breakpoints) {
+	cpu_debug_t* debug = &cpu->debug;
+	const uint32_t pc = cpu_next_pc(cpu);
+	if (debug->skip
+		&& (cpu->retired != debug->skip_retired || pc != debug->skip_pc))
+		debug->skip = false;
+
+	cpu_stop_t stop = CPU_STOP_NONE;
+	if (debug->watch_hit)
+		stop = CPU_STOP_WATCHPOINT;
+	else if (debug->pause)
+		stop = CPU_STOP_PAUSE;
+	else if (debug->stepping && cpu->retired >= debug->step_target)
+		stop = CPU_STOP_STEP;
+	else if (breakpoints && !debug->skip && cpu_debug_is_breakpoint(cpu, pc))
+		stop = CPU_STOP_BREAKPOINT;
+	if (stop == CPU_STOP_NONE) return false;
+
+	cpu_refetch(cpu, pc);
+	debug->stopped = stop;
+	debug->watch_hit = false;
+	debug->pause = false;
+	debug->stepping = false;
+	cpu_debug_update(cpu);
+	return true;
+}
+
 void cpu_update(cpu_t* cpu) {
-	if (!cpu || cpu->halted) return;
+	if (!cpu || cpu->halted || cpu->debug.stopped) return;
 	cpu->cycles++;
 
 	if (cpu->waiting) {
+		if (cpu->debug.active && cpu_debug_check(cpu, false)) return;
 		if (!cpu->irq) return;
 		cpu->waiting = false; // resumes at pc, or takes the interrupt below
 	}
@@ -1142,6 +1422,7 @@ void cpu_update(cpu_t* cpu) {
 
 	if (cpu_stage_wb(cpu)) return;
 	if (cpu_interrupt(cpu)) return;
+	if (cpu->debug.active && cpu_debug_check(cpu, true)) return;
 	cpu_stage_mem(cpu, &next.mem_wb);
 
 	uint32_t target = 0;
@@ -1193,10 +1474,10 @@ void cpu_dump(const cpu_t* cpu, FILE* out) {
 		const uint32_t value = cpu_read_cr(cpu, cr);
 		fprintf(out, "  %-8s %08X", disasm_cr_name(cr), (unsigned)value);
 		if (cr == CPU_CR_STATUS) {
-			static const char* const flags[] = { "IE", "PIE", "UM", "PUM",
-												 "EXL" };
+			static const char* const flags[] = { "IE",  "PIE", "UM", "PUM",
+												 "EXL", "SS",  "PSS" };
 			fputs(" ", out);
-			for (int bit = 0; bit < 5; bit++)
+			for (int bit = 0; bit < 7; bit++)
 				if (value & (1u << bit)) fprintf(out, " %s", flags[bit]);
 		} else if (cr == CPU_CR_CAUSE) {
 			fprintf(out, "  %s", cpu_cause_name(value));
@@ -1205,6 +1486,16 @@ void cpu_dump(const cpu_t* cpu, FILE* out) {
 				  out);
 		}
 		fputc('\n', out);
+	}
+	for (int i = 0; i < CPU_TRIGGER_COUNT; i++) {
+		const uint32_t control = cpu->cr[CPU_CR_TCTRL0 + 2 * i];
+		if (!(control & (CPU_TCTRL_X | CPU_TCTRL_R | CPU_TCTRL_W))) continue;
+		fprintf(out,
+				"  %-8s %08X  %-8s %08X\n",
+				disasm_cr_name(CPU_CR_TADDR0 + 2 * i),
+				(unsigned)cpu->cr[CPU_CR_TADDR0 + 2 * i],
+				disasm_cr_name(CPU_CR_TCTRL0 + 2 * i),
+				(unsigned)control);
 	}
 
 	// oldest first

@@ -38,3 +38,39 @@ jobs:
 
       - name: Test
         run: ctest --test-dir build --output-on-failure --parallel 4
+
+  # The same tests with AddressSanitizer and UndefinedBehaviorSanitizer:
+  # out-of-bounds accesses, use after free, overflows and the like in the
+  # emulator fail the test that triggers them.
+  sanitize:
+    name: sanitizers
+    runs-on: ubuntu-latest
+    env:
+      # SDL's and the C library's own allocations at exit aren't ours
+      ASAN_OPTIONS: detect_leaks=0:abort_on_error=1
+      UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Configure
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          -DSDL_UNIX_CONSOLE_BUILD=ON
+          -DWRM081632_SANITIZE=address,undefined
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Build the demo firmware
+        run: >
+          python3 tools/m.py --rom firmware/main.m -o build/firmware.s &&
+          python3 tools/asm.py build/firmware.s -o build/firmware.rom
+
+      - name: Test the M compiler
+        run: python3 m/tests/run.py --emulator bin/wrm081632
+
+      - name: Test
+        run: ctest --test-dir build --output-on-failure --parallel 4

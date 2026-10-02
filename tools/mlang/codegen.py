@@ -35,9 +35,10 @@ from .typesys import *
 
 NREGS = 18  # r10-r27
 
-ASM_RESERVED = {f"r{i}" for i in range(32)} | {f"cr{i}" for i in range(12)} | {
+ASM_RESERVED = {f"r{i}" for i in range(32)} | {f"cr{i}" for i in range(16)} | {
 	"zero", "tp", "fp", "sp", "ra", "status", "epc", "ivec", "scratch", "cause",
-	"badaddr", "ptbr", "cycle", "cycleh", "instret", "instreth", "cpuid"}
+	"badaddr", "ptbr", "cycle", "cycleh", "instret", "instreth", "cpuid",
+	"taddr0", "tctrl0", "taddr1", "tctrl1"}
 
 LABEL_RE = re.compile(r"^\s*([A-Za-z_]\w*)\s*(?::|=)", re.M)
 INCLUDE_RE = re.compile(r'^\s*\.include\s+"([^"]+)"', re.M)

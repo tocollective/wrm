@@ -135,13 +135,45 @@ static void audiocard_frame(audiocard_t* card) {
 	card->frame_count++;
 }
 
-void audiocard_tick(audiocard_t* card) {
-	card->sample_clock += AUDIO_SAMPLE_RATE;
-	// more than once per tick only with a clock below the sample rate
-	while (card->sample_clock >= card->clock_rate) {
-		card->sample_clock -= card->clock_rate;
-		audiocard_frame(card);
+// Every tick sample_clock goes up by the sample rate, and each time it
+// reaches the clock rate a frame is played.
+static uint64_t audiocard_frame_due(const audiocard_t* card) {
+	return (card->clock_rate - card->sample_clock + AUDIO_SAMPLE_RATE - 1)
+		 / AUDIO_SAMPLE_RATE;
+}
+
+static bool audiocard_playing(const audiocard_t* card) {
+	for (int n = 0; n < AUDIO_VOICE_COUNT; n++)
+		if (card->voice[n].control & AUDIO_CONTROL_ON) return true;
+	return false;
+}
+
+void audiocard_run(audiocard_t* card, uint64_t ticks) {
+	// silent frames nobody hears do nothing at all
+	if (!card->connected && !audiocard_playing(card)) {
+		card->sample_clock = (card->sample_clock
+							  + ticks % card->clock_rate * AUDIO_SAMPLE_RATE)
+						   % card->clock_rate;
+		return;
 	}
+	while (ticks > 0) {
+		const uint64_t due = audiocard_frame_due(card);
+		if (ticks < due) {
+			card->sample_clock += ticks * AUDIO_SAMPLE_RATE;
+			return;
+		}
+		ticks -= due;
+		card->sample_clock += due * AUDIO_SAMPLE_RATE;
+		// more than once per tick only with a clock below the sample rate
+		while (card->sample_clock >= card->clock_rate) {
+			card->sample_clock -= card->clock_rate;
+			audiocard_frame(card);
+		}
+	}
+}
+
+uint64_t audiocard_next_event(const audiocard_t* card) {
+	return audiocard_playing(card) ? audiocard_frame_due(card) : TICKS_NEVER;
 }
 
 // The voice that offset falls in, with offset made relative to it; NULL

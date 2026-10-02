@@ -24,9 +24,14 @@
 
 // Real-time clock: the host's wall clock time and a one-shot alarm.
 // IRQ line is asserted while STATUS.ALARM is set.
+// With a virtual time (rtc_set_virtual) it counts clock ticks from a fixed
+// moment instead, so a run doesn't depend on when or how fast it happens.
 typedef struct rtc {
 	pic_t* pic;
 	uint8_t irq;
+	uint32_t frequency; // clock ticks per second
+	const uint64_t* virtual_ticks; // NULL = the host's time
+	uint64_t virtual_epoch; // seconds since 1970 at tick 0
 	uint32_t period; // ticks between alarm checks
 	uint32_t ticks; // towards the next check
 	uint64_t seconds; // latched by a read of SECONDS_LO
@@ -42,8 +47,14 @@ void rtc_destroy(rtc_t* rtc);
 
 // clears the alarm; the time keeps following the host's clock
 void rtc_reset(rtc_t* rtc);
-// advances the alarm check by one clock tick
-void rtc_tick(rtc_t* rtc);
+// From now on the time is epoch seconds after 1970-01-01 UTC plus *ticks
+// clock ticks; the UTC offset is 0.
+void rtc_set_virtual(rtc_t* rtc, const uint64_t* ticks, const uint64_t epoch);
+// Advances the alarm check by that many clock ticks.
+void rtc_run(rtc_t* rtc, const uint64_t ticks);
+// Ticks until the next alarm check (1 = the next tick) while the alarm is
+// armed, TICKS_NEVER otherwise.
+uint64_t rtc_next_event(const rtc_t* rtc);
 
 // bus side: offset is relative to the device base; return true on bus error
 bool rtc_read(rtc_t* rtc, const uint32_t offset, const uint8_t size,

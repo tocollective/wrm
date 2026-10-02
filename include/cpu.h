@@ -28,8 +28,25 @@ typedef enum cpu_cr {
 	CPU_CR_INSTRETH = 10, // high 32 bits
 	// read-only, supervisor
 	CPU_CR_CPUID = 11, // ISA version and extensions
+	// debug triggers, see CPU_TCTRL_*
+	CPU_CR_TADDR0 = 12,
+	CPU_CR_TCTRL0 = 13,
+	CPU_CR_TADDR1 = 14,
+	CPU_CR_TCTRL1 = 15,
 	CPU_CR_COUNT,
 } cpu_cr_t;
+
+#define CPU_TRIGGER_COUNT 2 // TADDRn = TADDR0 + 2n, TCTRLn = TCTRL0 + 2n
+
+// TCTRL: what a trigger matches, in the range of 2^SIZE bytes that holds
+// TADDR. A match raises CPU_CAUSE_WATCH before the instruction runs.
+#define CPU_TCTRL_X 0x01 // instruction fetch
+#define CPU_TCTRL_R 0x02 // load
+#define CPU_TCTRL_W 0x04 // store
+#define CPU_TCTRL_SIZE_SHIFT 8 // bits 12:8: log2 of the range in bytes
+#define CPU_TCTRL_SIZE_MASK 0x1F00
+#define CPU_TCTRL_MASK                                                         \
+	(CPU_TCTRL_X | CPU_TCTRL_R | CPU_TCTRL_W | CPU_TCTRL_SIZE_MASK)
 
 // CPUID: the ISA version in bits 31:24, the extensions below
 #define CPU_CPUID_VERSION 1
@@ -38,9 +55,11 @@ typedef enum cpu_cr {
 #define CPU_CPUID_ATOMIC 0x04 // LL and SC
 #define CPU_CPUID_MULH 0x08 // MULH, MULHU and MULHSU
 #define CPU_CPUID_TLBI_MODES 0x10 // TLBI of an ASID and of the whole TLB
+#define CPU_CPUID_DEBUG 0x20 // STATUS.SS and the triggers
 #define CPU_CPUID                                                              \
 	(CPU_CPUID_VERSION << 24 | CPU_CPUID_MMU | CPU_CPUID_FPU                   \
-	 | CPU_CPUID_ATOMIC | CPU_CPUID_MULH | CPU_CPUID_TLBI_MODES)
+	 | CPU_CPUID_ATOMIC | CPU_CPUID_MULH | CPU_CPUID_TLBI_MODES               \
+	 | CPU_CPUID_DEBUG)
 
 // TLBI modes, in imm14
 typedef enum cpu_tlbi_mode {
@@ -55,9 +74,11 @@ typedef enum cpu_tlbi_mode {
 #define CPU_STATUS_UM 0x04 // user mode, 0 = supervisor
 #define CPU_STATUS_PUM 0x08 // UM before the handler was entered
 #define CPU_STATUS_EXL 0x10 // in the handler: faults halt, no interrupts
+#define CPU_STATUS_SS 0x20 // single step: a trap after each instruction
+#define CPU_STATUS_PSS 0x40 // SS before the handler was entered
 #define CPU_STATUS_MASK                                                        \
 	(CPU_STATUS_IE | CPU_STATUS_PIE | CPU_STATUS_UM | CPU_STATUS_PUM           \
-	 | CPU_STATUS_EXL)
+	 | CPU_STATUS_EXL | CPU_STATUS_SS | CPU_STATUS_PSS)
 
 // CAUSE values (see docs/INSTRUCTIONS.md#exceptions)
 typedef enum cpu_cause {
@@ -75,6 +96,8 @@ typedef enum cpu_cause {
 	CPU_CAUSE_PRIVILEGED_INSTRUCTION = 11, // supervisor only, run in user mode
 	CPU_CAUSE_SYSCALL = 12,
 	CPU_CAUSE_BREAK = 13,
+	CPU_CAUSE_STEP = 14, // after an instruction run with STATUS.SS
+	CPU_CAUSE_WATCH = 15, // a trigger matched
 } cpu_cause_t;
 
 // See docs/INSTRUCTIONS.md
@@ -182,6 +205,18 @@ typedef enum cpu_format {
 	CPU_FORMAT_U,
 } cpu_format_t;
 
+// What the pipeline needs to know about an instruction, worked out once
+// when it is decoded
+#define CPU_IN_WRITES_RD 0x0001 // has a result for rd (even if rd is r0)
+#define CPU_IN_READS_RS1 0x0002
+#define CPU_IN_READS_RS2 0x0004
+#define CPU_IN_READS_RD 0x0008 // stores, branches, FMADD and FMSUB
+#define CPU_IN_RESULT_IN_MEM 0x0010 // rd is produced in MEM: loads, LL, SC
+#define CPU_IN_STORE 0x0020 // SB, SH and SW
+#define CPU_IN_BRANCH 0x0040
+#define CPU_IN_SERIALIZING 0x0080 // MFCR, MTCR and IRET
+#define CPU_IN_PRIVILEGED 0x0100 // supervisor only
+
 typedef struct cpu_instruction {
 	uint32_t raw;
 	uint8_t opcode;
@@ -190,7 +225,16 @@ typedef struct cpu_instruction {
 	uint8_t rs1;
 	uint8_t rs2;
 	uint32_t imm; // already sign/zero extended
+	uint16_t flags; // CPU_IN_*
+	uint8_t size; // bytes a load or store accesses, 0 for the others
+	// cpu_cause_t raised whatever the mode: an illegal instruction,
+	// SYSCALL or BREAK; 0 = none
+	uint8_t fault;
 } cpu_instruction_t;
+
+// Decoded instructions, looked up by their word: decoding is a function
+// of the word alone, so nothing ever has to be invalidated.
+#define CPU_DECODE_CACHE_SIZE 1024 // a power of 2
 
 // Pipeline register between two stages. !valid = bubble.
 typedef struct cpu_latch {
@@ -210,6 +254,50 @@ typedef struct cpu_pipeline {
 	cpu_latch_t mem_wb;
 } cpu_pipeline_t;
 
+// The emulator's own debugging (the monitor), unseen by software: it stops
+// the CPU between two instructions, like an interrupt that never enters a
+// handler. The ones in flight are squashed and refetched when it goes on,
+// so everything before pc has run and nothing after it has.
+#define CPU_BREAKPOINT_COUNT 16
+#define CPU_WATCHPOINT_COUNT 8
+
+typedef enum cpu_stop {
+	CPU_STOP_NONE = 0,
+	CPU_STOP_PAUSE, // asked to stop
+	CPU_STOP_STEP, // ran the instructions it was asked to
+	CPU_STOP_BREAKPOINT, // the next instruction is at a breakpoint
+	CPU_STOP_WATCHPOINT, // the last instruction accessed a watched address
+} cpu_stop_t;
+
+typedef struct cpu_watchpoint {
+	uint32_t address; // virtual
+	uint32_t length; // bytes, at least 1
+	uint8_t access; // MMU_ACCESS_READ and/or MMU_ACCESS_WRITE
+} cpu_watchpoint_t;
+
+typedef struct cpu_debug {
+	bool active; // something below is set: checked between instructions
+	uint32_t breakpoint[CPU_BREAKPOINT_COUNT]; // virtual addresses
+	uint8_t breakpoint_count;
+	cpu_watchpoint_t watchpoint[CPU_WATCHPOINT_COUNT];
+	uint8_t watchpoint_count;
+	bool pause; // stop before the next instruction
+	bool stepping; // stop once retired reaches step_target
+	uint64_t step_target;
+	// After going on from a breakpoint the CPU doesn't stop there again
+	// until an instruction has retired.
+	bool skip;
+	uint32_t skip_pc;
+	uint64_t skip_retired;
+	// a watchpoint matched; the CPU stops once the access has retired
+	bool watch_hit;
+	// stopped: nothing runs until cpu_debug_resume
+	cpu_stop_t stopped;
+	uint32_t hit_pc; // watchpoint: the instruction that accessed
+	uint32_t hit_address; // ... the address and what it accessed
+	uint8_t hit_access;
+} cpu_debug_t;
+
 typedef struct cpu {
 	uint32_t gpr[CPU_GPR_COUNT]; // general purpose registers
 	uint32_t pc; // fetch address; architectural PC once halted or waiting
@@ -222,10 +310,13 @@ typedef struct cpu {
 	uint64_t retired; // instructions completed in WB, INSTRET/INSTRETH
 	bool reservation_valid;
 	uint32_t reservation_address; // physical word reserved by LL
+	uint8_t trigger_kinds; // CPU_TCTRL_X/R/W of the triggers, OR-ed
 	cpu_pipeline_t pipeline;
+	cpu_instruction_t decoded[CPU_DECODE_CACHE_SIZE];
 	mmu_t* mmu; // translates every fetch, load and store
 	bus_t bus; // physical memory
 	FILE* trace; // log of retired instructions and traps, NULL = off
+	cpu_debug_t debug;
 } cpu_t;
 
 cpu_t* cpu_create(const bus_t bus);
@@ -233,9 +324,26 @@ void cpu_destroy(cpu_t* cpu);
 
 void cpu_reset(cpu_t* cpu);
 void cpu_update(cpu_t* cpu); // advances the pipeline by one clock cycle
+// Asleep in WFI with the IRQ line low: that many cycles pass as they would
+// one by one with cpu_update.
+void cpu_sleep(cpu_t* cpu, const uint64_t cycles);
 void cpu_set_irq(cpu_t* cpu, const bool level);
 void cpu_invalidate_reservation(cpu_t* cpu, uint32_t physical,
 							uint8_t size);
+
+// The emulator's debugging, see cpu_debug_t. Breakpoints and watchpoints
+// survive a reset; adding one fails (false) when there is no room.
+bool cpu_debug_add_breakpoint(cpu_t* cpu, const uint32_t address);
+bool cpu_debug_add_watchpoint(cpu_t* cpu, const uint32_t address,
+							  const uint32_t length, const uint8_t access);
+// Removes the breakpoints and watchpoints at address; returns how many.
+int cpu_debug_remove(cpu_t* cpu, const uint32_t address);
+void cpu_debug_remove_all(cpu_t* cpu);
+// Stops before the next instruction: at once when halted, at the next
+// cycle in WFI.
+void cpu_debug_pause(cpu_t* cpu);
+// Goes on; with steps > 0 it stops again after that many instructions.
+void cpu_debug_resume(cpu_t* cpu, const uint64_t steps);
 
 cpu_instruction_t cpu_decode(const uint32_t raw);
 // R-format instructions with a single source, whose rs2 must be zero

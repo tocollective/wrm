@@ -32,10 +32,17 @@ void mmu_set_ptbr(mmu_t* mmu, const uint32_t value) {
 	mmu->ptbr = next;
 }
 
+// The TLB entries have changed.
+static void mmu_forget_lookups(mmu_t* mmu) {
+	for (size_t i = 0; i < MMU_LOOKUP_SIZE; i++)
+		mmu->lookup[i].index = MMU_LOOKUP_NONE;
+}
+
 void mmu_flush(mmu_t* mmu) {
 	if (!mmu) return;
 	memset(mmu->tlb, 0, sizeof(mmu->tlb));
 	mmu->next_victim = 0;
+	mmu_forget_lookups(mmu);
 }
 
 void mmu_invalidate(mmu_t* mmu, const uint32_t address) {
@@ -48,6 +55,7 @@ void mmu_invalidate(mmu_t* mmu, const uint32_t address) {
 			&& (entry->global || entry->asid == asid))
 			entry->valid = false;
 	}
+	mmu_forget_lookups(mmu);
 }
 
 void mmu_invalidate_asid(mmu_t* mmu, const uint8_t asid) {
@@ -55,6 +63,7 @@ void mmu_invalidate_asid(mmu_t* mmu, const uint8_t asid) {
 	for (size_t i = 0; i < MMU_TLB_SIZE; i++)
 		if (!mmu->tlb[i].global && mmu->tlb[i].asid == asid)
 			mmu->tlb[i].valid = false;
+	mmu_forget_lookups(mmu);
 }
 
 // Page table walks never read device registers.
@@ -108,13 +117,19 @@ static bool mmu_translate_impl(mmu_t* mmu, const uint32_t address,
 
 	const uint32_t vpn = address >> MMU_PAGE_SHIFT;
 	const uint8_t asid = (uint8_t)((mmu->ptbr & MMU_PTBR_ASID) >> 4);
+	mmu_lookup_t* lookup = &mmu->lookup[vpn & (MMU_LOOKUP_SIZE - 1)];
 	mmu_tlb_entry_t* entry = NULL;
-	for (size_t i = 0; i < MMU_TLB_SIZE; i++) {
-		mmu_tlb_entry_t* candidate = &mmu->tlb[i];
-		if (candidate->valid && candidate->vpn == vpn
-			&& (candidate->global || candidate->asid == asid)) {
-			entry = candidate;
-			break;
+	if (lookup->index != MMU_LOOKUP_NONE && lookup->vpn == vpn
+		&& lookup->asid == asid) {
+		entry = &mmu->tlb[lookup->index];
+	} else {
+		for (size_t i = 0; i < MMU_TLB_SIZE; i++) {
+			mmu_tlb_entry_t* candidate = &mmu->tlb[i];
+			if (candidate->valid && candidate->vpn == vpn
+				&& (candidate->global || candidate->asid == asid)) {
+				entry = candidate;
+				break;
+			}
 		}
 	}
 	if (!entry) {
@@ -130,7 +145,13 @@ static bool mmu_translate_impl(mmu_t* mmu, const uint32_t address,
 		mmu_tlb_entry_t walked;
 		if (mmu_walk(mmu, address, &walked)) return true;
 		*entry = walked;
+		mmu_forget_lookups(mmu);
 	}
+	*lookup = (mmu_lookup_t){
+		.vpn = vpn,
+		.asid = asid,
+		.index = (int8_t)(entry - mmu->tlb),
+	};
 
 	if ((entry->flags & access) != access) return true;
 	if (user && !(entry->flags & MMU_PTE_U)) return true;
@@ -159,4 +180,26 @@ bool mmu_translate_probe(mmu_t* mmu, const uint32_t address,
 						 const mmu_access_t access, const bool user,
 						 uint32_t* physical) {
 	return mmu_translate_impl(mmu, address, access, user, false, physical);
+}
+
+bool mmu_peek(mmu_t* mmu, const uint32_t address, uint32_t* physical) {
+	if (!(mmu->ptbr & MMU_PTBR_ENABLE)) {
+		*physical = address;
+		return false;
+	}
+	const uint32_t vpn = address >> MMU_PAGE_SHIFT;
+	const uint8_t asid = (uint8_t)((mmu->ptbr & MMU_PTBR_ASID) >> 4);
+	mmu_tlb_entry_t found;
+	bool hit = false;
+	for (size_t i = 0; i < MMU_TLB_SIZE && !hit; i++) {
+		const mmu_tlb_entry_t* entry = &mmu->tlb[i];
+		if (entry->valid && entry->vpn == vpn
+			&& (entry->global || entry->asid == asid)) {
+			found = *entry;
+			hit = true;
+		}
+	}
+	if (!hit && mmu_walk(mmu, address, &found)) return true;
+	*physical = (found.ppn << MMU_PAGE_SHIFT) | (address & MMU_PAGE_MASK);
+	return false;
 }

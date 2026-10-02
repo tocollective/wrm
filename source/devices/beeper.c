@@ -31,12 +31,9 @@ static uint32_t beeper_step(const beeper_t* beeper) {
 	return (uint32_t)(((uint64_t)beeper->frequency << 32) / beeper->clock_rate);
 }
 
-// Adds the level of this tick to the current sample and emits the samples
-// that are due. A full buffer drops them: the host isn't keeping up.
-static void beeper_sample(beeper_t* beeper, const int32_t level) {
-	beeper->level_sum += level;
-	beeper->level_ticks++;
-	beeper->sample_clock += BEEPER_SAMPLE_RATE;
+// Emits the samples that are due. A full buffer drops them: the host
+// isn't keeping up.
+static void beeper_emit(beeper_t* beeper) {
 	// more than once per tick only with a clock below the sample rate
 	while (beeper->sample_clock >= beeper->clock_rate) {
 		beeper->sample_clock -= beeper->clock_rate;
@@ -52,7 +49,30 @@ static void beeper_sample(beeper_t* beeper, const int32_t level) {
 	}
 }
 
-void beeper_tick(beeper_t* beeper) {
+// Adds the level of this tick to the current sample.
+static void beeper_sample(beeper_t* beeper, const int32_t level) {
+	beeper->level_sum += level;
+	beeper->level_ticks++;
+	beeper->sample_clock += BEEPER_SAMPLE_RATE;
+	beeper_emit(beeper);
+}
+
+// Ticks of silence, a sample at a time.
+static void beeper_silence(beeper_t* beeper, uint64_t ticks) {
+	while (ticks > 0) {
+		// ticks up to the one that emits the next sample, at least 1
+		const uint64_t due =
+			(beeper->clock_rate - beeper->sample_clock + BEEPER_SAMPLE_RATE - 1)
+			/ BEEPER_SAMPLE_RATE;
+		const uint64_t n = ticks < due ? ticks : due;
+		beeper->level_ticks += (uint32_t)n;
+		beeper->sample_clock += n * BEEPER_SAMPLE_RATE;
+		ticks -= n;
+		beeper_emit(beeper);
+	}
+}
+
+static void beeper_tick(beeper_t* beeper) {
 	const bool on = beeper->control & BEEPER_CONTROL_ON;
 	int32_t level = 0;
 	if (on && beeper->step) {
@@ -63,6 +83,28 @@ void beeper_tick(beeper_t* beeper) {
 	if (on && beeper->duration && --beeper->duration == 0)
 		beeper->control &= ~BEEPER_CONTROL_ON;
 	if (beeper->connected) beeper_sample(beeper, level);
+}
+
+void beeper_run(beeper_t* beeper, uint64_t ticks) {
+	// a tone the host hears is sampled tick by tick
+	for (; ticks > 0 && beeper->connected
+		   && (beeper->control & BEEPER_CONTROL_ON);
+		 ticks--)
+		beeper_tick(beeper);
+	if (ticks == 0) return;
+
+	if (beeper->control & BEEPER_CONTROL_ON) { // nobody hears it
+		uint64_t sounding = ticks;
+		if (beeper->duration && beeper->duration < sounding)
+			sounding = beeper->duration;
+		beeper->phase += (uint32_t)(beeper->step * sounding);
+		if (beeper->duration) {
+			beeper->duration -= (uint32_t)sounding;
+			if (beeper->duration == 0) beeper->control &= ~BEEPER_CONTROL_ON;
+		}
+	} else if (beeper->connected) {
+		beeper_silence(beeper, ticks);
+	}
 }
 
 bool beeper_read(beeper_t* beeper, const uint32_t offset, const uint8_t size,

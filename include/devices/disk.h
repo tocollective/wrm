@@ -51,6 +51,7 @@ typedef struct disk {
 	bool removable;
 	uint32_t word_ticks; // clock ticks per word moved, at least 1
 	FILE* file; // NULL = no disk
+	char* path; // of the image, NULL = no disk
 	bool readonly;
 	uint32_t sectors;
 	bool changed;
@@ -82,8 +83,11 @@ void disk_eject(disk_t* disk);
 
 // Stops a running transfer; the sectors it has written stay written.
 void disk_reset(disk_t* disk);
-// advances a running transfer by one clock tick
-void disk_tick(disk_t* disk);
+// Advances a running transfer by that many clock ticks.
+void disk_run(disk_t* disk, const uint64_t ticks);
+// Ticks until the next word moves (1 = the next tick), TICKS_NEVER while
+// no transfer runs.
+uint64_t disk_next_event(const disk_t* disk);
 
 // bus side: offset is relative to the device base; return true on bus error
 bool disk_read(disk_t* disk, const uint32_t offset, const uint8_t size,

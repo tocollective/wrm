@@ -146,8 +146,11 @@ void videocard_destroy(videocard_t* videocard);
 
 // Stops a running DMA command; VRAM keeps its contents.
 void videocard_reset(videocard_t* videocard);
-// advances the frame and a running DMA command by one clock tick
-void videocard_tick(videocard_t* videocard);
+// Advances the frame and a running DMA command by that many clock ticks.
+void videocard_run(videocard_t* videocard, const uint64_t ticks);
+// Ticks until the next one that ends a frame or moves a DMA word (1 = the
+// next tick).
+uint64_t videocard_next_event(const videocard_t* videocard);
 
 // bus side: offset is relative to the device base; return true on bus error
 bool videocard_read(videocard_t* videocard, const uint32_t offset,

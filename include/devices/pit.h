@@ -36,8 +36,12 @@ pit_t* pit_create(pic_t* pic, const uint8_t irq, const uint32_t frequency);
 void pit_destroy(pit_t* pit);
 
 void pit_reset(pit_t* pit);
-// advances the timer by one clock tick
-void pit_tick(pit_t* pit);
+// Advances the timer by that many clock ticks, as if ticked one by one.
+void pit_run(pit_t* pit, const uint64_t ticks);
+// Ticks until the next tick that changes the IRQ line (1 = the next one),
+// TICKS_NEVER if none will. The counters in between are only seen through
+// the registers, so the timer can be run up to date before they are read.
+uint64_t pit_next_event(const pit_t* pit);
 
 // bus side: offset is relative to the device base; return true on bus error
 bool pit_read(pit_t* pit, const uint32_t offset, const uint8_t size,

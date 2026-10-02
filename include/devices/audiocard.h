@@ -81,8 +81,11 @@ audiocard_t* audiocard_create(pic_t* pic, const uint8_t irq, const bus_t dma,
 void audiocard_destroy(audiocard_t* card);
 
 void audiocard_reset(audiocard_t* card);
-// advances the card by one clock tick
-void audiocard_tick(audiocard_t* card);
+// Advances the card by that many clock ticks.
+void audiocard_run(audiocard_t* card, const uint64_t ticks);
+// Ticks until the next output frame (1 = the next tick) while a voice is
+// on, TICKS_NEVER while all are off: then frames only make silence.
+uint64_t audiocard_next_event(const audiocard_t* card);
 
 // bus side: offset is relative to the device base; return true on bus error
 bool audiocard_read(audiocard_t* card, const uint32_t offset,

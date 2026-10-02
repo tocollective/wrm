@@ -53,10 +53,23 @@ typedef struct mmu_tlb_entry {
 	uint32_t pte_address; // physical address of the leaf PTE
 } mmu_tlb_entry_t;
 
+// Where the TLB holds a page, so a lookup doesn't search all of it: the
+// index of the first entry that matched the page in that ASID. Any change
+// to the entries clears it, so it always finds what the search would.
+#define MMU_LOOKUP_SIZE 16 // a power of 2
+#define MMU_LOOKUP_NONE (-1)
+
+typedef struct mmu_lookup {
+	uint32_t vpn;
+	uint8_t asid;
+	int8_t index; // in the TLB, MMU_LOOKUP_NONE = empty
+} mmu_lookup_t;
+
 typedef struct mmu {
 	uint32_t ptbr;
 	mmu_tlb_entry_t tlb[MMU_TLB_SIZE];
 	uint8_t next_victim;
+	mmu_lookup_t lookup[MMU_LOOKUP_SIZE]; // by the low bits of the VPN
 	bus_t bus; // physical memory, for page table walks
 } mmu_t;
 
@@ -75,6 +88,11 @@ void mmu_invalidate_asid(mmu_t* mmu, const uint8_t asid);
 bool mmu_translate(mmu_t* mmu, const uint32_t address,
 				   const mmu_access_t access, const bool user,
 				   uint32_t* physical);
+// The physical address an access to address would use, as the TLB or the
+// page tables have it, without changing anything (no TLB fill, no A/D
+// bits) and whatever the permissions: for a debugger. Returns true if the
+// page isn't mapped.
+bool mmu_peek(mmu_t* mmu, const uint32_t address, uint32_t* physical);
 // Like mmu_translate, but does not mark the page dirty (failed SC).
 bool mmu_translate_probe(mmu_t* mmu, const uint32_t address,
 						 const mmu_access_t access, const bool user,

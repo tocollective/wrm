@@ -2,7 +2,11 @@
 #define WRM_APPLICATION_H
 #include "display.h"
 #include "machine.h"
+#include "monitor.h"
 #include "speaker.h"
+
+// Where Ctrl+Alt+S saves a snapshot and Ctrl+Alt+L loads it from
+#define APPLICATION_SNAPSHOT_PATH "wrm081632.snap"
 
 typedef struct application {
 	bool running;
@@ -12,6 +16,8 @@ typedef struct application {
 	machine_t* machine;
 	display_t* display; // NULL in headless mode
 	speaker_t* speaker; // NULL in headless mode, with --mute or no audio
+	monitor_t* monitor; // NULL without --monitor
+	bool held; // the debugger had stopped the machine at the last update
 	FILE* trace_file; // --trace=PATH, NULL when off or on stderr
 	float mouse_x, mouse_y; // motion the mouse hasn't been given yet
 	uint64_t speed_ns; // host time of the last speed sample

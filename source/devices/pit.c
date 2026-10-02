@@ -30,21 +30,37 @@ void pit_reset(pit_t* pit) {
 	pit_update_irq(pit);
 }
 
-void pit_tick(pit_t* pit) {
-	pit->count++;
-	if (!(pit->control & PIT_CONTROL_ENABLE)) return;
+// Every tick COUNT goes up and, while enabled, VALUE goes down; the timer
+// expires on the tick VALUE reaches 0 (RELOAD = 0 behaves like 1: it
+// expires on every tick), and then reloads or stops.
+void pit_run(pit_t* pit, const uint64_t ticks) {
+	pit->count += ticks;
+	if (!(pit->control & PIT_CONTROL_ENABLE) || ticks == 0) return;
 
-	// RELOAD = 0 behaves like 1: the timer expires on every tick
-	if (pit->value > 0) pit->value--;
-	if (pit->value > 0) return;
+	const uint64_t first = pit->value > 0 ? pit->value : 1;
+	if (ticks < first) {
+		pit->value -= (uint32_t)ticks;
+		return;
+	}
 
 	pit->expired = true;
 	if (pit->control & PIT_CONTROL_PERIODIC) {
-		pit->value = pit->reload;
+		// after each expiry VALUE starts again from RELOAD
+		const uint64_t period = pit->reload > 0 ? pit->reload : 1;
+		pit->value = pit->reload - (uint32_t)((ticks - first) % period);
 	} else {
+		pit->value = 0;
 		pit->control &= ~PIT_CONTROL_ENABLE;
 	}
 	pit_update_irq(pit);
+}
+
+uint64_t pit_next_event(const pit_t* pit) {
+	// expiring again while EXPIRED is set changes nothing but VALUE and
+	// CONTROL, which a read brings up to date
+	if (!(pit->control & PIT_CONTROL_ENABLE) || pit->expired)
+		return TICKS_NEVER;
+	return pit->value > 0 ? pit->value : 1;
 }
 
 bool pit_read(pit_t* pit, const uint32_t offset, const uint8_t size,

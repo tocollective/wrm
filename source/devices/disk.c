@@ -1,5 +1,7 @@
 #include "devices/disk.h"
 
+#include <string.h>
+
 static void disk_update_irq(disk_t* disk) {
 	pic_set_line(disk->pic, disk->irq, disk->done || disk->changed);
 }
@@ -34,6 +36,10 @@ static bool disk_open(disk_t* disk, const char* path) {
 
 	const unsigned long sectors = (unsigned long)size / DISK_SECTOR_SIZE;
 	disk->sectors = sectors > UINT32_MAX ? UINT32_MAX : (uint32_t)sectors;
+	const size_t length = strlen(path) + 1;
+	disk->path = malloc(length);
+	if (!disk->path) error("Failed to allocate disk controller!");
+	memcpy(disk->path, path, length);
 	print("Disk %s: %u sectors%s",
 		  path,
 		  disk->sectors,
@@ -44,6 +50,8 @@ static bool disk_open(disk_t* disk, const char* path) {
 static void disk_close(disk_t* disk) {
 	if (disk->file) fclose(disk->file);
 	disk->file = NULL;
+	free(disk->path);
+	disk->path = NULL;
 	disk->readonly = false;
 	disk->sectors = 0;
 }
@@ -177,12 +185,8 @@ static void disk_buffer_poke32(disk_t* disk, const uint32_t value) {
 	p[3] = value >> 24;
 }
 
-void disk_tick(disk_t* disk) {
-	if (!disk->busy) return;
-	if (disk->wait) {
-		disk->wait--;
-		return;
-	}
+// The tick on which the next word moves: wait is 0.
+static void disk_move_word(disk_t* disk) {
 	disk->wait = disk->word_ticks - 1;
 	const bool reading = disk->command == DISK_COMMAND_READ;
 
@@ -219,6 +223,22 @@ void disk_tick(disk_t* disk) {
 	disk->sector++;
 	disk->count--;
 	if (disk->count == 0) disk_finish(disk, DISK_ERROR_NONE);
+}
+
+void disk_run(disk_t* disk, uint64_t ticks) {
+	while (ticks > 0 && disk->busy) {
+		if (ticks <= disk->wait) {
+			disk->wait -= (uint32_t)ticks;
+			return;
+		}
+		ticks -= (uint64_t)disk->wait + 1;
+		disk->wait = 0;
+		disk_move_word(disk);
+	}
+}
+
+uint64_t disk_next_event(const disk_t* disk) {
+	return disk->busy ? (uint64_t)disk->wait + 1 : TICKS_NEVER;
 }
 
 bool disk_read(disk_t* disk, const uint32_t offset, const uint8_t size,

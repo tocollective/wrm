@@ -191,6 +191,33 @@ static void netcard_dns_finish(netcard_t* net, const uint32_t addr) {
 	net->dns_status = NET_DNS_DONE | (addr ? 0 : NET_DNS_FAILED);
 }
 
+void netcard_disconnect(netcard_t* net) {
+	if (!net) return;
+	network_lookup_free(net->lookup);
+	net->lookup = NULL;
+	if (net->dns_status & NET_DNS_BUSY) netcard_dns_finish(net, 0);
+	for (int i = 0; i < NET_SOCKET_COUNT; i++) {
+		net_socket_t* s = &net->socket[i];
+		switch (s->state) {
+			case NET_STATE_CONNECTED:
+				netcard_lost(s, NET_ERROR_NETWORK);
+				break;
+			case NET_STATE_CONNECTING:
+			case NET_STATE_LISTENING:
+			case NET_STATE_UDP:
+				netcard_close(s);
+				s->error = NET_ERROR_NETWORK;
+				s->events |= NET_EVENT_CLOSED;
+				break;
+			default: // closed already, or by the other end
+				network_close(s->host);
+				s->host = NETWORK_NO_SOCKET;
+				break;
+		}
+	}
+	netcard_update_irq(net);
+}
+
 void netcard_poll(netcard_t* net) {
 	if (!net || !net->link) return;
 	uint32_t addr = 0;

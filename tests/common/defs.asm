@@ -68,6 +68,7 @@ KBD_FLUSH       = 1 << 0
 UART_DATA       = 0x00
 UART_STATUS     = 0x04
 UART_CONTROL    = 0x08
+UART_RX_READY   = 1 << 0
 UART_TX_READY   = 1 << 1
 UART_FLUSH      = 1 << 0
 HOST_ESCAPE     = 0x1B              ; Esc typed in the host terminal
@@ -275,12 +276,23 @@ RTC_ALARM       = 1 << 0            ; STATUS
 STATUS_IE       = 1 << 0
 STATUS_PUM      = 1 << 3            ; user mode after IRET
 STATUS_EXL      = 1 << 4            ; in the handler: set on entry and at reset
+STATUS_SS       = 1 << 5            ; single step
+STATUS_PSS      = 1 << 6            ; SS before the handler
 
 CAUSE_SYSCALL   = 12
 CAUSE_BREAK     = 13
+CAUSE_STEP      = 14
+CAUSE_WATCH     = 15
 
-; CPUID: ISA version 1 with MMU, FPU, LL/SC, MULH and the TLBI modes
-CPUID           = 1 << 24 | 0x1F
+; TCTRL0/TCTRL1: what a trigger matches, and log2 of its range in bytes
+TCTRL_X         = 1 << 0
+TCTRL_R         = 1 << 1
+TCTRL_W         = 1 << 2
+TCTRL_SIZE_SHIFT = 8
+
+; CPUID: ISA version 1 with MMU, FPU, LL/SC, MULH, the TLBI modes and the
+; debug extension
+CPUID           = 1 << 24 | 0x3F
 
 ; MMU (docs/INSTRUCTIONS.md#memory-management)
 PTBR_EN         = 1 << 0

@@ -21,8 +21,10 @@ SDL_AppResult SDL_AppInit(void** appstate, int argc, char* argv[]) {
 	SDL_InitFlags initFlags = 0;
 	if (!headless) initFlags = SDL_INIT_VIDEO | SDL_INIT_GAMEPAD;
 	if (!SDL_Init(initFlags)) error(SDL_GetError());
+	// unthrottled, every iteration runs the machine as long as it can
 	if (headless)
-		SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE, HEADLESS_ITERATION_RATE);
+		SDL_SetHint(SDL_HINT_MAIN_CALLBACK_RATE,
+					config_get()->unthrottled ? "0" : HEADLESS_ITERATION_RATE);
 
 	*appstate = application_create(argc, argv);
 	if (*appstate == NULL) return SDL_APP_FAILURE;

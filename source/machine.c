@@ -1,8 +1,20 @@
 #include "machine.h"
 
+#include "config.h"
+
 machine_t* machine_create(void) {
+	const config_t* cfg = config_get();
 	machine_t* machine = (machine_t*)calloc(1, sizeof(machine_t));
+	if (!machine) error("Failed to allocate the machine!");
 	machine->motherboard = motherboard_create();
+	if (cfg->input_path) machine->input = input_load(cfg->input_path);
+
+	motherboard_t* mb = machine->motherboard;
+	if (cfg->rtc_virtual) rtc_set_virtual(mb->rtc, &mb->tick, cfg->rtc_epoch);
+	machine->deterministic = cfg->deterministic;
+	machine->net_period = mb->clock->rate / MACHINE_NET_POLLS_PER_SECOND;
+	if (machine->net_period == 0) machine->net_period = 1;
+	machine->next_poll = machine->net_period;
 	return machine;
 }
 
@@ -11,22 +23,40 @@ void machine_destroy(machine_t* machine) {
 	if (machine->motherboard) {
 		motherboard_destroy(machine->motherboard);
 	}
+	input_destroy(machine->input);
 
 	free(machine);
 	machine = NULL;
 }
 
-void machine_update(machine_t* machine) {
-	if (!machine) return;
-
+uint64_t machine_run(machine_t* machine, const uint64_t ticks) {
+	if (!machine) return 0;
 	motherboard_t* mb = machine->motherboard;
-	const uint64_t ticks = clock_update(mb->clock);
-	for (uint64_t i = 0; i < ticks && !machine_stopped(machine); i++) {
-		motherboard_tick(mb);
-		machine->ticks++;
+	const uint64_t start = machine->ticks;
+	const uint64_t end = start + ticks;
+	while (machine->ticks < end && !machine_stopped(machine)
+		   && !machine_held(machine)) {
+		input_feed(machine->input, machine->ticks, mb);
+		uint64_t until = end;
+		const uint64_t event = input_next_tick(machine->input);
+		if (event < until) until = event;
+		if (machine->deterministic && machine->next_poll < until)
+			until = machine->next_poll;
+
+		machine->ticks += motherboard_run(mb, until - machine->ticks);
+		if (machine->deterministic && machine->ticks == machine->next_poll) {
+			netcard_poll(mb->netcard);
+			machine->next_poll += machine->net_period;
+		}
 	}
 	// the host's network moves between batches of ticks, not every tick
-	netcard_poll(mb->netcard);
+	if (!machine->deterministic) netcard_poll(mb->netcard);
+	return machine->ticks - start;
+}
+
+void machine_update(machine_t* machine) {
+	if (!machine) return;
+	machine_run(machine, clock_update(machine->motherboard->clock));
 }
 
 void machine_reset(machine_t* machine) {
@@ -39,5 +69,9 @@ bool machine_powered_off(const machine_t* machine) {
 }
 
 bool machine_stopped(const machine_t* machine) {
-	return machine->motherboard->cpu->halted || machine_powered_off(machine);
+	return motherboard_stopped(machine->motherboard);
+}
+
+bool machine_held(const machine_t* machine) {
+	return machine->motherboard->cpu->debug.stopped != CPU_STOP_NONE;
 }

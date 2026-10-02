@@ -125,6 +125,10 @@ void netcard_destroy(netcard_t* net);
 
 // Closes every socket and forgets a running lookup.
 void netcard_reset(netcard_t* net);
+// The host's side of the sockets is gone (a snapshot was loaded): every
+// socket that was open is closed by the other end with NET_ERROR_NETWORK,
+// a lookup fails. What was received stays readable on a connection.
+void netcard_disconnect(netcard_t* net);
 // host side: moves data between the sockets and the host's network,
 // often (every iteration of the main loop)
 void netcard_poll(netcard_t* net);

@@ -12,7 +12,8 @@ cmake --build build && ctest --test-dir build
 A `Debug` build runs several times slower and may not keep up with the
 32 MHz clock. The title bar shows the speed the machine really runs at
 and its share of the clock rate; below 100% the guest's time, which it
-counts in ticks, falls behind the host's.
+counts in ticks, falls behind the host's. `--unthrottled` runs it as fast
+as the host can instead (see [Speed and determinism](#speed-and-determinism)).
 
 ```sh
 dd if=/dev/zero of=firmware.rom  bs=1m  count=32
@@ -25,6 +26,8 @@ python3 tools/m.py --rom firmware/main.m -o firmware.s
 python3 tools/asm.py firmware.s -o firmware.rom
 bin/wrm081632 [--rom PATH] [--ram SIZE[,...]] [--clock HZ] [--hdd PATH]
               [--floppy PATH] [--mute] [--no-net] [--net=ADDR] [--headless]
+              [--unthrottled] [--deterministic] [--rtc=SECONDS] [--input PATH]
+              [--monitor[=PORT]] [--pause] [--load PATH]
               [--trace[=PATH]] [--debug]
 ```
 
@@ -39,6 +42,13 @@ bin/wrm081632 [--rom PATH] [--ram SIZE[,...]] [--clock HZ] [--hdd PATH]
 | `--no-net`         | cut the network card off the host's network (see [Network](#network)) |
 | `--net=ADDR`       | listening sockets of the network card bind to `ADDR`, `127.0.0.1` by default |
 | `--headless`       | no window and no sound (the video card, the beeper and the audio card still run, but nothing is shown or heard); the UART console still uses stdin and stdout |
+| `--unthrottled`    | run as fast as the host can, not at the clock rate (see [Speed and determinism](#speed-and-determinism)) |
+| `--deterministic`  | the same ROM, disks and input give the same run: `--unthrottled`, a virtual RTC, the network polled at fixed ticks |
+| `--rtc=SECONDS`    | a virtual RTC: it starts at `SECONDS` after 1970-01-01 UTC and counts clock ticks (`0` with `--deterministic`) |
+| `--input PATH`     | feed the keyboard, the UART, the mouse and the power button from an [input script](#input-scripts) |
+| `--monitor[=PORT]` | the [monitor](#monitor), a debugging console on `127.0.0.1:PORT` (`4040` by default) |
+| `--pause`          | start with the machine stopped, for the monitor          |
+| `--load PATH`      | start from a [snapshot](#snapshots)                       |
 | `--trace[=PATH]`   | log every instruction that reaches write-back to `PATH`, or to stderr (see [Debugging](#debugging)) |
 | `--debug`          | dump the CPU state when the machine stops or the emulator quits |
 | `-h, --help`       | show the options                                         |
@@ -57,7 +67,8 @@ mode it also quits when the CPU halts:
 | `1`         | a fault the CPU couldn't handle (headless only, reported on stderr), or an emulator error |
 
 With a window, a halted machine keeps the window open; Ctrl+Alt+R resets
-it, as at any other time.
+it, as at any other time. Ctrl+Alt+S saves a [snapshot](#snapshots) to
+`wrm081632.snap` in the current directory, Ctrl+Alt+L loads it back.
 
 Closing the window or Ctrl+C in the terminal is the power button: if the
 guest has enabled the power controller's IRQ in the PIC and still runs,
@@ -107,6 +118,44 @@ and connects only to public addresses:
 | `--listen ADDR`, `--port N` | where it listens, `127.0.0.1:8080` by default |
 
 Listening and UDP are not available in a browser.
+
+## Speed and determinism
+
+The emulator keeps the pipeline cycle-exact, so a trace, `CYCLE` and the
+pipeline tests give the same results however the host runs it. Devices
+only run when they have something to do — the end of a frame, a DMA word,
+a timer expiring — and catch up in one go before the CPU reads them; a
+CPU waiting in `WFI` skips straight to the next such event.
+
+`--unthrottled` drops the clock rate as a limit: the machine runs as fast
+as the host can, in slices of 10ms of machine time. The guest's time
+(timer, frames, sound) then runs faster than the host's, so sound plays
+in pieces; the RTC still tells the host's time unless it is virtual.
+
+`--deterministic` makes a run depend only on what the machine is given:
+it runs unthrottled, the RTC is virtual (from `--rtc=SECONDS`, or 1970),
+and the network is polled every millisecond of machine time instead of
+whenever the host gets to it. Input from the window and the terminal
+still comes when it comes; an input script gives it at exact ticks.
+
+### Input scripts
+
+`--input PATH` feeds the machine from a file, one event per line, at the
+clock tick (since power-on) it names, before that tick runs; `+N` is `N`
+ticks after the event before. `#` starts a comment.
+
+```
+1000      key 4 down        # a key by its USB HID usage ID (4 = A)
++500      key 4 up
+32000000  uart hello\n      # bytes for the UART, with \n \r \t \\ \xNN
++0        mouse 5 -3        # motion
++0        button left down  # left, right or middle; down or up
++0        wheel -1
+64000000  power             # the power button: asks the guest to power off
+```
+
+Events reach the devices as the host's would: a full FIFO drops them, a
+disabled mouse ignores them.
 
 ## Booting from disk
 
@@ -185,6 +234,59 @@ Words the assembler can't produce (data, reserved bits set) are shown as
 python3 tools/disasm.py firmware.rom [--base 0xFE000000] [--start ADDR] [-n WORDS]
 ```
 
+### Monitor
+
+`--monitor` opens a console on a TCP port of `127.0.0.1` (only programs
+on the host can connect): `nc 127.0.0.1 4040`. It stops the machine
+between two instructions, steps it, shows and changes registers and
+memory and sets breakpoints and watchpoints. These are the emulator's:
+the guest doesn't see them, they cost it nothing until they hit, and
+they work in ROM. `--pause` starts the machine stopped, before its first
+instruction.
+
+| Command | |
+|---------|-|
+| `c`, `p`, `s [N]` | go on, stop, run `N` instructions and stop |
+| `r` | registers |
+| `x ADDR [N]`, `xp ADDR [N]` | memory at a virtual or a physical address |
+| `w ADDR VALUE`, `wp ADDR VALUE` | write a word of RAM |
+| `d [ADDR] [N]` | disassemble, by default at the next instruction |
+| `b ADDR` | stop before the instruction at `ADDR` |
+| `watch ADDR [LEN] [r\|w\|rw]` | stop after a load or store touches the range (a write by default) |
+| `del ADDR\|all`, `list` | remove breakpoints and watchpoints, list them |
+| `info` | the devices |
+| `reset`, `save PATH`, `load PATH` | reset the machine, save or load a [snapshot](#snapshots) |
+
+A stop is like an interrupt that never enters a handler: everything
+before the next instruction has run and nothing after it has, so the
+registers are exact. The client is told when the machine stops at a
+breakpoint, a watchpoint or after a step:
+
+```
+> b 0xFE000040
+breakpoint at FE000040
+> c
+
+breakpoint
+*> FE000040  0200014A  sw r1, 128(r0)
+>
+```
+
+Software can debug itself too: `STATUS.SS` traps after each instruction
+and two triggers match fetches, loads and stores
+([docs/INSTRUCTIONS.md](docs/INSTRUCTIONS.md#debugging)).
+
+### Snapshots
+
+A snapshot (monitor `save`, Ctrl+Alt+S) holds the whole machine: the CPU
+down to its pipeline and TLB, RAM, VRAM and every device. Loading one
+(`load`, Ctrl+Alt+L, `--load PATH`) goes on exactly where it was saved.
+Disk images are referenced, not copied: loading warns if one has changed
+since, and the floppy drive gets back the disk it had. Network
+connections can't be saved; after a load the guest sees them closed. A
+snapshot loads only with the same ROM, clock rate and RAM, into the same
+build of the emulator.
+
 ## Tests
 
 ```sh
@@ -205,9 +307,10 @@ runs every ROM through it as a test of its own.
 | `video`    | the video card: modes, palette, drawing engine, DMA, VBLANK |
 | `sound`    | the beeper's registers and `DURATION` timing; the audio card's voices, loops, signals and DMA faults |
 | `mouse`    | the mouse's registers (headless, so without events)         |
+| `input`    | an input script in deterministic mode, the UART from stdin  |
 | `net`      | the network card without a link (`--no-net`), and with one over the host's loopback: TCP, UDP, DNS |
-| `rtc`      | the real-time clock: the host's time and its latch, the alarm and its IRQ line |
-| `power`    | the power controller: its state at power-on, a reset by software and `RESET_CAUSE` |
+| `rtc`      | the real-time clock: the host's time and its latch, the alarm and its IRQ line; the virtual time |
+| `power`    | the power controller: its state at power-on, a reset by software and `RESET_CAUSE`; what a reset clears and what it keeps |
 | `devices`  | every device's `ID` register, unused pages of the I/O region |
 
 A test includes `tests/common/harness.asm` and defines `test_main`. It
@@ -225,8 +328,18 @@ Comment lines in a test set up the machine it runs on:
 | `; @floppy SPEC`  | put a disk in the floppy drive, `N` or `FILE.asm` as for `@hdd` |
 | `; @args ARGS`    | more emulator options, e.g. `--ram 4M,2M`               |
 | `; @rom FILE.m`   | run a ROM compiled from M (e.g. `../../firmware/main.m`) instead of the test itself |
+| `; @input EVENT`  | a line of the [input script](#input-scripts), e.g. `; @input 1000 key 4 down` |
+| `; @stdin TEXT`   | bytes on the emulator's stdin (the UART), with `\n`, `\t`, `\\` and `\xNN` escapes |
 
 Each `@hdd` attaches the next disk, 0 and then 1.
+
+CI also runs every test with the emulator built with AddressSanitizer and
+UndefinedBehaviorSanitizer; locally:
+
+```sh
+cmake -S . -B build-asan -DWRM081632_SANITIZE=address,undefined
+cmake --build build-asan && ctest --test-dir build-asan
+```
 
 ## Web (Emscripten)
 
