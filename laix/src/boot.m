@@ -1,4 +1,4 @@
-import { debugPrint, debugHex } from "debug_uart.m"
+import { debugPrint } from "debug_uart.m"
 import { panic, setPanicStage } from "panic.m"
 import { trapLayoutValid } from "trap_frame.m"
 import { trapRegisterSelfTest, trapBreakCount } from "trap.m"
@@ -58,9 +58,7 @@ let kernelInit(): Void {
     let before: UWord = trapBreakCount()
     let failed: Word = trapRegisterSelfTest()
     if failed != 0 || trapBreakCount() != before + 1 {
-        debugPrint("trap self-test failure=")
-        debugHex(failed as UWord)
-        panic("trap context was not preserved", null)
+        panic("trap context was not preserved (failure=$h)", null, failed)
         return
     }
     if syscall(0xFFFFFFFF, 1, 2, 3, 4, 5, 6) != -38 {

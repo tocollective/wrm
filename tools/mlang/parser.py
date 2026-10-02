@@ -275,6 +275,8 @@ class Parser:
 		return Param(loc, name, self.param_type())
 
 	def param_type(self):
+		if self.at("..."):
+			return VariadicType(self.next().loc)
 		mut = self.accept("mut")
 		typ = self.type(slice_ok=True)
 		if mut:
@@ -454,7 +456,7 @@ class Parser:
 			return IncDec(tok.loc, tok.value, target)
 		if tok.kind == "op" and tok.value in ("+|", "-|", "*|") and self.peek().is_("="):
 			raise ParseError(tok, f"there is no '{tok.value}='; write 'x = x {tok.value} y'")
-		if isinstance(target, Call) or isinstance(target, BuiltinCall):
+		if isinstance(target, (Call, BuiltinCall, VaArg)):
 			return ExprStmt(start.loc, target)
 		before = self.tokens[self.tokens.index(start) - 1]
 		if before.is_("return") and self.void_result:
@@ -693,6 +695,15 @@ class Parser:
 	def builtin(self, tok):
 		if not self.at("("):
 			raise ParseError(tok, f"'{tok.value}' is a built-in function: it can only be called")
+		if tok.value == "vaArg":
+			self.next()
+			pack = self.with_struct(self.expr)
+			self.expect(",")
+			index = self.with_struct(self.expr)
+			self.expect(",")
+			target = self.with_struct(self.type)
+			self.expect(")")
+			return VaArg(tok.loc, pack, index, target)
 		if tok.value in ("sizeof", "alignof", "offsetof"):
 			self.next()
 			typ = self.with_struct(self.type)

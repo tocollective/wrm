@@ -273,8 +273,10 @@ class Checker:
 			return ArrT(elem, n)
 		if isinstance(t, SliceType):
 			return PtrT(self.resolve_type(t.elem), t.mut, False)
+		if isinstance(t, VariadicType):
+			return VARARGS
 		if isinstance(t, FuncType):
-			params = [self.resolve_type(p.type) for p in t.params]
+			params = self.param_types(t.params)
 			return FuncT(params, self.resolve_type(t.result, void_ok=True))
 		raise AssertionError(t)
 
@@ -381,10 +383,12 @@ class Checker:
 
 	def param_types(self, params):
 		names = set()
-		for p in params:
+		for i, p in enumerate(params):
 			if p.name in names:
 				self.error(p.loc, f"parameter '{p.name}' is already declared")
 			names.add(p.name)
+			if isinstance(p.type, VariadicType) and i != len(params) - 1:
+				self.error(p.loc, "a variadic parameter must be last")
 		return [self.resolve_type(p.type) for p in params]
 
 	def global_var(self, sym):
@@ -728,7 +732,8 @@ class Checker:
 	def st_ExprStmt(self, s):
 		t = self.expr(s.expr)
 		if t is not ERROR and t is not VOID:
-			name = s.expr.name if isinstance(s.expr, BuiltinCall) else show(s.expr.func)
+			name = ("vaArg" if isinstance(s.expr, VaArg) else
+					s.expr.name if isinstance(s.expr, BuiltinCall) else show(s.expr.func))
 			self.warning(s.loc, f"the result of '{name}' is lost")
 		self.uses(s.expr)
 
@@ -938,6 +943,9 @@ class Checker:
 		elif isinstance(e, BuiltinCall):
 			for a in e.args:
 				self.uses(a)
+		elif isinstance(e, VaArg):
+			self.uses(e.pack)
+			self.uses(e.index)
 		elif isinstance(e, Binary):
 			self.uses(e.left)
 			self.uses(e.right)
@@ -1138,15 +1146,43 @@ class Checker:
 		if ft.kind != "func":
 			self.error(e.loc, f"'{show(e.func)}' is '{ft}', not a function")
 			return ERROR
-		if len(e.args) != len(ft.params):
-			self.error(e.loc, f"'{show(e.func)}' takes {len(ft.params)} argument"
-							  f"{'' if len(ft.params) == 1 else 's'}, found {len(e.args)}")
+		fixed = ft.fixed_params
+		if len(e.args) < len(fixed) or (not ft.variadic and len(e.args) != len(fixed)):
+			at_least = "at least " if ft.variadic else ""
+			self.error(e.loc, f"'{show(e.func)}' takes {at_least}{len(fixed)} argument"
+							  f"{'' if len(fixed) == 1 else 's'}, found {len(e.args)}")
+		e.va_forward = False
 		for i, a in enumerate(e.args):
-			if i < len(ft.params):
-				self.check_value(a, ft.params[i], arg=True)
+			if i < len(fixed):
+				self.check_value(a, fixed[i], arg=True)
+			elif ft.variadic:
+				t = self.expr(a)
+				if t is VARARGS and len(e.args) == len(fixed) + 1:
+					e.va_forward = True
+				elif t is UNTYPED:
+					self.coerce(a, t, WORD if fits(a.const, WORD) else UWORD)
+				elif t is NULL:
+					self.coerce(a, t, PtrT(VOID))
+				elif t is not ERROR and not self.variadic_scalar(t):
+					self.error(a.loc, f"a variadic argument must be a scalar, not '{t}'; "
+									 "forward a pack as the sole trailing argument")
 			else:
 				self.expr(a)
 		return ft.result
+
+	def variadic_scalar(self, t):
+		return t.kind in ("int", "bool", "float", "ptr", "func", "enum")
+
+	def ex_VaArg(self, e, want):
+		pack = self.expr(e.pack)
+		if pack is not ERROR and pack is not VARARGS:
+			self.error(e.pack.loc, f"'vaArg' needs a variadic parameter, not '{pack}'")
+		self.check_value(e.index, UWORD)
+		target = self.resolve_type(e.target)
+		if target is not ERROR and not self.variadic_scalar(target):
+			self.error(e.loc, f"'vaArg' needs a scalar result type, not '{target}'")
+			return ERROR
+		return target
 
 	def ex_Unary(self, e, want):
 		op = e.op
@@ -1513,6 +1549,13 @@ class Checker:
 		if name in ("wfi", "hlt", "fence", "breakpoint"):
 			count(0)
 			return VOID
+		if name == "vaCount":
+			if not count(1):
+				return ERROR
+			pack = self.expr(args[0])
+			if pack is not ERROR and pack is not VARARGS:
+				self.error(args[0].loc, f"'vaCount' needs a variadic parameter, not '{pack}'")
+			return UWORD
 		if name == "mfcr" or name == "mtcr":
 			if not count(1 if name == "mfcr" else 2):
 				return ERROR

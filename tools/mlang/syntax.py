@@ -20,6 +20,7 @@ TypeName = node("TypeName", "name")
 PointerType = node("PointerType", "target mut volatile")
 ArrayType = node("ArrayType", "elem size")
 SliceType = node("SliceType", "elem mut")              # T[] and mut T[], parameters only
+VariadicType = node("VariadicType")                    # named trailing 'args: ...'
 FuncType = node("FuncType", "params result")
 
 # declarations
@@ -69,6 +70,7 @@ FieldInit = node("FieldInit", "name value")
 ArrayLit = node("ArrayLit", "elems")
 TypeQuery = node("TypeQuery", "op type field")          # sizeof alignof offsetof
 BuiltinCall = node("BuiltinCall", "name args")
+VaArg = node("VaArg", "pack index target")             # vaArg(pack, index, T)
 FuncLit = node("FuncLit", "params result body")      # (a: A): R { ... }; also 'let mut f()'
 
 

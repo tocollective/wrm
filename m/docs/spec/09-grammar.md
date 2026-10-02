@@ -55,7 +55,8 @@ type_name   = "Byte" | "UByte" | "Half" | "UHalf" | "Word" | "UWord"
             | "Bool" | "Float" | "Void" | identifier ;
 
 param_type  = [ "mut" ] type "[" "]"      (* только в параметре *)
-            | type ;
+            | type
+            | "..." ;                    (* только последний параметр *)
 ```
 
 ## Объявления
@@ -170,11 +171,12 @@ array_lit   = "[" [ expr { "," expr } [ "," ] ] "]" ;
 
 builtin_call = ( "sizeof" | "alignof" ) "(" type ")"
              | "offsetof" "(" type "," identifier ")"
+             | "vaArg" "(" expr "," expr "," type ")"
              | builtin_name call_suffix ;
 builtin_name = "mfcr" | "mtcr" | "syscall" | "wfi" | "hlt" | "tlbi"
              | "fence" | "breakpoint" | "clz" | "ctz" | "popcount"
              | "bswap" | "rotl" | "rotr" | "atomicLoad" | "atomicStore"
-             | "atomicSwap" | "atomicAdd" | "atomicCompareSwap" ;
+             | "atomicSwap" | "atomicAdd" | "atomicCompareSwap" | "vaCount" ;
 
 const_expr  = expr ;                        (* значение известно при компиляции *)
 ```

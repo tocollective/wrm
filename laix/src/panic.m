@@ -1,5 +1,5 @@
 import { TrapFrame } from "trap_frame.m"
-import { debugPrint, debugHex, debugPutChar } from "debug_uart.m"
+import { debugPrint } from "debug_uart.m"
 
 let mut panicStage: *UByte = "startup"
 let PANIC_POWER: *volatile mut UWord = 0xFD004000 as *volatile mut UWord
@@ -30,40 +30,23 @@ let causeName(cause: UWord): *UByte {
     return "unknown"
 }
 
-let panic(reason: *UByte, frame: *TrapFrame): Void {
+let panic(reason: *UByte, frame: *TrapFrame, args: ...): Void {
     // Fatal path: supervisor, IRQs off, no nested exceptions.
     mtcr(0, 0x10)
     debugPrint("\nLA/IX PANIC: ")
-    debugPrint(reason)
-    debugPrint("\nstage=")
-    debugPrint(panicStage)
+    debugPrint(reason, args)
+    debugPrint("\nstage=$s", panicStage)
     if frame != null {
-        if frame.status & 8 != 0 debugPrint(" origin=user\n")
-        else debugPrint(" origin=supervisor\n")
-        debugPrint("cause=")
-        debugHex(frame.cause)
-        debugPrint(" (")
-        debugPrint(causeName(frame.cause))
-        debugPrint(")\nepc=")
-        debugHex(frame.epc)
-        debugPrint(" badaddr=")
-        debugHex(frame.badaddr)
+        let mut origin: *UByte = "supervisor"
+        if frame.status & 8 != 0 origin = "user"
+        debugPrint(" origin=$s\ncause=$h ($s)\n", origin, frame.cause, causeName(frame.cause))
+        debugPrint("epc=$h badaddr=$h", frame.epc, frame.badaddr)
         if frame.cause == 0 debugPrint(" (unchanged by IRQ)")
-        debugPrint("\nstatus=")
-        debugHex(frame.status)
-        debugPrint(" ptbr=")
-        debugHex(frame.ptbr)
-        debugPrint(" fcsr=")
-        debugHex(frame.fcsr)
-        debugPutChar(10)
+        debugPrint("\nstatus=$h ptbr=$h fcsr=$h\n", frame.status, frame.ptbr, frame.fcsr)
         for i: UWord in 0..32 {
-            debugPutChar(114)
-            debugPutChar(48 + i / 10)
-            debugPutChar(48 + i % 10)
-            debugPutChar(61)
-            debugHex(frame.regs[i])
-            if i % 4 == 3 debugPutChar(10)
-            else debugPutChar(32)
+            debugPrint("r$02i=$h", i, frame.regs[i])
+            if i % 4 == 3 debugPrint("\n")
+            else debugPrint(" ")
         }
     } else {
         debugPrint("\n(no trap frame)\n")

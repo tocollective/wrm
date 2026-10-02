@@ -101,7 +101,7 @@ Arguments are assigned in order to `r1`–`r8`, then to the stack:
 - If an argument doesn't fit in the registers left, it goes on the stack,
   and so do all the arguments after it. A 64-bit value is never split
   between a register and the stack.
-- Arguments that match `...` in a variadic function always go on the
+- Arguments that match C `...` in a variadic function always go on the
   stack, even while registers are free. So `va_list` is just a pointer
   that walks up the stack. The usual C promotions apply: `char` and
   `short` become `int`, and `float` becomes `double`.
@@ -110,6 +110,35 @@ Stack arguments start at `sp` at the moment of the call and go upwards,
 one 4-byte slot each. An 8-byte value takes an 8-aligned 8-byte slot, with
 padding before it if needed. The caller allocates this area and the callee
 may change it.
+
+### M variadic arguments
+
+M's named trailing parameter `args: ...` uses a borrowed argument pack,
+separate from the C `...` convention above. The pack is an 8-byte value
+aligned to 4 bytes: a 32-bit data pointer at offset 0 and a `UWord` count
+at offset 4. It is passed after the fixed parameters as a two-word small
+aggregate, following the ordinary register/stack rules. It is never
+split between registers and the stack; a stack pack occupies an 8-aligned
+8-byte slot. A hidden aggregate-result pointer still precedes all parameters.
+
+The caller evaluates fixed and trailing arguments from left to right.
+Each trailing scalar is saved in one 4-aligned, 4-byte slot in its frame.
+Signed narrow integers are sign-extended, unsigned ones are zero-extended,
+`Bool` is 0 or 1, and `Float` retains its binary32 bits. Pointers and
+function pointers are stored as addresses. Untyped integer literals use
+`Word` when possible, otherwise `UWord`; an untyped `null` uses `*Void`.
+Aggregates cannot be trailing arguments. An empty pack has pointer 0 and count 0.
+
+`vaCount(args)` reads the count. `vaArg(args, i, T)` loads the word at
+`data + 4*i`, interprets it as scalar type `T` and normalizes narrow
+integer results. It performs no numeric conversion or runtime type/bounds
+check: the callee must use a matching type and `i < count`.
+The pack can be forwarded as the sole trailing argument of another M
+variadic call, preserving its pointer and count. Its data remains borrowed
+from the original caller and must not outlive that call.
+
+External variadic functions declared in M must implement this pack ABI;
+they do not directly call C-style variadic functions.
 
 ### Return values
 

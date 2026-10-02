@@ -68,7 +68,7 @@ Byte  UByte  Half  UHalf  Word  UWord  Bool  Float  Void
 Имена встроенных функций: `mfcr`, `mtcr`, `syscall`, `wfi`, `hlt`,
 `tlbi`, `fence`, `breakpoint`, `clz`, `ctz`, `popcount`, `bswap`,
 `rotl`, `rotr`, `atomicLoad`, `atomicStore`, `atomicSwap`, `atomicAdd`,
-`atomicCompareSwap`, `sizeof`, `alignof`, `offsetof`.
+`atomicCompareSwap`, `sizeof`, `alignof`, `offsetof`, `vaCount`, `vaArg`.
 
 ## 1.5 Числовые литералы
 

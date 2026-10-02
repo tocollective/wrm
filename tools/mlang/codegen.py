@@ -56,7 +56,7 @@ def reg(i):
 
 
 def is_aggr(t):
-	return t.kind in ("struct", "array")
+	return t.kind in ("struct", "array", "varargs")
 
 
 def scalar_bits(v, t):
@@ -1138,7 +1138,7 @@ class FuncGen:
 			buf = self.slot(size_of(ft.result), max(align_of(ft.result), 4))
 			self.addi(self.push(), "fp", buf)
 		args = []               # (type, alignment of its address); the values are on the stack
-		for a, pt in zip(e.args, ft.params):
+		for a, pt in zip(e.args, ft.fixed_params):
 			decay = getattr(a, "decay", None)
 			if decay is not None:
 				r, off, al = self.addr(a)
@@ -1162,6 +1162,31 @@ class FuncGen:
 			else:
 				self.expr(a)
 				args.append((pt, 4))
+		if ft.variadic:
+			tail = e.args[len(ft.fixed_params):]
+			if e.va_forward:
+				r, off, al = self.aggr(tail[0])
+				self.addi(r, r, off)
+				args.append((VARARGS, min(al, lowbit(off))))
+			else:
+				# A borrowed pack lives in this caller's frame through the call.
+				# Store each value immediately, in source order; nested calls
+				# cannot overwrite it and long tails need no register spills.
+				tmp = self.slot(8 + 4 * len(tail), 4)
+				for i, a in enumerate(tail):
+					r = self.expr(a)
+					self.mem("sw", r, "fp", tmp + 8 + 4 * i)
+					self.pop()
+				r = self.push()
+				if tail:
+					self.addi(r, "fp", tmp + 8)
+				else:
+					self.li(r, 0)
+				self.mem("sw", r, "fp", tmp)
+				self.li(r, len(tail))
+				self.mem("sw", r, "fp", tmp + 4)
+				self.addi(r, "fp", tmp)
+				args.append((VARARGS, 4))
 		locs, stack = classify(ft.params, hidden)
 		self.outgoing = max(self.outgoing, stack)
 		# Place the arguments from the last one: each is on top of the stack,
@@ -1206,8 +1231,23 @@ class FuncGen:
 			self.norm(r, t)
 		return r
 
+	def ex_VaArg(self, e):
+		r = self.expr(e.pack)
+		i = self.expr(e.index)
+		self.emit(f"lw {r}, 0({r})")
+		self.emit(f"shli {i}, {i}, 2")
+		self.emit(f"add {r}, {r}, {i}")
+		self.emit(f"lw {r}, 0({r})")
+		self.pop()
+		self.norm(r, e.type)
+		return r
+
 	def ex_BuiltinCall(self, e):
 		name, args = e.name, e.args
+		if name == "vaCount":
+			r = self.expr(args[0])
+			self.emit(f"lw {r}, 4({r})")
+			return r
 		if name in ("wfi", "hlt", "fence", "breakpoint"):
 			self.emit("break" if name == "breakpoint" else name)
 			return self.push()

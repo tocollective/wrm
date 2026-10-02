@@ -15,6 +15,7 @@ BUILTIN_FUNCS = {
 	"clz", "ctz", "popcount", "bswap", "rotl", "rotr",
 	"atomicLoad", "atomicStore", "atomicSwap", "atomicAdd", "atomicCompareSwap",
 	"sizeof", "alignof", "offsetof",
+	"vaCount", "vaArg",
 }
 
 # Longest first: the lexer takes the longest operator that matches

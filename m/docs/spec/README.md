@@ -62,6 +62,7 @@ let main(argc: UWord, argv: *UByte[]): Word {
 | [literals.m](../../examples/literals.m) | литералы, константные выражения |
 | [arith.m](../../examples/arith.m) | перенос, насыщение, деление, сдвиги, индексы |
 | [float.m](../../examples/float.m) | `Float` |
+| [variadic.m](../../examples/variadic.m) | вариативные функции, `vaCount`, `vaArg`, передача пакета |
 | [expressions.m](../../examples/expressions.m) | приоритеты, операторы-присваивания, `Bool`-условия |
 | [pointers.m](../../examples/pointers.m) | `*T`, `*mut T`, `&`, `*p`, `p.f`, `null` |
 | [arrays.m](../../examples/arrays.m) | `T[N]`, `T[]`, `mut T[]`, литералы массивов |
@@ -121,7 +122,7 @@ let main(argc: UWord, argv: *UByte[]): Word {
 
 Сознательно нет: методов и ООП, вывода типов, неявных приведений (кроме
 пяти), 64-битных типов, `Never`, меток у `break`/`continue`,
-вариадических функций, `section`, битовых полей, срезов, `import *`.
+`section`, битовых полей, срезов, `import *`.
 
 Отложено и может появиться позже, не ломая код: `defer`, обработка
 ошибок, tagged union, обобщённые типы, вычисления при компиляции

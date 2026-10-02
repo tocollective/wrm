@@ -51,6 +51,23 @@ ERROR = ScalarT("<error>", 0, "error")              # already reported
 SCALARS = {t.name: t for t in (BYTE, UBYTE, HALF, UHALF, WORD, UWORD, BOOL, FLOAT, VOID)}
 
 
+class VariadicT(Ty):
+	"""An opaque, borrowed argument pack: data pointer followed by count.
+	Only a trailing named variadic parameter can introduce this type."""
+	kind = "varargs"
+	size = 8
+	align = 4
+
+	def __eq__(self, other):
+		return self is other
+
+	def __str__(self):
+		return "..."
+
+
+VARARGS = VariadicT()
+
+
 class PtrT(Ty):
 	kind = "ptr"
 	size = align = 4
@@ -93,6 +110,14 @@ class FuncT(Ty):
 	def __init__(self, params, result):
 		self.params = params
 		self.result = result
+
+	@property
+	def variadic(self):
+		return bool(self.params) and self.params[-1] is VARARGS
+
+	@property
+	def fixed_params(self):
+		return self.params[:-1] if self.variadic else self.params
 
 	def __eq__(self, other):
 		return isinstance(other, FuncT) and self.params == other.params and self.result == other.result

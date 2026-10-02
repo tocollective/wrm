@@ -68,12 +68,14 @@ class KernelContractTests(unittest.TestCase):
         names = re.search(r"for module in (.*); do", script).group(1).split()
         linked = {(LAIX / "src" / (name + ".m")).resolve() for name in names}
         linked.add((LAIX / "src/main.m").resolve())
-        self.assertEqual({Path(module.path).resolve() for module in modules}, linked)
+        # The demo may stop importing a module that is still linked by the
+        # build script. Require every dependency, but allow unused modules.
+        self.assertLessEqual({Path(module.path).resolve() for module in modules}, linked)
         self.assertIn('set -- "$obj_dir/start.o"', script)
         self.assertIn('"$repo_dir/m/runtime/mem.asm"', script)
 
     def test_runtime_test_programs_type_check(self):
-        for name in ("trap.m", "trap_fault.m"):
+        for name in ("trap.m", "trap_fault.m", "debug.m"):
             with self.subTest(name=name):
                 check_m(LAIX / "tests" / name)
 
