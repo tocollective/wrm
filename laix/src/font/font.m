@@ -1,5 +1,19 @@
+import { WORD_BYTES, GLYPH_HEIGHT, GLYPH_BYTES, CELL_WIDTH, GLYPH_WIDTH,
+    UNICODE_MAX, UNICODE_SURROGATE_MIN, UNICODE_SURROGATE_MAX, UNICODE_REPLACEMENT } from "../defs.m"
 // LAF1: little-endian header, sorted Unicode index, 16x16 bitmap slots.
 // Only the index is resident; bitmap sectors follow the boot payload on disk.
+let FONT_MAGIC: UWord = 0x3146414C
+let FONT_VERSION: UWord = 1
+type FontHeader {
+    magic: UWord,
+    version: UWord,
+    count: UWord,
+    indexOffset: UWord,
+    pixelsOffset: UWord,
+    height: UWord,
+    glyphBytes: UWord,
+    reserved: UWord,
+}
 type Glyph {
     code: UWord,
     advance: UWord,
@@ -29,27 +43,27 @@ let loadFont(data: *UByte, size: UWord): Bool {
     font.count = 0
     font.index = null
     font.fallback = 0
-    if size < 32 || (data as UWord) & 3 != 0 return false
-    let header: *UWord = data as *UWord
-    if header[0] != 0x3146414C || header[1] != 1 return false
-    let count: UWord = header[2]
+    if size < sizeof(FontHeader) || (data as UWord) & (WORD_BYTES - 1) != 0 return false
+    let header: *FontHeader = data as *FontHeader
+    if header.magic != FONT_MAGIC || header.version != FONT_VERSION return false
+    let count: UWord = header.count
     // Bound multiplication before checking offsets and total size.
-    if count == 0 || count > (size - 32) / 8 return false
-    let pixelsOffset: UWord = 32 + count * 8
-    if header[3] != 32 || header[4] != pixelsOffset return false
-    if header[5] != 16 || header[6] != 32 || header[7] != 0 return false
+    if count == 0 || count > (size - sizeof(FontHeader)) / sizeof(Glyph) return false
+    let pixelsOffset: UWord = sizeof(FontHeader) + count * sizeof(Glyph)
+    if header.indexOffset != sizeof(FontHeader) || header.pixelsOffset != pixelsOffset return false
+    if header.height != GLYPH_HEIGHT || header.glyphBytes != GLYPH_BYTES || header.reserved != 0 return false
     if size != pixelsOffset return false
-    let index: *Glyph = &data[32] as *Glyph
+    let index: *Glyph = &data[sizeof(FontHeader)] as *Glyph
     for i: UWord in 0..count {
         let code: UWord = index[i].code
-        if code > 0x10FFFF || (code >= 0xD800 && code <= 0xDFFF) return false
+        if code > UNICODE_MAX || (code >= UNICODE_SURROGATE_MIN && code <= UNICODE_SURROGATE_MAX) return false
         if i > 0 && index[i - 1].code >= code return false
-        if index[i].advance != 8 && index[i].advance != 16 return false
+        if index[i].advance != CELL_WIDTH && index[i].advance != GLYPH_WIDTH return false
     }
     font.count = count
     font.index = index
-    font.fallback = glyphIndex(0xFFFD)
-    if font.fallback == count font.fallback = glyphIndex(63)
+    font.fallback = glyphIndex(UNICODE_REPLACEMENT)
+    if font.fallback == count font.fallback = glyphIndex('?' as UWord)
     if font.fallback == count {
         font.count = 0
         font.index = null

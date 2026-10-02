@@ -1,5 +1,6 @@
+    .include "../defs.inc"
     .rodata
-    .align 4
+    .align WORD_BYTES
 fontData:
     .incbin "../../fonts/unifont-index.laf"
 fontDataEnd:

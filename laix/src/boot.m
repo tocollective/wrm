@@ -2,6 +2,11 @@ import { debugPrint } from "debug_uart.m"
 import { panic, setPanicStage } from "panic.m"
 import { trapLayoutValid } from "trap_frame.m"
 import { trapRegisterSelfTest, trapBreakCount } from "trap.m"
+import { memoryInit } from "memory.m"
+import { PAGE_SIZE, PAGE_MASK, WORD_BYTES, BOOT_INFO, BOOT_INFO_MAGIC,
+    BOOT_INFO_BYTES, BOOT_INFO_END, DEVICE_ENTRY_BYTES,
+    SYSCALL_UNSUPPORTED, ERRNO_ENOSYS } from "defs.m"
+import { mmuInit } from "mmu.m"
 
 type KernelBootInfo {
     magic: UWord,
@@ -20,6 +25,7 @@ extern let bootInfoAddress: UWord
 extern let __image_start: UByte
 extern let __image_end: UByte
 extern let __bss_end: UByte
+extern let kernelStackGuard: UByte
 extern let kernelStackBottom: UWord
 extern let kernelStackTop: UByte
 let mut kernelBootInfo: KernelBootInfo
@@ -28,8 +34,8 @@ let kernelInit(): Void {
     setPanicStage("boot-info")
     debugPrint("LA/IX: kernel entry\n")
     let info: *KernelBootInfo = bootInfoAddress as *KernelBootInfo
-    if bootInfoAddress != 0x1000 || info.magic != 0x4F464E49 ||
-        info.size < sizeof(KernelBootInfo) || info.size > 0x1000 {
+    if bootInfoAddress != BOOT_INFO || info.magic != BOOT_INFO_MAGIC ||
+        info.size < sizeof(KernelBootInfo) || info.size > BOOT_INFO_BYTES {
         panic("invalid boot info", null)
         return
     }
@@ -37,19 +43,34 @@ let kernelInit(): Void {
     let imageEnd: UWord = &__image_end as UWord
     let stackBottom: UWord = &kernelStackBottom as UWord
     let stackTop: UWord = &kernelStackTop as UWord
+    let stackGuard: UWord = &kernelStackGuard as UWord
     if info.image != imageStart || info.imageSize != imageEnd - imageStart ||
         info.ramSize < (&__bss_end as UWord) || info.clock == 0 ||
-        stackBottom < imageEnd || stackTop <= stackBottom || stackTop & 7 != 0 {
+        stackGuard < imageEnd || stackGuard & PAGE_MASK != 0 ||
+        stackBottom != stackGuard + PAGE_SIZE || stackBottom & PAGE_MASK != 0 ||
+        stackTop <= stackBottom || stackTop & PAGE_MASK != 0 ||
+        stackTop > (&__bss_end as UWord) {
         panic("invalid kernel memory layout", null)
         return
     }
-    if info.devices > 507 || info.deviceTable < 0x1000 + info.size ||
-        info.deviceTable > 0x2000 || info.deviceTable & 3 != 0 ||
-        info.devices > (0x2000 - info.deviceTable) / 8 {
+    if info.devices > (BOOT_INFO_BYTES - sizeof(KernelBootInfo)) / DEVICE_ENTRY_BYTES || info.deviceTable < BOOT_INFO + info.size ||
+        info.deviceTable > BOOT_INFO_END || info.deviceTable & (WORD_BYTES - 1) != 0 ||
+        info.devices > (BOOT_INFO_END - info.deviceTable) / DEVICE_ENTRY_BYTES {
         panic("invalid device table", null)
         return
     }
     kernelBootInfo = *info
+    setPanicStage("memory-init")
+    if !memoryInit(info.ramSize) {
+        panic("invalid physical page layout", null)
+        return
+    }
+    setPanicStage("mmu-init")
+    if !mmuInit() {
+        panic("could not enable kernel stack guard", null)
+        return
+    }
+    debugPrint("LA/IX: MMU enabled, kernel stack guard active\n")
     if !trapLayoutValid() {
         panic("TrapFrame layout mismatch", null)
         return
@@ -61,7 +82,7 @@ let kernelInit(): Void {
         panic("trap context was not preserved (failure=$h)", null, failed)
         return
     }
-    if syscall(0xFFFFFFFF, 1, 2, 3, 4, 5, 6) != -38 {
+    if syscall(SYSCALL_UNSUPPORTED, 1, 2, 3, 4, 5, 6) != -ERRNO_ENOSYS {
         panic("unknown syscall did not return -ENOSYS", null)
         return
     }

@@ -17,7 +17,7 @@ python3 "$repo_dir/tools/asm.py" -c "$laix_dir/src/start.asm" -o "$obj_dir/start
 set -- "$obj_dir/start.o"
 python3 "$repo_dir/tools/m.py" -c "${LAIX_MAIN:-$laix_dir/src/main.m}" -o "$obj_dir/main.o"
 set -- "$@" "$obj_dir/main.o"
-for module in boot trap_frame trap panic debug_uart console rnd font/font font/glyph_cache font/data; do
+for module in defs boot memory mmu trap_frame trap panic debug_uart console rnd font/font font/glyph_cache font/data; do
     python3 "$repo_dir/tools/m.py" -c "$laix_dir/src/$module.m" -o "$obj_dir/$module.o"
     set -- "$@" "$obj_dir/$module.o"
 done

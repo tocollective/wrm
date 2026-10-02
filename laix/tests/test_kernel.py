@@ -34,7 +34,29 @@ def parse_asm(path):
     return parser
 
 
+def asm_constants(parser):
+    # Evaluate only constant expressions; never assign code addresses or emit.
+    constants = {}
+    for statement in parser.stmts:
+        if statement.op == "=":
+            name, expression = statement.args
+            if name in constants:
+                raise AssertionError(f"duplicate assembly constant: {name}")
+            constants[name] = asm.ExprParser(expression, constants.__getitem__).parse()
+    return constants
+
+
 class KernelContractTests(unittest.TestCase):
+    def test_m_and_assembly_constants_match(self):
+        for m_name, asm_name in (("defs.m", "defs.inc"),
+                                 ("trap_frame.m", "trap_layout.inc")):
+            with self.subTest(module=m_name):
+                module = check_m(LAIX / "src" / m_name)[0]
+                constants = asm_constants(parse_asm(LAIX / "src" / asm_name))
+                for name, symbol in module.scope.items():
+                    if symbol.kind == "var" and symbol.const is not None:
+                        self.assertEqual(constants[name], symbol.const, name)
+
     def test_handled_traps_do_not_fall_through(self):
         # M switches have C-style fallthrough. BREAK must neither overwrite
         # r1 with -ENOSYS nor reach panic; SYSCALL must also return normally.
@@ -53,9 +75,7 @@ class KernelContractTests(unittest.TestCase):
     def test_frame_layout_matches_m_type_checker(self):
         module = check_m(LAIX / "src/trap_frame.m")[0]
         frame = module.scope["TrapFrame"].type
-        constants = dict((name, int(value, 0)) for name, value in re.findall(
-            r"^(TF_\w+)\s*=\s*(\d+)\s*$",
-            (LAIX / "src/trap_layout.inc").read_text(), re.M))
+        constants = asm_constants(parse_asm(LAIX / "src/trap_layout.inc"))
         self.assertEqual(frame.size, constants["TF_SIZE"])
         self.assertEqual(frame.size % 8, 0)
         for field in frame.fields:
@@ -75,13 +95,13 @@ class KernelContractTests(unittest.TestCase):
         self.assertIn('"$repo_dir/m/runtime/mem.asm"', script)
 
     def test_runtime_test_programs_type_check(self):
-        for name in ("trap.m", "trap_fault.m", "debug.m"):
-            with self.subTest(name=name):
-                check_m(LAIX / "tests" / name)
+        for path in sorted((LAIX / "tests").glob("*.m")):
+            with self.subTest(name=path.name):
+                check_m(path)
 
     def test_assembly_opcodes_and_jump_targets(self):
-        paths = (LAIX / "src/start.asm", LAIX / "src/trap.asm",
-                 LAIX / "tests/trap_fault.asm")
+        paths = (LAIX / "src/start.asm", LAIX / "src/trap.asm", LAIX / "src/font/data.asm",
+                 LAIX / "tests/trap_fault.asm", LAIX / "tests/stack_guard.asm")
         parsers = [parse_asm(path) for path in paths]
         labels = {label for parser in parsers for statement in parser.stmts
                   for label in statement.labels}
@@ -110,14 +130,14 @@ class KernelContractTests(unittest.TestCase):
         restored = {(st.args[0], st.args[1]) for st in body[call:] if st.op == "lw"}
         for register in range(1, 32):
             name = {30: "sp", 31: "ra"}.get(register, f"r{register}")
-            slot = f"{register * 4}(sp)"
+            slot = f"TF_R{register}(sp)"
             if register == 30:
                 # Original SP was copied from SCRATCH via r1.
                 self.assertIn(("r1", slot), saved)
             else:
                 self.assertIn((name, slot), saved)
             self.assertIn((name, slot), restored)
-        self.assertEqual((body[-2].op, body[-2].args), ("lw", ["sp", "120(sp)"]))
+        self.assertEqual((body[-2].op, body[-2].args), ("lw", ["sp", "TF_R30(sp)"]))
         for field in ("EPC", "STATUS", "CAUSE", "BADADDR", "FCSR", "PTBR"):
             self.assertIn(("r1", f"TF_{field}(sp)"), saved)
         self.assertFalse(any(st.op in ("ret", "tlbi", "tlbi.all") for st in body))
@@ -128,7 +148,7 @@ class KernelContractTests(unittest.TestCase):
     def test_fatal_output_has_no_screen_or_disk_dependency(self):
         modules = check_m(LAIX / "src/panic.m")
         self.assertEqual({Path(module.path).name for module in modules},
-                         {"panic.m", "trap_frame.m", "debug_uart.m"})
+                         {"panic.m", "trap_frame.m", "debug_uart.m", "defs.m"})
         start = parse_asm(LAIX / "src/start.asm")
         begin = next(i for i, st in enumerate(start.stmts) if "earlyTrapEntry" in st.labels)
         early = start.stmts[begin:]

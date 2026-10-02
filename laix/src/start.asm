@@ -1,10 +1,11 @@
+    .include "defs.inc"
 ; LA/IX boot runtime. This object must be FIRST in the boot link.
 ; Before the full entry is installed, diagnostics never use a stack or BSS.
     .text
     .globl kernelStart, earlyTrapEntry, earlyPanic
-    .globl bootInfoAddress, kernelStackBottom, kernelStackTop, trapSavedR1
+    .globl bootInfoAddress, kernelStackGuard, kernelStackBottom, kernelStackTop, trapSavedR1
 kernelHeader:
-    .word 0x424D5257
+    .word BOOT_MAGIC
     .word __image_sectors
     .word kernelStart - kernelHeader
     .word 0
@@ -14,19 +15,20 @@ kernelStart:
     la r2, earlyTrapEntry
     mtcr ivec, r2
     mtcr status, r0
-    li r2, 0xFD000004
+    mtcr ptbr, r0                 ; BSS is cleared through physical addresses
+    li r2, PIC_ENABLE
     sw r0, 0(r2)                  ; PIC ENABLE: IRQ handling is not ready
-    li r2, 0x1000
+    li r2, BOOT_INFO
     bne r10, r2, .bad_info
-    lw r2, 0(r10)
-    li r3, 0x4F464E49
+    lw r2, BOOT_FIELD_MAGIC(r10)
+    li r3, BOOT_INFO_MAGIC
     bne r2, r3, .bad_info
-    lw r2, 4(r10)
-    li r3, 40
+    lw r2, BOOT_FIELD_SIZE(r10)
+    li r3, BOOT_INFO_MIN_SIZE
     bltu r2, r3, .bad_info
-    li r3, 4096
+    li r3, BOOT_INFO_BYTES
     bltu r3, r2, .bad_info
-    lw r2, 8(r10)
+    lw r2, BOOT_FIELD_RAM_SIZE(r10)
     la r3, __bss_end
     bltu r2, r3, .bad_ram
 
@@ -35,13 +37,13 @@ kernelStart:
     j .zero_test
 .zero:
     sw r0, 0(r1)
-    addi r1, r1, 4
+    addi r1, r1, WORD_BYTES
 .zero_test:
     bltu r1, r2, .zero
     la r1, bootInfoAddress
     sw r10, 0(r1)
     la r1, kernelStackBottom
-    li r2, 0x4C414958
+    li r2, STACK_CANARY
     sw r2, 0(r1)
     la sp, kernelStackTop
     mtcr fcsr, r0
@@ -65,9 +67,9 @@ earlyTrapEntry:
 
 ; r1 = trusted static ASCII message. No calls, pushes, globals or locks.
 earlyPanic:
-    li r2, 16
+    li r2, STATUS_EXL
     mtcr status, r2
-    li r9, 0xFD002000
+    li r9, UART_BASE
 .message:
     lbu r2, 0(r1)
     beqz r2, .cause
@@ -99,11 +101,11 @@ earlyPanic:
     la r12, .stop
     j earlyHex
 .stop:
-    li r2, 10
+    li r2, ASCII_NEWLINE
     sw r2, 0(r9)
     ; Boot failure must not look like success to a headless caller.
-    li r9, 0xFD004000
-    li r2, 254
+    li r9, POWER_BASE
+    li r2, PANIC_EXIT_CODE
     sw r2, 0(r9)
 .halt:
     hlt
@@ -121,19 +123,19 @@ earlyString:
     jr r12
 
 earlyHex:
-    li r7, 28
+    li r7, HEX_TOP_SHIFT
 .digit:
     shr r2, r6, r7
-    andi r2, r2, 15
-    li r3, 10
+    andi r2, r2, HEX_DIGIT_MASK
+    li r3, DECIMAL_BASE
     bltu r2, r3, .decimal
-    addi r2, r2, 55
+    addi r2, r2, ASCII_HEX_ALPHA_OFFSET
     j .write
 .decimal:
-    addi r2, r2, 48
+    addi r2, r2, ASCII_ZERO
 .write:
     sw r2, 0(r9)
-    addi r7, r7, -4
+    addi r7, r7, -HEX_DIGIT_BITS
     bgez r7, .digit
     jr r12
 
@@ -147,11 +149,13 @@ earlyEpcMessage:      .asciz " epc="
 earlyBadaddrMessage:  .asciz " badaddr="
 
     .bss
-    .align 8
+    .align PAGE_SIZE
+kernelStackGuard:
+    .space PAGE_SIZE                  ; reserved now, unmapped once MMU is enabled
 kernelStackBottom:
-    .space 8192
+    .space KERNEL_STACK_BYTES
 kernelStackTop:
 bootInfoAddress:
-    .space 4
+    .space WORD_BYTES
 trapSavedR1:
-    .space 4                     ; one core, EXL held: entry scratch storage
+    .space WORD_BYTES                     ; one core, EXL held: entry scratch storage

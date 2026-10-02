@@ -1,3 +1,4 @@
+import { RNG_BASE, RNG_SEEDED, WORD_BYTES, BYTE_BITS } from "defs.m"
 // WRM RNG MMIO: DATA consumes a fresh word on every read; STATUS does not.
 // No initialization, polling, interrupts or register writes are needed.
 type RngRegs {
@@ -5,7 +6,7 @@ type RngRegs {
     status: UWord,
 }
 
-let rng: *volatile RngRegs = 0xFD00E000 as *volatile RngRegs
+let rng: *volatile RngRegs = RNG_BASE as *volatile RngRegs
 
 let rngWord(): UWord {
     return rng.data
@@ -13,7 +14,7 @@ let rngWord(): UWord {
 
 // True for --seed / --deterministic: these values are reproducible, not secret.
 let rngSeeded(): Bool {
-    return rng.status & 1 != 0
+    return rng.status & RNG_SEEDED != 0
 }
 
 // Writes exactly size bytes, low byte first; the buffer need not be aligned.
@@ -28,10 +29,10 @@ let rngFill(buffer: mut UByte[], size: UWord): Bool {
     while offset < size {
         let mut value: UWord = rngWord()
         let mut count: UWord = size - offset
-        if count > 4 count = 4
+        if count > WORD_BYTES count = WORD_BYTES
         for i: UWord in 0..count {
             buffer[offset] = value as UByte
-            value >>= 8
+            value >>= BYTE_BITS
             offset++
         }
     }

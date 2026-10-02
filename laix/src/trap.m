@@ -1,10 +1,11 @@
+import { STACK_CANARY, STATUS_PUM, CAUSE_BREAKPOINT, CAUSE_SYSCALL,
+    INSTRUCTION_BYTES, REG_RESULT, ERRNO_ENOSYS } from "defs.m"
 import { TrapFrame } from "trap_frame.m"
 import { panic } from "panic.m"
 
 extern let trapEntry(): Void
 extern let trapRegisterSelfTest(): Word
 extern let kernelStackBottom: UWord
-let STACK_CANARY: UWord = 0x4C414958
 let mut breakCount: UWord
 
 let trapDispatch(frame: *mut TrapFrame): Void {
@@ -13,19 +14,19 @@ let trapDispatch(frame: *mut TrapFrame): Void {
         panic("kernel stack canary damaged", frame)
         return
     }
-    if frame.status & 8 != 0 {
+    if frame.status & STATUS_PUM != 0 {
         panic("user tasks are not supported yet", frame)
         return
     }
     switch frame.cause {
-        case 13: {
+        case CAUSE_BREAKPOINT: {
             breakCount++
-            frame.epc += 4
+            frame.epc += INSTRUCTION_BYTES
             return
         }
-        case 12: {
-            frame.regs[1] = (-38 as Word) as UWord
-            frame.epc += 4
+        case CAUSE_SYSCALL: {
+            frame.regs[REG_RESULT] = (-ERRNO_ENOSYS) as UWord
+            frame.epc += INSTRUCTION_BYTES
             return
         }
         default: panic("unexpected exception", frame)

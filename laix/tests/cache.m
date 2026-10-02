@@ -4,18 +4,19 @@
 import { font, loadFont, glyphIndex } from "../src/font/font.m"
 import { fontData, fontDataEnd } from "../src/font/data.m"
 import { CACHE_BASE, CACHE_GLYPHS, glyphCacheInit, cacheGlyph } from "../src/font/glyph_cache.m"
+import { BOOT_INFO, BOOT_FIELD_DISK, WORD_BYTES, VRAM_BASE, DISK_CHANGED } from "../src/defs.m"
 
 let main(argc: UWord, argv: *UByte[]): Word {
     let size: UWord = (&fontDataEnd as UWord) - (&fontData as UWord)
     if !loadFont(&fontData, size) || !glyphCacheInit(font.count) return 1
     // Also boot this test via Drag & Drop: init must consume the insertion
     // event, otherwise every subsequent cacheGlyph fails with CHANGED.
-    let info: *UWord = 0x1000 as *UWord
-    let status: *volatile UWord = info[3] as *volatile UWord
-    if *status & 32 != 0 return 15
+    let info: *UWord = BOOT_INFO as *UWord
+    let status: *volatile UWord = info[BOOT_FIELD_DISK / WORD_BYTES] as *volatile UWord
+    if *status & DISK_CHANGED != 0 return 15
     if cacheGlyph(0) != 0 || cacheGlyph(15) != 15 return 2
     if cacheGlyph(16) != 16 return 3
-    let vram: *volatile UWord = (0xFC000000 + CACHE_BASE) as *volatile UWord
+    let vram: *volatile UWord = (VRAM_BASE + CACHE_BASE) as *volatile UWord
     // U+0000 starts with bytes AA AA 00 01, padded nowhere (16 pixels).
     if vram[0] != 0x0100AAAA return 4
     for page: UWord in 2..16 {
