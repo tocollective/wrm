@@ -4,7 +4,7 @@
 ; ============================================================================
 ; @hdd 64
 ; Disk 0 is a 64-sector image from tests/run.py: the word at byte offset o
-; of sector s is s << 16 | o / 4. Disk 1 has no image. RAM is 1MB.
+; of sector s is s << 16 | o / 4. Disk 1 has no image. RAM is 4MB.
 
 	.include "../common/harness.asm"
 
@@ -253,7 +253,7 @@ test_main:
 	bne r1, r3, fail
 	li r28, 46
 	mv r1, r10
-	li r2, 3
+	li r2, 5
 	li r3, 0
 	li r4, 1
 	li r5, BUF
@@ -296,13 +296,13 @@ test_main:
 	li r2, DISK_READ
 	li r3, 0
 	li r4, 1
-	li r5, 0x00100000 - SECTOR_SIZE / 2
+	li r5, RAM_END - SECTOR_SIZE / 2
 	call disk_io
 	li r3, DISK_ERR_ADDRESS
 	bne r1, r3, fail
 	li r28, 53
 	lw r4, DISK_ADDRESS(r10)
-	li r3, 0x00100000
+	li r3, RAM_END
 	bne r4, r3, fail
 	li r28, 54
 	lw r4, DISK_SECTOR(r10)

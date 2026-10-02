@@ -16,6 +16,8 @@ __EXIT_TRAP     = 254
 
 ; Traps. r1 is saved in SCRATCH; SYSCALL may change r1 and r2 (docs/ABI.md,
 ; "System calls"), BREAK keeps every register.
+	.text
+	.globl __trap
 __trap:
 	mtcr scratch, r1
 	mfcr r1, cause

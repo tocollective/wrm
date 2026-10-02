@@ -28,7 +28,7 @@ import re
 import struct
 
 from .diag import CompileError
-from .image import BOOT_RUNTIME, ROM_RUNTIME, RUNTIME, Program
+from .image import Program
 from .lexer import CMP_OPS
 from .syntax import *
 from .typesys import *
@@ -116,36 +116,47 @@ def signed_type(t):
 
 
 class CodeGen:
-	"""The whole program: labels, functions, global data."""
+	"""Labels of every module loaded; the code of one module at a time
+	(run), for an object file of its own."""
 
 	def __init__(self, modules, diag):
 		self.modules = modules
 		self.diag = diag
-		self.program = Program()
-		self.strings = {}       # bytes -> label
-
-	def run(self):
+		self.program = None
+		self.strings = {}       # bytes -> label, of the module being made
 		self.assign_labels()
-		for m in self.modules:
-			for d in m.decls:
-				if isinstance(d, FuncDecl) and d.body is not None:
-					try:
-						self.program.code.append(FuncGen(self, d).gen())
-					except CompileError as e:
-						self.diag.error(e.loc, e.msg)
-				elif isinstance(d, VarDecl) and not d.extern:
-					self.global_var(d.sym)
-			path = os.path.splitext(m.path)[0] + ".asm"
-			if os.path.isfile(path):
-				self.program.includes.append(path)
-		for m in self.modules:
-			for sym in m.scope.values():
-				if sym.kind in ("var", "func") and not sym.extern:
-					for name in sym.export_names[1:]:
-						self.program.code.append(f"{name} = {sym.label}\n")
+
+	def run(self, m):
+		"""The Program of module m."""
+		self.program = Program(m.path)
+		self.strings = {}
+		for d in m.decls:
+			if isinstance(d, FuncDecl) and d.body is not None:
+				try:
+					self.program.code.append(FuncGen(self, d).gen())
+				except CompileError as e:
+					self.diag.error(e.loc, e.msg)
+			elif isinstance(d, VarDecl) and not d.extern:
+				self.global_var(d.sym)
+		path = os.path.splitext(m.path)[0] + ".asm"
+		asm_defined = set()
+		if os.path.isfile(path):
+			self.program.includes.append(path)
+			asm_defined = self.asm_labels(path, set())
+		for sym in m.scope.values():
+			if sym.kind not in ("var", "func"):
+				continue
+			if sym.extern:
+				# defined by the module's .asm: other modules may call it
+				if sym.label in asm_defined:
+					self.program.globals.append(sym.label)
+				continue
+			self.program.globals += sym.export_names
+			for name in sym.export_names[1:]:
+				self.program.code.append(f"{name} = {sym.label}\n")
+		self.program.globals = list(dict.fromkeys(self.program.globals))
 		for data, label in self.strings.items():
 			self.program.rodata.append(f"{label}:\n" + self.bytes_lines(list(data) + [0]))
-		self.check_externs()
 		return self.program
 
 	def assign_labels(self):
@@ -262,24 +273,6 @@ class CodeGen:
 		return "".join(out)
 
 	# -- symbols defined outside M
-
-	def check_externs(self):
-		defined = {"__bss_start", "__bss_end", "__image_start", "__image_end", "__data_start",
-				   "__data_end", "__data_load"}
-		for name in dict.fromkeys(BOOT_RUNTIME + ROM_RUNTIME):
-			defined |= self.asm_labels(os.path.join(RUNTIME, name), set())
-		for path in self.program.includes:
-			defined |= self.asm_labels(path, set())
-		for m in self.modules:
-			for sym in m.scope.values():
-				if sym.kind in ("var", "func") and not sym.extern:
-					defined.add(sym.label)
-					defined.update(sym.export_names)
-		for m in self.modules:
-			for sym in m.scope.values():
-				if sym.kind in ("var", "func") and sym.extern and sym.used and sym.label not in defined:
-					self.diag.error(sym.decl.loc, f"nothing defines 'extern' '{sym.name}': no M module "
-												  f"exports it, and no '.asm' next to a module has it")
 
 	def asm_labels(self, path, seen):
 		path = os.path.realpath(path)

@@ -22,14 +22,14 @@ static void netcard_update_irq(netcard_t* net) {
 }
 
 netcard_t* netcard_create(pic_t* pic, const uint8_t irq, const bus_t dma,
-						  const bool link, const uint32_t local_addr) {
+						  const bool link, const net_policy_t* policy) {
 	netcard_t* net = (netcard_t*)calloc(1, sizeof(netcard_t));
 	if (!net) error("Failed to allocate network card!");
 	net->pic = pic;
 	net->irq = irq;
 	net->dma = dma;
 	net->link = link && network_init();
-	net->local_addr = local_addr;
+	net->policy = policy;
 	for (int i = 0; i < NET_SOCKET_COUNT; i++)
 		net->socket[i].host = NETWORK_NO_SOCKET;
 	netcard_reset(net);
@@ -253,9 +253,14 @@ static void netcard_dns_start(netcard_t* net) {
 	netcard_dns_finish(net, 0);
 }
 
+static bool netcard_allows(const netcard_t* net, const net_socket_t* s) {
+	return net_policy_allows(net->policy, s->peer_addr, (uint16_t)s->peer_port);
+}
+
 // SEND on a UDP socket: one datagram, straight to the host.
 static uint32_t netcard_send_datagram(netcard_t* net, net_socket_t* s) {
 	if (s->count > NET_DATAGRAM_MAX) return NET_ERROR_LENGTH;
+	if (!netcard_allows(net, s)) return NET_ERROR_DENIED;
 	// the send buffer is free on a UDP socket
 	const uint32_t length = s->count;
 	for (uint32_t i = 0; i < length; i++) {
@@ -325,6 +330,11 @@ static uint32_t netcard_command(netcard_t* net, net_socket_t* s,
 	switch (command) {
 		case NET_COMMAND_CONNECT: {
 			if (s->state != NET_STATE_CLOSED) return NET_ERROR_STATE;
+			// denied: as if refused at once
+			if (!netcard_allows(net, s)) {
+				s->events |= NET_EVENT_CLOSED;
+				return NET_ERROR_DENIED;
+			}
 			bool pending = false;
 			s->host =
 				network_connect(s->peer_addr, (uint16_t)s->peer_port, &pending);
@@ -337,23 +347,37 @@ static uint32_t netcard_command(netcard_t* net, net_socket_t* s,
 			s->state = NET_STATE_CONNECTING;
 			return NET_ERROR_NONE;
 		}
-		case NET_COMMAND_LISTEN:
+		case NET_COMMAND_LISTEN: {
 			if (s->state != NET_STATE_CLOSED) return NET_ERROR_STATE;
 			if (!network_can_listen()) return NET_ERROR_UNSUPPORTED;
-			s->host = network_listen(net->local_addr, (uint16_t)s->local_port);
+			// a forwarded port listens where the forward says, and the
+			// guest still sees its own port
+			const net_forward_t* forward =
+				net_policy_forward(net->policy, (uint16_t)s->local_port);
+			s->host = forward
+						? network_listen(forward->host_addr, forward->host_port)
+						: network_listen(NET_LOCAL_ADDR, (uint16_t)s->local_port);
 			if (s->host == NETWORK_NO_SOCKET) return NET_ERROR_NETWORK;
-			s->local_port = network_local_port(s->host);
+			if (!forward) s->local_port = network_local_port(s->host);
 			s->state = NET_STATE_LISTENING;
 			return NET_ERROR_NONE;
+		}
 		case NET_COMMAND_UDP: {
 			if (s->state != NET_STATE_CLOSED) return NET_ERROR_STATE;
 			if (!network_can_udp()) return NET_ERROR_UNSUPPORTED;
 			// a client's socket takes replies on any address, a server's
 			// listens where LISTEN does
-			const uint32_t local = s->local_port ? net->local_addr : 0;
-			s->host = network_udp(local, (uint16_t)s->local_port);
+			const net_forward_t* forward =
+				s->local_port
+					? net_policy_forward(net->policy, (uint16_t)s->local_port)
+					: NULL;
+			if (forward)
+				s->host = network_udp(forward->host_addr, forward->host_port);
+			else
+				s->host = network_udp(s->local_port ? NET_LOCAL_ADDR : 0,
+									  (uint16_t)s->local_port);
 			if (s->host == NETWORK_NO_SOCKET) return NET_ERROR_NETWORK;
-			s->local_port = network_local_port(s->host);
+			if (!forward) s->local_port = network_local_port(s->host);
 			s->state = NET_STATE_UDP;
 			return NET_ERROR_NONE;
 		}

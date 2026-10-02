@@ -11,6 +11,7 @@ machine_t* machine_create(void) {
 
 	motherboard_t* mb = machine->motherboard;
 	if (cfg->rtc_virtual) rtc_set_virtual(mb->rtc, &mb->tick, cfg->rtc_epoch);
+	if (cfg->rng_seeded) rng_set_seed(mb->rng, cfg->rng_seed);
 	machine->deterministic = cfg->deterministic;
 	machine->net_period = mb->clock->rate / MACHINE_NET_POLLS_PER_SECOND;
 	if (machine->net_period == 0) machine->net_period = 1;

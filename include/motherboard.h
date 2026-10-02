@@ -14,7 +14,9 @@
 #include "devices/pic.h"
 #include "devices/pit.h"
 #include "devices/power.h"
+#include "devices/rng.h"
 #include "devices/rtc.h"
+#include "devices/share.h"
 #include "devices/uart.h"
 #include "devices/videocard.h"
 #include "ram.h"
@@ -41,6 +43,8 @@
 #define MB_NET_BASE 0xFD00B000
 #define MB_AUDIO_BASE 0xFD00C000
 #define MB_RTC_BASE 0xFD00D000
+#define MB_RNG_BASE 0xFD00E000
+#define MB_SHARE_BASE 0xFD00F000
 #define MB_ROM_BASE 0xFE000000 // ROM_MAX_SIZE bytes up to 0xFFFFFFFF
 
 // IRQ lines (see docs/SPECIFICATION.md)
@@ -77,6 +81,8 @@ typedef enum mb_device_type {
 	MB_DEVICE_NET = 11,
 	MB_DEVICE_AUDIO = 12,
 	MB_DEVICE_RTC = 13,
+	MB_DEVICE_RNG = 14, // random number generator
+	MB_DEVICE_SHARE = 15, // shared folder
 } mb_device_type_t;
 
 typedef struct ram_slot {
@@ -125,6 +131,8 @@ typedef struct motherboard {
 	netcard_t* netcard;
 	audiocard_t* audiocard;
 	rtc_t* rtc;
+	rng_t* rng;
+	share_t* share;
 
 	uint64_t tick; // clock ticks since power-on, the one running included
 	uint64_t synced[MB_TIMED_COUNT]; // the tick each device has run up to

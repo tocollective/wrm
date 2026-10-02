@@ -246,6 +246,8 @@ static bool motherboard_device_id(const uint32_t page, uint32_t* id) {
 		{ MB_NET_BASE, MB_DEVICE_NET, MB_IRQ_NET },
 		{ MB_AUDIO_BASE, MB_DEVICE_AUDIO, MB_IRQ_AUDIO },
 		{ MB_RTC_BASE, MB_DEVICE_RTC, MB_IRQ_RTC },
+		{ MB_RNG_BASE, MB_DEVICE_RNG, MB_NO_IRQ },
+		{ MB_SHARE_BASE, MB_DEVICE_SHARE, MB_NO_IRQ },
 	};
 	uint32_t type = 0, irq = 0;
 	for (size_t i = 0; i < sizeof(devices) / sizeof(devices[0]); i++) {
@@ -321,6 +323,12 @@ static bool motherboard_io_read(motherboard_t* mb, const uint32_t address,
 		case MB_RTC_BASE:
 			fail = rtc_read(mb->rtc, offset, size, value);
 			break;
+		case MB_RNG_BASE:
+			fail = rng_read(mb->rng, offset, size, value);
+			break;
+		case MB_SHARE_BASE:
+			fail = share_read(mb->share, offset, size, value);
+			break;
 	}
 	if (timed >= 0) motherboard_schedule(mb, timed);
 	if (!fail) *value &= motherboard_io_mask(size);
@@ -359,6 +367,10 @@ static bool motherboard_io_write_device(motherboard_t* mb, const uint32_t page,
 			return audiocard_write(mb->audiocard, offset, size, value);
 		case MB_RTC_BASE:
 			return rtc_write(mb->rtc, offset, size, value);
+		case MB_RNG_BASE:
+			return rng_write(mb->rng, offset, size, value);
+		case MB_SHARE_BASE:
+			return share_write(mb->share, offset, size, value);
 	}
 	return true;
 }
@@ -528,9 +540,12 @@ motherboard_t* motherboard_create(void) {
 		.fetch = motherboard_dma_read,
 		.write = motherboard_dma_write,
 	};
-	for (int i = 0; i < DISK_COUNT; i++)
+	// a deterministic run doesn't depend on where the images are
+	for (int i = 0; i < DISK_COUNT; i++) {
 		mb->disk[i] = disk_create(
 				mb->pic, MB_IRQ_DISK0 + i, dma, false, 1, cfg->hdd_path[i]);
+		disk_set_serial(mb->disk[i], cfg->hdd_serial[i], cfg->deterministic);
+	}
 	// the floppy is slow in real time whatever the clock rate
 	const uint64_t floppy_ticks =
 		mb->clock->rate * 4 / DISK_FLOPPY_BYTES_PER_SECOND;
@@ -541,6 +556,7 @@ motherboard_t* motherboard_create(void) {
 							 floppy_ticks > UINT32_MAX ? UINT32_MAX
 													   : (uint32_t)floppy_ticks,
 							 cfg->floppy_path);
+	disk_set_serial(mb->floppy, NULL, cfg->deterministic);
 
 	const bus_t video_dma = {
 		.ctx = mb,
@@ -553,10 +569,12 @@ motherboard_t* motherboard_create(void) {
 	mb->beeper = beeper_create((uint32_t)mb->clock->rate);
 	mb->mouse = mouse_create(mb->pic, MB_IRQ_MOUSE);
 	mb->netcard = netcard_create(
-			mb->pic, MB_IRQ_NET, video_dma, cfg->net, cfg->net_bind);
+			mb->pic, MB_IRQ_NET, video_dma, cfg->net, &cfg->net_policy);
 	mb->audiocard = audiocard_create(
 			mb->pic, MB_IRQ_AUDIO, video_dma, (uint32_t)mb->clock->rate);
 	mb->rtc = rtc_create(mb->pic, MB_IRQ_RTC, (uint32_t)mb->clock->rate);
+	mb->rng = rng_create();
+	mb->share = share_create(video_dma, cfg->share_path, cfg->share_readonly);
 
 	for (int i = 0; i < RAM_SLOT_COUNT; i++) {
 		mb->ram_slot[i].ram = NULL;
@@ -580,6 +598,16 @@ motherboard_t* motherboard_create(void) {
 
 void motherboard_destroy(motherboard_t* mb) {
 	if (!mb) return;
+	if (mb->share) {
+		share_destroy(mb->share);
+		mb->share = NULL;
+	}
+
+	if (mb->rng) {
+		rng_destroy(mb->rng);
+		mb->rng = NULL;
+	}
+
 	if (mb->rtc) {
 		rtc_destroy(mb->rtc);
 		mb->rtc = NULL;
@@ -690,6 +718,7 @@ void motherboard_reset(motherboard_t* mb, const power_reset_cause_t cause) {
 	netcard_reset(mb->netcard);
 	audiocard_reset(mb->audiocard);
 	rtc_reset(mb->rtc);
+	share_reset(mb->share);
 	pic_reset(mb->pic);
 	motherboard_schedule_all(mb);
 }

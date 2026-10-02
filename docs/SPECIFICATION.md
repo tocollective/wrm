@@ -19,6 +19,8 @@
 | `0xFD00B000`–`0xFD00BFFF` | Network card                            |
 | `0xFD00C000`–`0xFD00CFFF` | Audio card                              |
 | `0xFD00D000`–`0xFD00DFFF` | Real-time clock                         |
+| `0xFD00E000`–`0xFD00EFFF` | Random number generator                 |
+| `0xFD00F000`–`0xFD00FFFF` | Shared folder                           |
 | `0xFE000000`–`0xFFFFFFFF` | ROM (32MB, read-only)                   |
 
 Addresses between the end of RAM and `0xFD000000` are unmapped, as are
@@ -58,7 +60,8 @@ lists the devices it finds for the image it boots (see
 | `4`    | Timer           | `11`   | Network card    |
 | `5`    | Power controller| `12`   | Audio card      |
 | `6`    | Hard disk       | `13`   | Real-time clock |
-| `7`    | Video card      |        |                 |
+| `7`    | Video card      | `14`   | Random number generator |
+|        |                 | `15`   | Shared folder   |
 
 For example, disk 1's `ID` reads `0x00060104`.
 
@@ -203,8 +206,16 @@ and waits for the end.
 | `0x08` | `SECTOR`  | RW     | next sector to transfer                               |
 | `0x0C` | `COUNT`   | RW     | sectors left to transfer                              |
 | `0x10` | `ADDRESS` | RW     | physical RAM address of the next word                 |
-| `0x14` | `COMMAND` | W      | `1` = read (disk to RAM), `2` = write (RAM to disk)   |
+| `0x14` | `COMMAND` | W      | bits 7:0 = the command, see below; bit 8 = `LIST`     |
 | `0x18` | `ERROR`   | R      | why the last command failed, `0` if it didn't         |
+| `0x1C` | `LIST`    | RW     | physical address of the next descriptor, with `COMMAND.LIST` |
+
+| Command | Name       | Does                                                    |
+|---------|------------|---------------------------------------------------------|
+| `1`     | `READ`     | `COUNT` sectors from `SECTOR` on, disk to RAM           |
+| `2`     | `WRITE`    | `COUNT` sectors from `SECTOR` on, RAM to disk           |
+| `3`     | `FLUSH`    | makes the writes so far durable, see below              |
+| `4`     | `IDENTIFY` | the 512-byte [identify block](#identify-block) to RAM   |
 
 Writing `COMMAND` clears `DONE` and `ERROR` and checks the other
 registers. A command that can't run finishes at once: `DONE` is set,
@@ -216,10 +227,14 @@ by 4 with every word. After every whole sector, `SECTOR` goes up by one
 and `COUNT` down by one. When `COUNT` reaches 0, `BUSY` is cleared and
 `DONE` set. `COUNT` = 0 finishes at once without an error.
 
-While `BUSY` is set, writes to `SECTOR`, `COUNT`, `ADDRESS` and `COMMAND`
-are ignored. A transfer can't be stopped except by a reset. When it ends,
-the registers point just past it, so reading on only takes a new `COUNT`
-and `COMMAND`.
+`IDENTIFY` moves one block of 512 bytes, in the time of a sector, the way
+`READ` moves a sector; it ignores `SECTOR` and `COUNT` and leaves them
+alone. It needs a disk in the drive, like the other commands.
+
+While `BUSY` is set, writes to `SECTOR`, `COUNT`, `ADDRESS`, `LIST` and
+`COMMAND` are ignored. A transfer can't be stopped except by a reset.
+When it ends, the registers point just past it, so reading on only takes
+a new `COUNT` and `COMMAND`.
 
 `DONE` keeps IRQ line 3 (disk 0), 4 (disk 1) or 6 (floppy) asserted
 until software writes 1 to it or starts the next command. `ERROR`, and the error bit in
@@ -227,12 +242,13 @@ until software writes 1 to it or starts the next command. `ERROR`, and the error
 
 | `ERROR` | Reason                                                        |
 |---------|---------------------------------------------------------------|
-| `1`     | unknown command                                               |
+| `1`     | unknown command, or `LIST` with `FLUSH`                       |
 | `2`     | no disk                                                       |
 | `3`     | `SECTOR` + `COUNT` runs past the end of the disk              |
-| `4`     | `ADDRESS` is not a multiple of 4, or the transfer reached memory that isn't RAM |
+| `4`     | `ADDRESS` (`LIST` with `COMMAND.LIST`) is not a multiple of 4, or the transfer reached memory that isn't RAM |
 | `5`     | write to a read-only disk image                               |
-| `6`     | the host failed to read or write the image                    |
+| `6`     | the host failed to read, write or flush the image             |
+| `7`     | a descriptor's address or length is not a multiple of 4, or its length is 0 |
 
 The DMA reaches only RAM. It uses physical addresses and ignores the MMU.
 A word in ROM, in the I/O region or at an unmapped address stops the
@@ -244,7 +260,84 @@ leave the buffer alone until `DONE`.
 
 The image size is taken in whole sectors, and extra bytes at the end are
 not reachable. An image that the host can't write is attached read-only.
-Writes reach the host file as each sector completes.
+
+#### Scatter-gather
+
+With `COMMAND` bit 8 (`LIST`) set, `READ`, `WRITE` and `IDENTIFY` move
+the data to or from several pieces of RAM instead of one, so a buffer
+needn't be physically contiguous: the pages of a virtual buffer, for
+example. The pieces are given by a list of descriptors in RAM:
+
+| Offset | Field     | Description                                         |
+|--------|-----------|-----------------------------------------------------|
+| `0x00` | `ADDRESS` | physical address of the piece, a multiple of 4      |
+| `0x04` | `LENGTH`  | its length in bytes, a multiple of 4 and not 0      |
+
+`LIST` holds the address of the first descriptor, a multiple of 4. The
+controller reads a descriptor when the transfer reaches it, on the tick
+of the piece's first word, and takes no extra time for it: it copies
+the piece's address into `ADDRESS` and goes on to the next descriptor,
+8 bytes on, in `LIST`. Pieces needn't follow sector boundaries; when a
+piece runs out, the next word goes to the next one. The list has no end
+marker: the transfer ends when `COUNT` reaches 0, and what is left of
+the last piece, and the descriptors after it, are not used. `ADDRESS`
+is not checked when the command starts.
+
+A descriptor outside RAM stops the transfer with error 4 and a bad one
+with error 7; `LIST` then points at that descriptor. As without `LIST`,
+a read has stored the words before it and a write stores no partial
+sector. Each command starts with the descriptor at `LIST`, so going on
+after a transfer that ended mid-piece takes a new descriptor for the
+rest of that piece.
+
+#### Flush
+
+Writes reach the host file as each `WRITE` completes, but the host may
+keep them in its own caches for a while, and they are lost if the host
+crashes or loses power. `FLUSH` has the host write everything written
+to the image so far to its storage medium, and ends with `DONE` once
+that is done. It finishes at once, in the tick of the store to
+`COMMAND`, however long the host takes; the machine stands still
+meanwhile. A read-only image has nothing to flush, so `FLUSH` succeeds
+at once. If the host fails, `ERROR` is 6, and writes since the last
+successful `FLUSH` may not be on the medium.
+
+An OS should flush before it reports a write as durable (`fsync`), and
+before it powers off.
+
+#### Identify block
+
+`IDENTIFY` describes the disk in the drive; numbers are little-endian,
+bytes not listed are 0.
+
+| Offset | Size | Field         | Description                                    |
+|--------|------|---------------|------------------------------------------------|
+| `0x00` | 4    | `MAGIC`       | `0x444D5257` (the bytes `WRMD`)                |
+| `0x04` | 4    | `VERSION`     | `1`                                            |
+| `0x08` | 4    | `SECTORS`     | as the register                                |
+| `0x0C` | 4    | `SECTOR_SIZE` | `512`                                          |
+| `0x10` | 4    | `FLAGS`       | bit 0 = removable (the floppy), bit 1 = read-only |
+| `0x20` | 16   | `UUID`        | a UUID (RFC 9562, version 8) made from the serial number, in the usual big-endian byte order |
+| `0x30` | 32   | `SERIAL`      | serial number, ASCII, padded with zero bytes    |
+| `0x50` | 40   | `MODEL`       | `WRM.081632 hard disk` or `WRM.081632 floppy disk`, padded with zero bytes |
+
+The serial number is given with `--hdd-serial` (see
+[README](../README.md#running)), or else it is 16 hexadecimal digits of
+a hash of the image's absolute path: the same image file gives the same
+serial number, and so the same UUID, until it is moved or renamed. With
+`--deterministic` it is a hash of the file name alone, so a run doesn't
+depend on where the image is. An OS can find its disks by UUID wherever
+they are attached; a file system's own UUID is its business.
+
+#### Sharing images
+
+An emulator locks the images it has attached: exclusively when it can
+write the image, shared when it is read-only. An image that another
+emulator has attached is attached read-only, with a warning; one that
+another emulator writes can't be attached at all: the emulator doesn't
+start, and the floppy drive stays empty. So two machines never write
+one image, and a machine never reads an image that another one is
+changing. Images of up to 2TB (2³² sectors) work on every host.
 
 #### Floppy drive
 
@@ -572,18 +665,20 @@ by the emulator, every few milliseconds of host time: `STATE`, `EVENTS`,
   socket goes to connected, `LOCAL_PORT` takes the port the host chose,
   and `EVENTS.connected` is set. If it can't connect, the socket goes
   back to closed with error 6 and `EVENTS.closed` set; the host may know
-  that at once, and then the socket never leaves closed.
+  that at once, and then the socket never leaves closed. An address the
+  [rules](#network-rules) don't allow fails at once the same way, with
+  error 8.
 - **`LISTEN`** goes to listening on `LOCAL_PORT`; `0` picks a free port,
   which `LOCAL_PORT` then shows. The first connection that comes in
   turns the socket into a connected one, with the other end in
   `PEER_ADDR` and `PEER_PORT`, and sets `EVENTS.connected`. The socket
   stops listening then: to take another connection, `LISTEN` on another
-  socket. The host listens on the address given with `--net=ADDR`,
-  `127.0.0.1` by default, so only programs on the host can connect.
+  socket. The host listens on `127.0.0.1`, so only programs on the host
+  can connect, unless the port is [forwarded](#network-rules).
 - **`UDP`** opens a UDP socket on `LOCAL_PORT`. With `0` the host picks
   the port (and `LOCAL_PORT` shows it) and listens on all its
-  addresses, as any UDP client does; another port is opened on the
-  `--net=ADDR` address, like `LISTEN`.
+  addresses, as any UDP client does; another port is opened on
+  `127.0.0.1`, or where it is forwarded, like `LISTEN`.
 - **`SEND`** on a connection moves as many of the `COUNT` bytes as
   `TX_FREE` allows into the send buffer (16KB); `ADDRESS` goes up and
   `COUNT` down by the bytes moved, so a `COUNT` left over is sent with
@@ -591,7 +686,9 @@ by the emulator, every few milliseconds of host time: `STATE`, `EVENTS`,
   `EVENTS.sent` when it is empty. On a UDP socket `SEND` sends the
   `COUNT` bytes, at most 8192, as one datagram to `PEER_ADDR`:`PEER_PORT`;
   `ADDRESS` goes up by `COUNT` and `COUNT` becomes 0. A datagram may be
-  lost, as UDP allows. The bytes may come from RAM or ROM.
+  lost, as UDP allows. The bytes may come from RAM or ROM. A datagram to
+  an address the rules don't allow is not sent: error 8, and `ADDRESS`
+  and `COUNT` stay.
 - **`RECEIVE`** moves `RX_SIZE` bytes, or `COUNT` if that is less, from
   the receive buffer (16KB) to RAM; `ADDRESS` and `COUNT` go on by the
   bytes moved. Every time bytes arrive `EVENTS.received` is set. On a
@@ -622,6 +719,32 @@ bytes before it have been moved.
 | `5`     | not available on this host: `LISTEN` or UDP in a browser      |
 | `6`     | the host's network failed: refused, unreachable, the port is taken, the connection broke |
 | `7`     | the UDP datagram is longer than 8192 bytes                    |
+| `8`     | the rules don't let the guest reach `PEER_ADDR`:`PEER_PORT`   |
+
+<a id="network-rules"></a>**Rules.** The emulator decides where the guest may
+connect and send datagrams to, so that a guest can't reach services that
+trust the host: on the host itself, or in its local network. By default
+it may reach any address except these:
+
+| Range              | What                                  |
+|--------------------|---------------------------------------|
+| `0.0.0.0/8`        | "this network"                        |
+| `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` | private networks |
+| `100.64.0.0/10`    | carrier-grade NAT                     |
+| `127.0.0.0/8`      | the host itself (loopback)            |
+| `169.254.0.0/16`   | link-local                            |
+| `192.0.0.0/24`, `198.18.0.0/15` | protocol assignments, benchmarking |
+| `224.0.0.0/4`, `240.0.0.0/4` | multicast, reserved and the broadcast |
+
+`--net-allow` and `--net-deny` add rules after these, each an address
+range and optionally a port range (see the README); the last rule that
+matches the address and port decides. The rules apply to `CONNECT` and
+to datagrams the guest sends, not to DNS lookups, `LISTEN`, or what
+comes in. `--net-forward [ADDR:]HOST_PORT:GUEST_PORT` makes `LISTEN` and
+`UDP` on `GUEST_PORT` open on `ADDR:HOST_PORT` of the host (`ADDR` is
+`127.0.0.1` if left out; `0.0.0.0` for all the host's addresses) while
+`LOCAL_PORT` still reads `GUEST_PORT`; other ports open on `127.0.0.1`
+and the same port.
 
 **DNS.** `DNS_COMMAND` = 1 looks up the zero-terminated host name, up to
 255 characters, at `DNS_NAME` in RAM or ROM (a dotted address such as
@@ -764,6 +887,158 @@ clock ticks since power-on, the alarm compares against it the same way,
 and `UTC_OFFSET` is 0. A run then reads the same times whenever and
 however fast it happens.
 
+### Random number generator
+
+Random bits for seeds: of ASLR, hash tables, TCP sequence numbers and
+cryptographic keys. They come from the host's cryptographic random
+number generator, so they are fit for keys. The device has no IRQ.
+
+| Offset | Register | Access | Description                                     |
+|--------|----------|--------|-------------------------------------------------|
+| `0x00` | `DATA`   | R      | 32 random bits; every read gives new ones       |
+| `0x04` | `STATUS` | R      | bit 0 = seeded: the bits are not from the host  |
+
+A read of `DATA` never blocks and never returns the same bits twice; a
+byte or half-word read gets the low bits and uses up the word as well.
+
+With a seed (`--seed=N`, or `--deterministic`, see the README) the bits
+are the ChaCha20 stream with N as the key instead (the 256-bit key holds
+N little-endian in its first 8 bytes, the rest 0; nonce 0; the 64-bit
+block counter from 0; the words of each block in order). A run then
+reads the same bits every time, and `STATUS` bit 0 is set so an OS can
+tell that they are not secret.
+
+The generator keeps going across a reset. A snapshot doesn't keep the
+host's bits: a machine loaded from one reads new ones, so two machines
+started from one snapshot don't share keys. A seeded generator goes on
+with its stream.
+
+### Shared folder
+
+A folder of the host that the guest uses file by file, given with
+`--share PATH` (see the README): the way to move files in and out of the
+machine without a disk image. As the network card has TCP/IP, the device
+has the file system: software opens, reads and writes files by path and
+needs no file system driver of its own. Commands run at once, in the
+tick of the store to `COMMAND`, so software reads `ERROR` and `RESULT`
+right after it; there is no IRQ.
+
+| Offset | Register      | Access | Description                                   |
+|--------|---------------|--------|-----------------------------------------------|
+| `0x00` | `STATUS`      | R      | bit 0 = a folder is shared, bit 1 = it is read-only |
+| `0x04` | `COMMAND`     | W      | runs a command, see below                     |
+| `0x08` | `ERROR`       | R      | why the last command failed, `0` if it didn't |
+| `0x0C` | `HANDLE`      | RW     | an open file or directory, `0`–`15`; `OPEN` sets it |
+| `0x10` | `PATH`        | RW     | physical address of a path                    |
+| `0x14` | `PATH2`       | RW     | physical address of the new path, for `RENAME` |
+| `0x18` | `ADDRESS`     | RW     | physical address of the data                  |
+| `0x1C` | `COUNT`       | RW     | bytes to move, or the size of the buffer at `ADDRESS` |
+| `0x20` | `POSITION_LO` | RW     | byte offset in the file, low 32 bits          |
+| `0x24` | `POSITION_HI` | RW     | high 32 bits                                  |
+| `0x28` | `FLAGS`       | RW     | how `OPEN` opens, see below                   |
+| `0x2C` | `RESULT`      | R      | bytes moved by the last command, `0` if none  |
+| `0x30` | `HANDLES`     | R      | `16`                                          |
+
+| Command | Name       | Uses                     | Does                                  |
+|---------|------------|--------------------------|---------------------------------------|
+| `1`     | `OPEN`     | `PATH`, `FLAGS`          | opens a file or directory; `HANDLE` = its handle |
+| `2`     | `CLOSE`    | `HANDLE`                 | closes it                             |
+| `3`     | `READ`     | `HANDLE`, `POSITION`, `ADDRESS`, `COUNT` | file to RAM            |
+| `4`     | `WRITE`    | `HANDLE`, `POSITION`, `ADDRESS`, `COUNT` | RAM or ROM to file     |
+| `5`     | `STAT`     | `PATH`, `ADDRESS`, `COUNT` | a stat record of the path to RAM    |
+| `6`     | `READDIR`  | `HANDLE`, `ADDRESS`, `COUNT` | the next directory entry to RAM   |
+| `7`     | `MKDIR`    | `PATH`                   | makes a directory                     |
+| `8`     | `REMOVE`   | `PATH`                   | removes a file or an empty directory  |
+| `9`     | `RENAME`   | `PATH`, `PATH2`          | renames or moves; replaces a file at `PATH2` |
+| `10`    | `TRUNCATE` | `HANDLE`, `POSITION`     | makes the file `POSITION` bytes long  |
+| `11`    | `SYNC`     | `HANDLE`                 | puts the file's writes on the host's medium, like a disk's [`FLUSH`](#flush) |
+
+Writing `COMMAND` sets `RESULT` to 0 and `ERROR` to the command's
+outcome; the other registers keep their values unless the command says
+otherwise. Without a shared folder every command fails with error 2.
+
+**Paths** are NUL-terminated strings of up to 1023 bytes in RAM or ROM,
+relative to the shared folder: names separated by `/`. Empty names (a
+leading, trailing or doubled `/`) are skipped, so `""` and `"/"` are the
+folder itself. A name can't be `.` or `..` and can't hold control
+characters, `\` or `:`; such a path fails with error 3, and so does
+one without a NUL in its first 1024 bytes. The names are bytes; the host
+decides what they mean (UTF-8 on most hosts) and whether case matters.
+A symbolic link in the folder, made by the host's user, is followed only
+while it leads to somewhere in the folder; otherwise error 14 (on Windows
+links are not checked).
+
+**`OPEN`** takes the flags:
+
+| Bit | Flag        | Effect                                                     |
+|-----|-------------|------------------------------------------------------------|
+| 0   | `WRITE`     | the file can be written as well as read                    |
+| 1   | `CREATE`    | a file that isn't there is made, empty; needs `WRITE`      |
+| 2   | `TRUNCATE`  | the file is cut to 0 bytes; needs `WRITE`                  |
+| 3   | `EXCLUSIVE` | with `CREATE`: fails with error 5 if the file is there     |
+| 4   | `DIRECTORY` | opens a directory for `READDIR`; alone                     |
+
+Flags that don't go together fail with error 1. A directory opened
+without `DIRECTORY`, or a file with it, fails with error 9; so does
+anything that is neither a file nor a directory. `OPEN` takes the lowest
+free handle and puts it in `HANDLE`; with all 16 open it fails with
+error 8. Handles stay open until `CLOSE` or a reset.
+
+**`READ`** moves up to `COUNT` bytes, at most 1MB, from the file at
+`POSITION` to RAM at `ADDRESS`; **`WRITE`** moves them from RAM or ROM to
+the file, growing it if it has to (a gap reads as zeros). `ADDRESS` and
+`POSITION` go up and `COUNT` down by the bytes moved, and `RESULT` holds
+how many: fewer than asked at the end of the file, 0 past it, and also
+when the DMA reaches memory it can't (error 11; the bytes before are
+moved). There is no alignment to keep. Written bytes reach the host file
+by the end of the command.
+
+**`STAT`** writes a 32-byte record about the path to `ADDRESS`, if
+`COUNT` is at least 32 (otherwise error 12); `RESULT` is 32. Numbers are
+little-endian:
+
+| Offset | Size | Field    | Description                                        |
+|--------|------|----------|----------------------------------------------------|
+| `0x00` | 4    | `TYPE`   | `1` = file, `2` = directory, `3` = something else  |
+| `0x08` | 8    | `SIZE`   | bytes in a file, `0` otherwise                     |
+| `0x10` | 8    | `MTIME`  | last modified, seconds since 1970-01-01 UTC        |
+
+**`READDIR`** writes the next entry of the directory open at `HANDLE`:
+its stat record and then, from offset `0x20`, its name, NUL-terminated
+(at most 255 bytes and the NUL). `COUNT` must be at least 288, room for
+any entry (otherwise error 12). `RESULT` is the size of the entry
+written, 32 + the name's length + 1, and 0 when there are no more
+entries. `.`, `..` and names a path can't hold are left out. The order
+is the host's.
+
+`MKDIR` on a path that is there fails with error 5, `REMOVE` of a
+directory that isn't empty with error 10. `REMOVE` and `RENAME` of the
+folder itself fail with error 3. `REMOVE` of a symbolic link removes the
+link. With `--share PATH:ro` every command that would change the folder
+fails with error 6, and so does `OPEN` with `WRITE`; `WRITE` and
+`TRUNCATE` on a handle opened without it fail with error 6 too.
+
+| `ERROR` | Reason                                                          |
+|---------|-----------------------------------------------------------------|
+| `1`     | unknown command, or `FLAGS` that don't go together              |
+| `2`     | no folder is shared                                             |
+| `3`     | a path that isn't allowed (see above)                           |
+| `4`     | the path is not there                                           |
+| `5`     | the path is there already                                       |
+| `6`     | read-only: the folder, or the handle                            |
+| `7`     | `HANDLE` is not open, or not a file (a directory for `READDIR`) |
+| `8`     | all 16 handles are open                                         |
+| `9`     | a directory where a file has to be, or the other way round      |
+| `10`    | the directory is not empty                                      |
+| `11`    | the DMA reached memory it can't: not RAM, or not RAM or ROM for `WRITE` and paths |
+| `12`    | `COUNT` is too small for the record                             |
+| `13`    | the host refused or failed, e.g. no permission or no space      |
+| `14`    | a symbolic link leads out of the folder                         |
+
+A reset closes every handle. The files stay as they are: what was
+written is in the folder. A snapshot doesn't hold open files either, so
+after a load every handle is closed and using one fails with error 7.
+
 ## Reset
 
 On reset all registers are zero and `pc = 0xFE000000`, so execution starts
@@ -777,8 +1052,10 @@ disk registers are cleared, the video card stops its DMA, turns the
 display off and clears its palette and `FRAME`, the beeper goes quiet,
 the mouse is disabled, the network card closes its sockets and forgets a
 DNS lookup, the audio card's voices stop, the real-time clock's alarm is
-disarmed and cleared, the power controller's `STATUS` is cleared). The
-real-time clock's time is not reset: it keeps following the host's clock.
+disarmed and cleared, the shared folder closes its handles, the power
+controller's `STATUS` is cleared). The
+real-time clock's time is not reset: it keeps following the host's
+clock, and neither is the random number generator.
 The power controller's `RESET_CAUSE` says which reset it was. The host's
 reset key, Ctrl+Alt+R in the window, resets the machine the same way,
 even after the CPU has halted.

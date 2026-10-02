@@ -8,7 +8,7 @@
 	.include "../common/harness.asm"
 
 DATA            = 0x1000
-NO_RAM          = 0x00100000        ; right after the 1MB of RAM
+NO_RAM          = RAM_END           ; right after the 4MB of RAM
 NO_DEVICE       = 0xFD0FF000        ; an unused page of the I/O region
 
 test_main:

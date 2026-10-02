@@ -8,6 +8,8 @@
 ; ============================================================================
 
 ; memcpy(r1 = dst, r2 = src, r3 = n) -> r1 = dst
+	.text
+	.globl memcpy, memset
 memcpy:
 	mv r4, r1                   ; r4 = next destination byte
 	xor r5, r1, r2

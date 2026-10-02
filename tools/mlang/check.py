@@ -72,9 +72,10 @@ class Checker:
 	.const (its value when known at compile time, else None), names get
 	.sym, places get .volatile, declarations get .sym or .var."""
 
-	def __init__(self, modules, diag):
+	def __init__(self, modules, diag, program=True):
 		self.modules = modules
 		self.diag = diag
+		self.program = program  # the whole program, not one module and its imports
 		self.module = None
 		self.scopes = []        # local scopes of the current function
 		self.func = None        # Sym of the function being checked
@@ -494,7 +495,7 @@ class Checker:
 	def check_program(self):
 		mains = [m.scope["main"] for m in self.modules
 				 if m.scope.get("main") is not None and m.scope["main"].kind == "func"]
-		if not mains:
+		if not mains and self.program:
 			self.error(None, "the program has no 'main'")
 		for extra in mains[1:]:
 			self.error(extra.decl.loc, f"a second 'main'; the first is in '{mains[0].module.path}'")

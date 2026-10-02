@@ -2,8 +2,10 @@
 """Assembler for the WRM.081632 CPU.
 
 Produces a raw little-endian image whose first byte is at --base
-(0xFE000000, the start of ROM, by default). The instruction set is
-described in docs/INSTRUCTIONS.md, the machine in docs/SPECIFICATION.md.
+(0xFE000000, the start of ROM, by default), or with -c a relocatable ELF
+object file for tools/ld.py (docs/ABI.md, "Object files"). The
+instruction set is described in docs/INSTRUCTIONS.md, the machine in
+docs/SPECIFICATION.md.
 """
 
 SYNTAX = """\
@@ -22,7 +24,13 @@ syntax:
 
   expressions: C operators | ^ & << >> + - * / % ~ and parentheses,
     numbers 42 0x2A 0b101010 0o52 'c', $ = address of the current line,
-    %hi(x) = x >> 13 (for LUI), %lo(x) = x & 0x1FFF (for ORI)
+    %hi(x) = x >> 13 (for LUI), %lo(x) = x & 0x1FFF (for ORI),
+    %pcrel_hi(x) = (x - $) >> 13 (for AUIPC), %pcrel_lo(x) = x - the
+    AUIPC just before & 0x1FFF (for ADDI, loads and stores after it),
+    %tprel(x), %tprel_hi(x), %tprel_lo(x): x - the start of the TLS
+    image, whole or in parts (-c only)
+  object files (-c): an address is a symbol plus a constant, which the
+    linker fills in; addresses in one section may be subtracted
 
   operands:
     ADD rd, rs1, rs2          ADDI rd, rs1, imm       LUI rd, imm19
@@ -55,7 +63,15 @@ pseudo-instructions:
   fgt/fge rd, rs1, rs2   FLT/FLE rd, rs2, rs1
 
 directives:
-  .org address              continue at an absolute address
+  .org address              continue at an absolute address (not with -c)
+  .text .rodata .data .bss .tdata .tbss
+                            continue in that section (-c only)
+  .section NAME[, "awxT"[, @nobits]]
+                            ... or in any other: a = allocated, w =
+                            writable, x = code, T = thread-local
+  .globl / .global names    symbols other object files see (-c)
+  .weak names               ... that another file may define instead
+  .local names              symbols only this file sees (the default)
   .align n[, fill]          pad to a multiple of n bytes (power of two)
   .byte / .db  values       8-bit values or strings
   .half / .dh  values       16-bit values
@@ -74,6 +90,8 @@ import re
 import struct
 import sys
 
+import elf
+
 ROM_BASE = 0xFE000000
 ROM_SIZE = 32 * 1024 * 1024
 
@@ -88,11 +106,77 @@ class Undefined(AsmError):
 		self.name = name
 
 
+class AsmErrors(Exception):
+	"""The errors of an assembly, as 'file:line: error: message' lines."""
+
+	def __init__(self, errors):
+		super().__init__("\n".join(errors))
+		self.errors = errors
+
+
+# -- values the linker finishes (object files) ------------------------------
+
+class Val:
+	"""A value only the linker knows: const plus coef * base for each
+	base in terms. A base is ("sec", name), the start of a section of
+	this file, or ("sym", name), a symbol defined in another file. In a
+	flat image every value is a number instead."""
+
+	__slots__ = ("const", "terms")
+
+	def __init__(self, const=0, terms=None):
+		self.const = const
+		self.terms = terms or {}
+
+	@staticmethod
+	def of(base, const=0):
+		return Val(const, {base: 1})
+
+	def single(self):
+		"""(base, addend) if it is one base plus a constant, else None."""
+		if len(self.terms) == 1:
+			(base, coef), = self.terms.items()
+			if coef == 1:
+				return base, self.const
+		return None
+
+
+def make_val(const, terms):
+	terms = {base: coef for base, coef in terms.items() if coef}
+	return Val(const, terms) if terms else const
+
+
+def val_add(a, b, sign=1):
+	ca, ta = (a.const, a.terms) if isinstance(a, Val) else (a, {})
+	cb, tb = (b.const, b.terms) if isinstance(b, Val) else (b, {})
+	terms = dict(ta)
+	for base, coef in tb.items():
+		terms[base] = terms.get(base, 0) + sign * coef
+	return make_val(ca + sign * cb, terms)
+
+
+def val_scale(a, k):
+	return make_val(a.const * k, {base: coef * k for base, coef in a.terms.items()})
+
+
+class Fix:
+	"""%hi(x) and the like of a value the linker knows: the relocation
+	that fills in the field. value is a Val, or a number for an absolute
+	address."""
+
+	__slots__ = ("kind", "value")
+
+	def __init__(self, kind, value):
+		self.kind = kind
+		self.value = value
+
+
 # -- encoding -------------------------------------------------------------
 
 OP_ADDI = 0x20
 OP_ORI = 0x23
 OP_LUI = 0x30
+OP_AUIPC = 0x31
 OP_SUB = 0x11
 OP_SLTU = 0x19
 OP_SLTIU = 0x29
@@ -272,10 +356,29 @@ def split_operands(text):
 
 # -- expressions ----------------------------------------------------------
 
-FUNCS = {
-	"%hi": lambda v: (v >> 13) & 0x7FFFF,
-	"%lo": lambda v: v & 0x1FFF,
-}
+RELOC_FUNCS = ("%hi", "%lo", "%pcrel_hi", "%pcrel_lo", "%tprel", "%tprel_hi", "%tprel_lo")
+
+
+def apply_func(name, v, lookup):
+	"""A % function of a value; $ (from lookup) is the address of the
+	instruction, which %pcrel_hi and %pcrel_lo count from."""
+	if name not in RELOC_FUNCS:
+		raise AsmError(f"unknown function '{name}'")
+	if isinstance(v, Fix):
+		raise AsmError(f"'{name}' of '%{v.kind}()'")
+	if name.startswith("%pcrel"):
+		pc = lookup("$")
+		base = pc if name == "%pcrel_hi" else val_add(pc, 4, -1)  # the AUIPC
+		v = val_add(v, base, -1)
+		if not isinstance(v, int):
+			return Fix(name[1:], val_add(v, base))  # the target, for the linker
+		return (v >> 13) & 0x7FFFF if name == "%pcrel_hi" else v & 0x1FFF
+	if isinstance(v, Val):
+		return Fix(name[1:], v)
+	if name.startswith("%tprel"):
+		raise AsmError(f"'{name}' needs an object file (-c): only the linker knows where "
+					   f"the TLS image is")
+	return (v >> 13) & 0x7FFFF if name == "%hi" else v & 0x1FFF
 
 
 def c_div(a, b):
@@ -286,6 +389,14 @@ def c_div(a, b):
 
 
 def apply_binary(op, a, b):
+	if isinstance(a, Fix) or isinstance(b, Fix):
+		raise AsmError("%hi(), %lo() and the like can't be part of a larger expression")
+	if isinstance(a, Val) or isinstance(b, Val):
+		if op == "+": return val_add(a, b)
+		if op == "-": return val_add(a, b, -1)
+		if op == "*" and not isinstance(a, Val): return val_scale(b, a)
+		if op == "*" and not isinstance(b, Val): return val_scale(a, b)
+		raise AsmError(f"'{op}' of an address the linker fills in")
 	if op == "+": return a + b
 	if op == "-": return a - b
 	if op == "*": return a * b
@@ -328,6 +439,12 @@ class ExprParser:
 			raise AsmError(f"unexpected '{self.toks[self.pos][1]}' in expression")
 		return v
 
+	@staticmethod
+	def negate(v):
+		if isinstance(v, Fix):
+			raise AsmError("%hi(), %lo() and the like can't be part of a larger expression")
+		return val_scale(v, -1) if isinstance(v, Val) else -v
+
 	def binary(self, level):
 		if level == len(self.LEVELS):
 			return self.unary()
@@ -342,9 +459,13 @@ class ExprParser:
 	def unary(self):
 		kind, text = self.take()
 		if kind == "op":
-			if text == "-": return -self.unary()
+			if text == "-": return self.negate(self.unary())
 			if text == "+": return self.unary()
-			if text == "~": return ~self.unary()
+			if text == "~":
+				v = self.unary()
+				if not isinstance(v, int):
+					raise AsmError("'~' of an address the linker fills in")
+				return ~v
 			if text == "$": return self.lookup("$")
 			if text == "(":
 				v = self.binary(0)
@@ -360,13 +481,12 @@ class ExprParser:
 		if kind == "id":
 			return self.lookup(text)
 		if kind == "func":
-			func = FUNCS.get(text.lower())
-			if not func:
+			if text.lower() not in RELOC_FUNCS:
 				raise AsmError(f"unknown function '{text}'")
 			self.expect("(")
 			v = self.binary(0)
 			self.expect(")")
-			return func(v)
+			return apply_func(text.lower(), v, self.lookup)
 		if kind is None:
 			raise AsmError("unexpected end of expression")
 		raise AsmError(f"unexpected '{text}' in expression")
@@ -431,6 +551,8 @@ def fmt_upper(op):
 	def enc(a, st, pc):
 		rd, imm = a.nargs(st, 2)
 		v = a.eval(st, imm, pc)
+		if isinstance(v, (Val, Fix)):
+			v = a.reloc19(st, pc, v, op == OP_AUIPC)
 		check_range(v, -0x40000, 0x7FFFF, "imm19")
 		return [enc_u(op, a.reg(rd), v)]
 	return enc
@@ -440,6 +562,8 @@ def fmt_mem(op):
 	def enc(a, st, pc):
 		rd, mem = a.nargs(st, 2)
 		off, rs1 = a.mem(st, mem, pc)
+		if isinstance(off, (Val, Fix)):
+			off = a.reloc14(st, pc, off, "signed")
 		check_range(off, -8192, 8191, "offset")
 		return [enc_i(op, a.reg(rd), rs1, off)]
 	return enc
@@ -478,6 +602,8 @@ def enc_jalr(a, st, pc):
 	else:
 		rd, rs1 = a.reg(args[0]), a.reg(args[1])
 		imm = a.eval(st, args[2], pc) if len(args) == 3 else 0
+	if isinstance(imm, (Val, Fix)):
+		imm = a.reloc14(st, pc, imm, "signed")
 	imm = sign32(imm)
 	check_range(imm, -8192, 8191, "offset")
 	return [enc_i(OP_JALR, rd, rs1, imm)]
@@ -536,6 +662,15 @@ def load_full(rd, v):
 	return [enc_u(OP_LUI, rd, u >> 13), enc_i(OP_ORI, rd, rd, u & 0x1FFF)]
 
 
+def load_reloc(a, st, pc, rd, v):
+	"""LUI + ORI of an address the linker fills in: a HI19 and a LO13."""
+	if isinstance(v, Fix):
+		raise AsmError(f"'%{v.kind}()' can't be loaded whole: use li with %hi/%lo parts")
+	a.relocate(st, pc, "R_WRM_HI19", v)
+	a.relocate(st, pc + 4, "R_WRM_LO13", v)
+	return [enc_u(OP_LUI, rd, 0), enc_i(OP_ORI, rd, rd, 0)]
+
+
 def load_short(rd, v):
 	u = v & 0xFFFFFFFF
 	s = sign32(u)
@@ -557,7 +692,7 @@ def size_li(a, st, pc, value=None):
 		v = (value or a.try_eval)(st, st.args[1], pc)
 	except AsmError:
 		return 8
-	if v is None or not -(1 << 31) <= v < (1 << 32):
+	if not isinstance(v, int) or not -(1 << 31) <= v < (1 << 32):
 		return 8
 	return 4 * len(load_short(0, v))
 
@@ -565,6 +700,8 @@ def size_li(a, st, pc, value=None):
 def enc_li(a, st, pc, value=None):
 	rd, text = a.nargs(st, 2)
 	v = (value or a.eval)(st, text, pc)
+	if isinstance(v, (Val, Fix)):
+		return load_reloc(a, st, pc, a.reg(rd), v)
 	check_value32(v)
 	return load_full(a.reg(rd), v) if st.size == 8 else load_short(a.reg(rd), v)
 
@@ -572,6 +709,8 @@ def enc_li(a, st, pc, value=None):
 def enc_la(a, st, pc):
 	rd, value = a.nargs(st, 2)
 	v = a.eval(st, value, pc)
+	if isinstance(v, (Val, Fix)):
+		return load_reloc(a, st, pc, a.reg(rd), v)
 	check_value32(v)
 	return load_full(a.reg(rd), v)
 
@@ -683,6 +822,11 @@ def dir_data(width):
 				out += parse_string(arg)
 				continue
 			v = a.eval(st, arg, pc)
+			if isinstance(v, (Val, Fix)):
+				if width != 4 or isinstance(v, Fix):
+					raise AsmError(f"an address the linker fills in needs '.word', not '{st.op}'")
+				a.relocate(st, pc + len(out), "R_WRM_32", v)
+				v = 0
 			if not lo <= v <= hi:
 				raise AsmError(f"value {v} does not fit in {8 * width} bits")
 			out += (v & hi).to_bytes(width, "little")
@@ -713,7 +857,7 @@ def dir_ascii(zero):
 def fill_byte(a, st, pc):
 	if len(st.args) < 2:
 		return a.fill
-	v = a.eval(st, st.args[1], pc)
+	v = a.const(st, st.args[1], pc)
 	check_range(v, -128, 255, "fill byte")
 	return v & 0xFF
 
@@ -766,27 +910,54 @@ class Stmt:
 		self.data = None  # .incbin contents
 		self.out = b""
 		self.is_insn = False
+		self.section = None  # -c: the name of its section
+		self.relocs = []  # -c: (offset in the statement, type, base, addend)
+		self.section_spec = None  # .section: (name, flags, nobits)
+
+
+# Sections that -c knows by name: their flags and whether they are
+# SHT_NOBITS. Any other name defaults to allocated, read-only data.
+A, W, X, T = elf.SHF_ALLOC, elf.SHF_WRITE, elf.SHF_EXECINSTR, elf.SHF_TLS
+SECTIONS = {
+	".text": (A | X, False), ".rodata": (A, False), ".data": (A | W, False),
+	".bss": (A | W, True), ".tdata": (A | W | T, False), ".tbss": (A | W | T, True),
+}
+SECTION_FLAGS = {"a": A, "w": W, "x": X, "T": T}
+NOBITS_OPS = (None, "=", ".align", ".space", ".zero", ".section")
+
+
+class Section:
+	def __init__(self, name, flags, nobits):
+		self.name = name
+		self.flags = flags
+		self.nobits = nobits
+		self.align = 4  # words and instructions keep theirs when linked
+		self.size = 0
 
 
 class Assembler:
-	def __init__(self, base, include_dirs=(), fill=0):
+	def __init__(self, base, include_dirs=(), fill=0, obj=False):
 		self.base = base
 		self.include_dirs = list(include_dirs)
 		self.fill = fill
+		self.obj = obj  # a relocatable object file, not a flat image
 		self.stmts = []
 		self.symbols = {}
 		self.defined_at = {}
 		self.errors = []
 		self.scope = None
+		self.sections = {}  # -c: name -> Section, in the order they start
+		self.binding = {}  # -c: name -> elf.STB_* of .globl, .weak, .local
+		self.labels = set()  # -c: names of labels (not constants)
+		self.externs = set()  # -c: names used but defined elsewhere
+		self.final = False  # second pass: an unknown name is an extern
 
 	def error(self, loc, msg):
 		self.errors.append(f"{loc[0]}:{loc[1]}: error: {msg}" if loc else f"error: {msg}")
 
 	def check(self):
 		if self.errors:
-			for e in self.errors:
-				print(e, file=sys.stderr)
-			sys.exit(1)
+			raise AsmErrors(self.errors)
 
 	# -- symbols
 
@@ -816,12 +987,21 @@ class Assembler:
 
 	# -- operands
 
+	def pc_value(self, st, pc):
+		"""The address pc of the statement's section: a Val with -c."""
+		return Val.of(("sec", st.section), pc) if self.obj else pc
+
 	def eval(self, st, text, pc):
 		def lookup(name):
 			if name == "$":
-				return pc
+				return self.pc_value(st, pc)
 			full = self.qualify(name, st.scope)
 			if full not in self.symbols:
+				# with -c a name defined nowhere in this file is another
+				# file's: the linker finds it
+				if self.obj and self.final and not name.startswith("."):
+					self.externs.add(full)
+					return Val.of(("sym", full))
 				raise Undefined(full)
 			return self.symbols[full]
 		return ExprParser(text, lookup).parse()
@@ -834,9 +1014,13 @@ class Assembler:
 
 	def const(self, st, text, pc):
 		try:
-			return self.eval(st, text, pc)
+			v = self.eval(st, text, pc)
 		except Undefined as e:
 			raise AsmError(f"{e} (must be defined before this line)") from None
+		if not isinstance(v, int):
+			raise AsmError(f"'{text.strip()}' must be a number, not an address the linker "
+						   f"fills in")
+		return v
 
 	def float(self, st, text, pc):
 		"""Bits of the binary32 value of a float literal or an integer expression."""
@@ -844,6 +1028,8 @@ class Assembler:
 			v = float(text)
 		except ValueError:
 			v = self.eval(st, text, pc)
+			if not isinstance(v, int):
+				raise AsmError(f"'{text.strip()}' is not a number") from None
 		try:
 			return struct.unpack("<I", struct.pack("<f", v))[0]
 		except OverflowError:
@@ -872,7 +1058,7 @@ class Assembler:
 	def creg(self, st, text, pc):
 		cr = CREGS.get(text.strip().lower())
 		if cr is None:
-			cr = self.eval(st, text, pc)
+			cr = self.const(st, text, pc)
 			if cr not in CREGS.values():
 				raise AsmError(f"no control register {cr}")
 		return cr
@@ -888,12 +1074,14 @@ class Assembler:
 					break
 			inner, prefix = text[i + 1:-1].strip(), text[:i].strip()
 			if inner.lower() in REGS:
-				off = sign32(self.eval(st, prefix, pc)) if prefix else 0
-				return off, REGS[inner.lower()]
+				off = self.eval(st, prefix, pc) if prefix else 0
+				return (sign32(off) if isinstance(off, int) else off), REGS[inner.lower()]
 		raise AsmError(f"expected a memory operand 'offset(reg)', got '{text}'")
 
 	def imm14(self, st, text, pc, kind):
 		v = self.eval(st, text, pc)
+		if isinstance(v, (Val, Fix)):
+			return self.reloc14(st, pc, v, kind)
 		if kind == "signed":
 			check_range(sign32(v), -8192, 8191, "immediate")
 		elif kind == "unsigned":
@@ -902,8 +1090,58 @@ class Assembler:
 			check_range(v, 0, 31, "shift amount")
 		return v & 0x3FFF
 
+	# -- relocations (-c)
+
+	def relocate(self, st, pc, rtype, value):
+		"""Records that the linker fills in the field of the instruction
+		or word at pc with value; returns 0, the field until then."""
+		if isinstance(value, Val):
+			single = value.single()
+			if not single:
+				raise AsmError("the linker can't compute this: it needs a symbol plus a constant")
+			base, addend = single
+		else:
+			base, addend = None, value  # an absolute address
+		st.relocs.append((pc - st.addr, rtype, base, addend))
+		return 0
+
+	FIX14 = {"lo": "R_WRM_LO13", "pcrel_lo": "R_WRM_PCREL_LO13",
+			 "tprel_lo": "R_WRM_TPREL_LO13", "tprel": "R_WRM_TPREL14"}
+	FIX19 = {"hi": "R_WRM_HI19", "pcrel_hi": "R_WRM_PCREL_HI19", "tprel_hi": "R_WRM_TPREL_HI19"}
+
+	def reloc14(self, st, pc, v, kind):
+		"""An imm14 the linker fills in: %lo and the like, or an address
+		that fits as it is (x(r0))."""
+		if isinstance(v, Fix):
+			rtype = self.FIX14.get(v.kind)
+			# the low bits of an AUIPC's result are the pc's: they must be added
+			if rtype is None or kind == "shift" or (kind == "unsigned" and v.kind == "pcrel_lo"):
+				raise AsmError(f"'%{v.kind}()' can't be this immediate")
+			return self.relocate(st, pc, rtype, v.value)
+		if kind != "signed":
+			raise AsmError("an address the linker fills in needs %lo() here")
+		return self.relocate(st, pc, "R_WRM_ABS14", v)
+
+	def reloc19(self, st, pc, v, auipc):
+		if not isinstance(v, Fix):
+			raise AsmError(f"an address the linker fills in needs "
+						   f"{'%pcrel_hi' if auipc else '%hi'}() here")
+		if (v.kind == "pcrel_hi") != auipc or v.kind not in self.FIX19:
+			raise AsmError(f"'%{v.kind}()' can't be the immediate of "
+						   f"{'AUIPC' if auipc else 'LUI'}")
+		return self.relocate(st, pc, self.FIX19[v.kind], v.value)
+
 	def pcrel(self, st, text, pc, bits):
 		target = self.eval(st, text, pc)
+		if isinstance(target, Fix):
+			raise AsmError(f"'%{target.kind}()' is not a branch target")
+		if self.obj:
+			# a target in the same section is a known distance away
+			off = val_add(target, self.pc_value(st, pc), -1)
+			if not isinstance(off, int):
+				self.relocate(st, pc, "R_WRM_BRANCH14" if bits == 14 else "R_WRM_JAL19", target)
+				return 0
+			target = pc + off
 		off = target - pc
 		if off % 4:
 			raise AsmError(f"target 0x{target & 0xFFFFFFFF:08X} is not 4-byte aligned")
@@ -967,7 +1205,16 @@ class Assembler:
 				raise AsmError(f"missing value for '{name}'")
 			args[0] = self.qualify(name, self.scope)
 
+		if op in (".globl", ".global", ".weak", ".local"):
+			self.bind(op, args)
+			op, args = None, []
 		st = Stmt(loc, raw.rstrip().expandtabs(4), self.scope, labels, op, args)
+		if op in SECTIONS and op != ".section":
+			st.op, st.section_spec = ".section", (op,) + SECTIONS[op]
+		elif op == ".section":
+			st.section_spec = self.parse_section(args)
+		if st.section_spec and not self.obj:
+			raise AsmError("sections need an object file (-c)")
 		if op == ".include":
 			path = self.find_file(st)
 			if os.path.realpath(path) in stack:
@@ -990,6 +1237,37 @@ class Assembler:
 		if labels or op:
 			self.stmts.append(st)
 
+	def bind(self, op, args):
+		"""Records the binding of .globl, .weak and .local names; only
+		object files have it."""
+		binding = {".weak": elf.STB_WEAK, ".local": elf.STB_LOCAL}.get(op, elf.STB_GLOBAL)
+		if not args:
+			raise AsmError(f"'{op}' expects symbol names")
+		for name in args:
+			if not SYMBOL_RE.fullmatch(name) or name.startswith(".") or name.lower() in REGS:
+				raise AsmError(f"'{name}' can't be a global symbol")
+			if self.binding.get(name, binding) != binding:
+				raise AsmError(f"'{name}' has another binding already")
+			self.binding[name] = binding
+
+	def parse_section(self, args):
+		"""(name, flags, nobits) of a .section directive."""
+		if not args or len(args) > 3 or not re.fullmatch(r"\.?[A-Za-z_][\w.$]*", args[0]):
+			raise AsmError("'.section' expects NAME[, \"flags\"[, @nobits|@progbits]]")
+		name = args[0]
+		flags, nobits = SECTIONS.get(name, (A, False))
+		if len(args) > 1:
+			flags = 0
+			for c in parse_string(args[1]).decode("ascii", "replace"):
+				if c not in SECTION_FLAGS:
+					raise AsmError(f"unknown section flag '{c}' (a, w, x or T)")
+				flags |= SECTION_FLAGS[c]
+		if len(args) > 2:
+			if args[2] not in ("@nobits", "@progbits"):
+				raise AsmError(f"unknown section type '{args[2]}'")
+			nobits = args[2] == "@nobits"
+		return name, flags, nobits
+
 	def find_file(self, st):
 		self.nargs(st, 1)
 		name = parse_string(st.args[0]).decode("utf-8")
@@ -1001,27 +1279,59 @@ class Assembler:
 
 	# -- passes
 
+	def switch_section(self, st, pcs, current):
+		"""A .section: its offset continues where that section stopped."""
+		name, flags, nobits = st.section_spec
+		section = self.sections.get(name)
+		if section is None:
+			section = self.sections[name] = Section(name, flags, nobits)
+			pcs[name] = 0
+		elif len(st.args) > 1 and (section.flags, section.nobits) != (flags, nobits):
+			raise AsmError(f"section '{name}' had other flags before")
+		pcs[current] = st.addr
+		return name
+
 	def layout(self):
-		"""First pass: assigns addresses and defines symbols."""
-		pc = self.base
+		"""First pass: assigns addresses and defines symbols. With -c an
+		address is an offset in its section, and code before any section
+		directive is in .text."""
+		pc = 0 if self.obj else self.base
+		section, pcs = ".text", {".text": 0}
+		if self.obj:
+			self.sections[".text"] = Section(".text", *SECTIONS[".text"])
 		pending = []
 		for st in self.stmts:
 			st.addr = label_pc = pc
+			st.section = section
 			try:
-				if st.op == ".org":
+				if st.op == ".section":
+					section = self.switch_section(st, pcs, section)
+					st.addr = label_pc = pc = pcs[section]
+					st.section = section
+				elif st.op == ".org":
+					if self.obj:
+						raise AsmError("'.org' can't be in an object file: the linker places it")
 					self.nargs(st, 1)
 					st.addr = label_pc = pc = self.const(st, st.args[0], pc)
 				elif st.op == ".align":
 					label_pc = align_to(self, st, pc)
 					st.size = label_pc - pc
+					if self.obj:
+						n = self.const(st, st.args[0], pc)
+						s = self.sections[section]
+						s.align = max(s.align, n)
 				elif st.op == "=":
 					pass
 				elif st.op is not None:
 					st.size = self.size_of(st, pc)
+				if self.obj and self.sections[section].nobits and st.op not in NOBITS_OPS:
+					raise AsmError(f"'{section}' holds no bytes: only labels, '.space', "
+								   f"'.zero' and '.align'")
 			except AsmError as e:
 				self.error(st.loc, e)
 			for name in st.labels:
-				self.define(st.loc, name, label_pc)
+				self.labels.add(name)
+				self.define(st.loc, name, Val.of(("sec", section), label_pc) if self.obj else label_pc)
 			if st.op == "=":
 				try:
 					v = self.try_eval(st, st.args[1], pc)
@@ -1033,6 +1343,10 @@ class Assembler:
 					else:
 						self.define(st.loc, st.args[0], v)
 			pc += st.size
+		if self.obj:
+			pcs[section] = pc
+			for name, size in pcs.items():
+				self.sections[name].size = size
 
 		# constants may refer to labels and constants defined later
 		while pending:
@@ -1048,13 +1362,16 @@ class Assembler:
 				else:
 					self.define(st.loc, st.args[0], v)
 			if len(left) == len(pending):
+				# what is still unknown is another file's (-c), or an error
+				self.final = True
 				for st in left:
 					try:
-						self.eval(st, st.args[1], st.addr)
+						self.define(st.loc, st.args[0], self.eval(st, st.args[1], st.addr))
 					except AsmError as e:
 						self.error(st.loc, e)
 				break
 			pending = left
+		self.final = True
 
 	def size_of(self, st, pc):
 		if st.op in DIRECTIVES:
@@ -1068,7 +1385,7 @@ class Assembler:
 	def emit(self):
 		"""Second pass: encodes every statement."""
 		for st in self.stmts:
-			if st.op in (None, "=", ".org"):
+			if st.op in (None, "=", ".org", ".section"):
 				continue
 			try:
 				if st.op in DIRECTIVES:
@@ -1084,6 +1401,8 @@ class Assembler:
 				continue
 			assert len(out) == st.size, f"{st.loc}: size changed between passes"
 			st.out = out
+			if self.obj and self.sections[st.section].nobits and any(out):
+				self.error(st.loc, f"'{st.section}' holds no bytes: the fill must be 0")
 
 	def link(self, max_size):
 		chunks = sorted((st for st in self.stmts if st.out), key=lambda st: st.addr)
@@ -1108,6 +1427,74 @@ class Assembler:
 		for st in chunks:
 			image[st.addr - self.base:st.addr - self.base + len(st.out)] = st.out
 		return bytes(image)
+
+	def object_file(self):
+		"""Second pass done: the ELF relocatable file (docs/ABI.md)."""
+		names = list(self.sections)
+		index = {name: i + 1 for i, name in enumerate(names)}
+		sections = []
+		for name in names:
+			s = self.sections[name]
+			data = None
+			if not s.nobits:
+				data = bytearray(s.size)
+				for st in self.stmts:
+					if st.section == name and st.out:
+						data[st.addr:st.addr + len(st.out)] = st.out
+			sections.append(elf.Section(name, elf.SHT_NOBITS if s.nobits else elf.SHT_PROGBITS,
+										s.flags, s.align, data, s.size))
+
+		# symbols: the sections', the labels only this file sees, then
+		# those others see or define
+		symbols = [elf.Symbol(name, 0, index[name], elf.STB_LOCAL, elf.STT_SECTION)
+				   for name in names]
+		ids = {}
+		def symbol_type(shndx):
+			if shndx in (elf.SHN_UNDEF, elf.SHN_ABS):
+				return elf.STT_NOTYPE
+			return elf.STT_TLS if sections[shndx - 1].flags & T else elf.STT_NOTYPE
+
+		def place(name):
+			"""(shndx, value) of a defined symbol; raises AsmError."""
+			v = self.symbols[name]
+			if isinstance(v, int):
+				return elf.SHN_ABS, v & 0xFFFFFFFF
+			single = v.single()
+			if not single or single[0][0] != "sec":
+				raise AsmError(f"'{name}' can't be exported: it isn't an address in this file")
+			return index[single[0][1]], single[1]
+
+		for name in sorted(self.labels, key=lambda n: self.defined_at[n]):
+			if self.binding.get(name, elf.STB_LOCAL) == elf.STB_LOCAL:
+				shndx, value = place(name)
+				ids[name] = len(symbols) + 1
+				symbols.append(elf.Symbol(name, value, shndx, elf.STB_LOCAL, symbol_type(shndx)))
+		exported = [n for n, b in self.binding.items() if b != elf.STB_LOCAL]
+		for name in exported + sorted(self.externs - set(exported)):
+			binding = self.binding.get(name, elf.STB_GLOBAL)
+			if name in self.symbols:
+				try:
+					shndx, value = place(name)
+				except AsmError as e:
+					self.error(self.defined_at[name], e)
+					continue
+			else:
+				shndx, value = elf.SHN_UNDEF, 0
+			ids[name] = len(symbols) + 1
+			symbols.append(elf.Symbol(name, value, shndx, binding, symbol_type(shndx)))
+		self.check()
+
+		for st in self.stmts:
+			for offset, rtype, base, addend in st.relocs:
+				if base is None:
+					sym = 0
+				elif base[0] == "sec":
+					sym = index[base[1]]
+				else:
+					sym = ids[base[1]]
+				sections[index[st.section] - 1].relocs.append(
+					(st.addr + offset, elf.R[rtype], sym, addend))
+		return elf.write_relocatable(sections, symbols)
 
 	def listing(self):
 		lines = []
@@ -1138,12 +1525,37 @@ def auto_int(text):
 	return int(text, 0)
 
 
+def assemble(path, obj=False, base=ROM_BASE, include_dirs=(), defines=(), fill=0,
+			 max_size=ROM_SIZE):
+	"""Assembles the file: returns (the image or object file, the
+	Assembler, for its listing). Raises AsmErrors."""
+	asm = Assembler(base, include_dirs, fill, obj)
+	for d in defines:
+		try:
+			asm.predefine(d)
+		except AsmError as e:
+			asm.error(("<command line>", 0), e)
+	try:
+		asm.parse_file(path)
+	except OSError as e:
+		asm.error(None, f"cannot read '{path}': {e.strerror}")
+	asm.check()
+	asm.layout()
+	asm.check()
+	asm.emit()
+	asm.check()
+	return (asm.object_file() if obj else asm.link(max_size)), asm
+
+
 def main(argv=None):
 	p = argparse.ArgumentParser(
 		prog="asm.py", description="WRM.081632 assembler", epilog=SYNTAX,
 		formatter_class=argparse.RawDescriptionHelpFormatter)
 	p.add_argument("input", help="source file")
-	p.add_argument("-o", "--output", help="output image (default: input with .rom extension)")
+	p.add_argument("-c", dest="obj", action="store_true",
+				   help="write a relocatable ELF object file for tools/ld.py, not an image")
+	p.add_argument("-o", "--output",
+				   help="output image (default: input with .rom extension, .o with -c)")
 	p.add_argument("-l", "--listing", help="write a listing with addresses, code and symbols")
 	p.add_argument("-I", dest="include", action="append", default=[], metavar="DIR",
 				   help="add a directory to search for .include/.incbin files")
@@ -1161,24 +1573,15 @@ def main(argv=None):
 		p.error("--fill must be a byte")
 	if not 0 <= args.base <= 0xFFFFFFFF:
 		p.error("--base must be a 32-bit address")
-	output = args.output or os.path.splitext(args.input)[0] + ".rom"
+	output = args.output or os.path.splitext(args.input)[0] + (".o" if args.obj else ".rom")
 
-	asm = Assembler(args.base, args.include, args.fill)
-	for d in args.defines:
-		try:
-			asm.predefine(d)
-		except AsmError as e:
-			asm.error(("<command line>", 0), e)
 	try:
-		asm.parse_file(args.input)
-	except OSError as e:
-		asm.error(None, f"cannot read '{args.input}': {e.strerror}")
-	asm.check()
-	asm.layout()
-	asm.check()
-	asm.emit()
-	asm.check()
-	image = asm.link(args.max_size)
+		image, asm = assemble(args.input, args.obj, args.base, args.include, args.defines,
+							  args.fill, args.max_size)
+	except AsmErrors as e:
+		for line in e.errors:
+			print(line, file=sys.stderr)
+		return 1
 
 	with open(output, "wb") as f:
 		f.write(image)
@@ -1186,7 +1589,8 @@ def main(argv=None):
 		with open(args.listing, "w", encoding="utf-8") as f:
 			f.write(asm.listing())
 	print(f"{output}: {len(image)} bytes")
+	return 0
 
 
 if __name__ == "__main__":
-	main()
+	sys.exit(main())

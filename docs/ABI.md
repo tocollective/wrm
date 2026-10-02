@@ -346,9 +346,11 @@ see [INSTRUCTIONS.md](INSTRUCTIONS.md#formats).
   object file, section, offset and symbol.
 - The linker leaves the other bits of the instruction unchanged.
 
-`tools/asm.py` produces flat images only and knows `%hi` and `%lo` for
-values known at assembly time; the other operators come with object
-file output.
+`tools/asm.py -c` writes these object files: an address it can't know
+becomes a relocation, and in a flat image (without `-c`) every value is
+known, except `%tprel*`, which needs the linker. `tools/ld.py` links
+them, adds the veneers and writes boot images, ROM images and
+executables.
 
 ### Linker veneers
 

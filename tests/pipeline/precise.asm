@@ -10,7 +10,7 @@
 	.include "../common/harness.asm"
 
 DATA            = 0x1000
-NO_RAM          = 0x00100000
+NO_RAM          = RAM_END           ; right after the 4MB of RAM
 
 test_main:
 	la r1, trap_record

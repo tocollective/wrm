@@ -5,6 +5,7 @@
 ; @output "traps ok\n"
 ; @exit 0
 
+	.globl main
 main:
 	addi sp, sp, -8
 	sw ra, 4(sp)

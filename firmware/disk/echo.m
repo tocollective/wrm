@@ -1,8 +1,7 @@
 // Example boot image: sends every byte received on the UART back to it.
 // Esc, typed or piped, powers the machine off.
 //
-// Build:  python3 tools/m.py firmware/disk/echo.m -o echo.s
-//         python3 tools/asm.py echo.s --base 0x10000 -o echo.img
+// Build:  python3 tools/m.py firmware/disk/echo.m -o echo.img
 // Run:    bin/wrm081632 --headless --hdd echo.img
 //         printf 'hello\n\033' | bin/wrm081632 --headless --hdd echo.img
 //

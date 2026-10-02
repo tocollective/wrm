@@ -1,10 +1,10 @@
 ; ============================================================================
 ;  crt0 of an M boot image (m/docs/COMPILER.md, "Цель: boot-образ")
 ;
-;  tools/m.py puts this file first in its output, then trap.asm and
-;  mem.asm, and the image is assembled at BOOT_LOAD. It defines
-;  __image_start and expects the compiler to define __image_end (sector
-;  aligned), __bss_start, __bss_end (both word aligned) and main.
+;  tools/m.py links this object first, at BOOT_LOAD (tools/ld.py --layout
+;  boot), so the header starts the image. The linker defines
+;  __image_sectors, __bss_start and __bss_end (word aligned); the program
+;  defines main.
 ;
 ;  On entry (docs/SPECIFICATION.md#state-at-the-entry-point): r1 = boot
 ;  info block, sp = 0x00010000 (8-aligned, empty), supervisor mode,
@@ -14,16 +14,14 @@
 ;  install its own handler in IVEC.
 ; ============================================================================
 
-__BOOT_LOAD     = 0x00010000
 __BOOT_MAGIC    = 0x424D5257        ; "WRMB"
-__SECTOR_SIZE   = 512
 __POWER_OFF     = 0xFD004000        ; power controller, OFF register
 
-	.org __BOOT_LOAD
-__image_start:
+	.text
+__header:
 	.dw __BOOT_MAGIC
-	.dw (__image_end - __image_start) / __SECTOR_SIZE
-	.dw __start - __image_start
+	.dw __image_sectors
+	.dw __start - __header      ; the entry point, from the load address
 	.dw 0                       ; flags
 
 __start:

@@ -14,13 +14,16 @@
 // - The host's network connections can't be saved: sockets that were open
 //   are closed by the other end (EVENTS.CLOSED, ERROR = network), a DNS
 //   lookup fails.
+// - Neither can the shared folder's open files: every handle is closed.
+//   Nor the random number generator's bits from the host: it takes new
+//   ones.
 // - The ROM isn't saved; a snapshot only loads with the same ROM, clock
 //   rate and RAM.
 // - The emulator's own state stays as it is: breakpoints, a stop of the
 //   debugger, the speed, the host's input not taken yet.
 // Snapshots are made by one build of the emulator for the same build: the
 // format has a version, and an older one isn't read.
-#define SNAPSHOT_VERSION 1
+#define SNAPSHOT_VERSION 2
 
 // Saves the machine to path; false (with a warning) if it can't.
 bool snapshot_save(const machine_t* machine, const char* path);

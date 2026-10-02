@@ -59,7 +59,7 @@ test_main:
 
 	; ---- unused pages: after the last device, and at the end of the region
 	li r28, 34
-	li r9, RTC + PAGE_SIZE
+	li r9, SHARE + PAGE_SIZE
 .f34:
 	lw r4, IO_ID(r9)
 	li r1, 6
@@ -112,4 +112,6 @@ devices:
 	.dw NET, ID_NET
 	.dw AUDIO, ID_AUDIO
 	.dw RTC, ID_RTC
+	.dw RNG, ID_RNG
+	.dw SHARE, ID_SHARE
 devices_end:

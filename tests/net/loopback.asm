@@ -4,6 +4,8 @@
 ;  other end closing, a refused connection), UDP datagrams between two
 ;  sockets, states and errors, the IRQ line, a DNS lookup of an address
 ; ============================================================================
+; @args --net-allow 127.0.0.1
+; The host's loopback is denied by default; the test allows 127.0.0.1.
 
 	.include "../common/harness.asm"
 

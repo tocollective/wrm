@@ -21,8 +21,10 @@ MOUSE           = 0xFD00A000
 NET             = 0xFD00B000
 AUDIO           = 0xFD00C000
 RTC             = 0xFD00D000
+RNG             = 0xFD00E000
+SHARE           = 0xFD00F000
 IO_END          = 0xFE000000        ; the end of the I/O region
-DEVICE_COUNT    = 14                ; pages PIC to RTC, all used
+DEVICE_COUNT    = 16                ; pages PIC to SHARE, all used
 
 ; every device's ID register: TYPE << 16 | VERSION << 8 | IRQ (0xFF: none)
 IO_ID           = 0xFFC
@@ -40,6 +42,8 @@ ID_MOUSE        = 0x000A0107
 ID_NET          = 0x000B0108
 ID_AUDIO        = 0x000C0109
 ID_RTC          = 0x000D010A
+ID_RNG          = 0x000E01FF
+ID_SHARE        = 0x000F01FF
 
 PIC_PENDING     = 0x00
 PIC_ENABLE      = 0x04
@@ -100,6 +104,7 @@ DISK_COUNT      = 0x0C
 DISK_ADDRESS    = 0x10
 DISK_COMMAND    = 0x14
 DISK_ERROR      = 0x18
+DISK_LIST       = 0x1C              ; next descriptor, with DISK_LISTED
 DISK_PRESENT    = 1 << 0            ; STATUS bits
 DISK_READONLY   = 1 << 1
 DISK_BUSY       = 1 << 2
@@ -108,12 +113,24 @@ DISK_FAILED     = 1 << 4
 DISK_CHANGED    = 1 << 5            ; the floppy was inserted or ejected
 DISK_READ       = 1                 ; commands
 DISK_WRITE      = 2
+DISK_FLUSH      = 3
+DISK_IDENTIFY   = 4
+DISK_LISTED     = 1 << 8            ; COMMAND bit: RAM through the list at LIST
 DISK_ERR_COMMAND  = 1               ; ERROR codes
 DISK_ERR_NO_DISK  = 2
 DISK_ERR_RANGE    = 3
 DISK_ERR_ADDRESS  = 4
 DISK_ERR_READONLY = 5
 DISK_ERR_MEDIA    = 6
+DISK_ERR_DESCRIPTOR = 7
+IDENT_MAGIC     = 0x444D5257        ; "WRMD", the identify block (offsets below)
+IDENT_VERSION   = 0x04
+IDENT_SECTORS   = 0x08
+IDENT_SECTOR_SIZE = 0x0C
+IDENT_FLAGS     = 0x10
+IDENT_UUID      = 0x20
+IDENT_SERIAL    = 0x30
+IDENT_MODEL     = 0x50
 SECTOR_SIZE     = 512
 
 VIDEO_STATUS    = 0x00
@@ -236,6 +253,7 @@ NET_ERR_LINK    = 4
 NET_ERR_UNSUPPORTED = 5
 NET_ERR_NETWORK = 6
 NET_ERR_LENGTH  = 7
+NET_ERR_DENIED  = 8                 ; the rules keep the guest from there
 NET_BUFFER_SIZE = 16384
 NET_DATAGRAM_MAX = 8192
 LOCALHOST       = 0x7F000001        ; 127.0.0.1
@@ -272,6 +290,58 @@ RTC_CONTROL     = 0x18
 RTC_STATUS      = 0x1C
 RTC_ARMED       = 1 << 0            ; CONTROL
 RTC_ALARM       = 1 << 0            ; STATUS
+
+RNG_DATA        = 0x00              ; 32 random bits, new on every read
+RNG_STATUS      = 0x04
+RNG_SEEDED      = 1 << 0            ; STATUS: from --seed, not the host
+
+SHARE_STATUS    = 0x00
+SHARE_COMMAND   = 0x04              ; runs at once
+SHARE_ERROR     = 0x08
+SHARE_HANDLE    = 0x0C
+SHARE_PATH      = 0x10
+SHARE_PATH2     = 0x14
+SHARE_ADDRESS   = 0x18
+SHARE_COUNT     = 0x1C
+SHARE_POS_LO    = 0x20
+SHARE_POS_HI    = 0x24
+SHARE_FLAGS     = 0x28
+SHARE_RESULT    = 0x2C
+SHARE_HANDLES   = 0x30
+SHARE_PRESENT   = 1 << 0            ; STATUS
+SHARE_RO        = 1 << 1
+SH_OPEN         = 1                 ; commands
+SH_CLOSE        = 2
+SH_READ         = 3
+SH_WRITE        = 4
+SH_STAT         = 5
+SH_READDIR      = 6
+SH_MKDIR        = 7
+SH_REMOVE       = 8
+SH_RENAME       = 9
+SH_TRUNCATE     = 10
+SH_SYNC         = 11
+SH_F_WRITE      = 1 << 0            ; FLAGS of OPEN
+SH_F_CREATE     = 1 << 1
+SH_F_TRUNCATE   = 1 << 2
+SH_F_EXCLUSIVE  = 1 << 3
+SH_F_DIRECTORY  = 1 << 4
+SH_E_COMMAND    = 1                 ; ERROR codes
+SH_E_NO_FOLDER  = 2
+SH_E_PATH       = 3
+SH_E_NOT_FOUND  = 4
+SH_E_EXISTS     = 5
+SH_E_READONLY   = 6
+SH_E_HANDLE     = 7
+SH_E_NO_HANDLE  = 8
+SH_E_TYPE       = 9
+SH_E_NOT_EMPTY  = 10
+SH_E_ADDRESS    = 11
+SH_E_SIZE       = 12
+SH_FILE         = 1                 ; TYPE of a stat record
+SH_DIRECTORY    = 2
+SH_STAT_SIZE    = 32
+SH_DIRENT_MAX   = 288
 
 STATUS_IE       = 1 << 0
 STATUS_PUM      = 1 << 3            ; user mode after IRET
@@ -340,6 +410,7 @@ HID_A           = 0x04
 HID_ESCAPE      = 0x29
 
 ; ---- RAM layout (slot 0, at least 1MB) --------------------------------------
+; Without --ram the machine has 4MB in slot 0: RAM ends at RAM_END.
 ; Variables sit below 8KB, so they are reached as offset(r0) with no base
 ; register at all. Booting from disk (BOOT_* above) uses the same RAM; the
 ; demos only run if it didn't boot.
@@ -354,6 +425,7 @@ VAR_CON_Y       = 0x0118
 BUFFER          = 0x0200
 IRQ_STACK_TOP   = 0x00080000
 STACK_TOP       = 0x00100000
+RAM_END         = 0x00400000        ; the default RAM, 4MB; past it nothing is mapped
 
 ; screen console (video.asm): 80x30 characters in 640x480, 8 bpp; the
 ; font stays at the end of VRAM, past the frame of any mode

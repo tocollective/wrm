@@ -5,6 +5,7 @@
 ; @output "main(0, null)\n"
 ; @exit 42
 
+	.globl main
 main:
 	bnez r1, .bad_argc
 	bnez r2, .bad_argv

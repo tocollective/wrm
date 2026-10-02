@@ -12,6 +12,7 @@ MAX_N   = 20
 
 ; r11 = destination offset, r12 = length, r13 = the number of the check,
 ; the exit code if it fails
+	.globl main
 main:
 	addi sp, sp, -16
 	sw ra, 12(sp)

@@ -22,6 +22,9 @@ A test can set up the machine with comment lines in its source:
                     include/input.h), e.g. "@input 1000 key 4 down"
   ; @stdin TEXT     bytes for the emulator's stdin, the UART's RX line,
                     with \n, \t, \\ and \xNN escapes; several add up
+  ; @share [ro]     share a fresh folder (--share) holding hello.txt
+                    ("Hello, share!\n") and sub/data.bin (300 bytes, byte i
+                    is i & 0xFF); with ro read-only
 Each @hdd attaches the next disk, 0 then 1.
 
 usage: tests/run.py [--emulator PATH] [tests...]
@@ -67,9 +70,9 @@ def test_name(path):
 
 def read_directives(path):
 	"""Returns the @hdd specs, the @floppy spec (or None), the @args
-	options, the @rom source (or None), the @input lines and the @stdin
-	bytes of a test."""
-	hdds, floppy, args, rom, script, stdin = [], None, [], None, [], b""
+	options, the @rom source (or None), the @input lines, the @stdin
+	bytes and the @share spec (or None) of a test."""
+	hdds, floppy, args, rom, script, stdin, share = [], None, [], None, [], b"", None
 	with open(path, encoding="utf-8") as f:
 		for line in f:
 			m = DIRECTIVE.match(line)
@@ -88,9 +91,13 @@ def read_directives(path):
 				script.append(value)
 			elif name == "stdin":
 				stdin += value.encode("latin-1").decode("unicode_escape").encode("latin-1")
+			elif name == "share":
+				if value not in ("", "ro"):
+					raise ValueError(f"@share takes nothing or ro, not {value!r}")
+				share = value
 			else:
 				raise ValueError(f"unknown directive @{name}")
-	return hdds, floppy, args, rom, script, stdin
+	return hdds, floppy, args, rom, script, stdin, share
 
 
 def pattern_disk(sectors):
@@ -111,26 +118,34 @@ def make_disk(spec, path, image):
 	return None if asm.returncode == 0 else asm.stdout + asm.stderr
 
 
+def make_share(folder):
+	"""Fills the folder an @share test gets."""
+	os.makedirs(os.path.join(folder, "sub"))
+	with open(os.path.join(folder, "hello.txt"), "wb") as f:
+		f.write(b"Hello, share!\n")
+	with open(os.path.join(folder, "sub", "data.bin"), "wb") as f:
+		f.write(bytes(i & 0xFF for i in range(300)))
+
+
 def run_test(path, emulator, timeout, workdir):
 	"""Returns (passed, message, output)."""
 	base = os.path.join(workdir, test_name(path).replace("/", "_"))
 	rom = base + ".rom"
 	try:
-		hdds, floppy, extra, rom_source, script, stdin = read_directives(path)
+		hdds, floppy, extra, rom_source, script, stdin, share = read_directives(path)
 	except ValueError as e:
 		return False, str(e), ""
-	source = path
 	if rom_source is not None:
-		source = base + ".s"
 		m = subprocess.run([sys.executable, COMPILER, "--rom",
-							os.path.join(os.path.dirname(path), rom_source), "-o", source],
+							os.path.join(os.path.dirname(path), rom_source), "-o", rom],
 						   capture_output=True, text=True)
 		if m.returncode != 0:
 			return False, f"can't compile @rom {rom_source}", m.stdout + m.stderr
-	asm = subprocess.run([sys.executable, ASSEMBLER, source, "-o", rom],
-						 capture_output=True, text=True)
-	if asm.returncode != 0:
-		return False, "assembler failed", asm.stdout + asm.stderr
+	else:
+		asm = subprocess.run([sys.executable, ASSEMBLER, path, "-o", rom],
+							 capture_output=True, text=True)
+		if asm.returncode != 0:
+			return False, "assembler failed", asm.stdout + asm.stderr
 
 	command = [emulator, "--headless", "--rom", rom]
 	for n, spec in enumerate(hdds):
@@ -145,6 +160,10 @@ def run_test(path, emulator, timeout, workdir):
 		if error is not None:
 			return False, f"can't make the disk image for @floppy {floppy}", error
 		command += ["--floppy", image]
+	if share is not None:
+		folder = base + ".share"
+		make_share(folder)
+		command += ["--share", folder + (":ro" if share else "")]
 	if script:
 		script_path = base + ".input"
 		with open(script_path, "w", encoding="utf-8") as f:

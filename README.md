@@ -22,29 +22,36 @@ dd if=/dev/zero of=firmware.rom  bs=1m  count=32
 ## Running
 
 ```sh
-python3 tools/m.py --rom firmware/main.m -o firmware.s
-python3 tools/asm.py firmware.s -o firmware.rom
-bin/wrm081632 [--rom PATH] [--ram SIZE[,...]] [--clock HZ] [--hdd PATH]
-              [--floppy PATH] [--mute] [--no-net] [--net=ADDR] [--headless]
-              [--unthrottled] [--deterministic] [--rtc=SECONDS] [--input PATH]
-              [--monitor[=PORT]] [--pause] [--load PATH]
+python3 tools/m.py --rom firmware/main.m -o firmware.rom
+bin/wrm081632 [--rom PATH] [--ram SIZE[,...]] [--clock HZ]
+              [--hdd PATH] [--hdd-serial N=SERIAL] [--floppy PATH]
+              [--share PATH[:ro]] [--mute] [--headless]
+              [--no-net] [--net-allow RULE] [--net-deny RULE]
+              [--net-forward [ADDR:]HOST_PORT:GUEST_PORT]
+              [--unthrottled] [--deterministic] [--rtc=SECONDS] [--seed=N]
+              [--input PATH] [--monitor[=PORT]] [--pause] [--load PATH]
               [--trace[=PATH]] [--debug]
 ```
 
 | Option             | Description                                              |
 |--------------------|----------------------------------------------------------|
 | `--rom PATH`       | firmware image, `firmware.rom` by default                |
-| `--ram SIZE[,...]` | RAM in slots 0–3, mapped back to back from address 0: `1M`, `2M`, `4M`, `8M`, `16M` or `32M` each (`--ram 4M,4M`); `1M` by default |
+| `--ram SIZE[,...]` | RAM in slots 0–3, mapped back to back from address 0: `1M`, `2M`, `4M`, `8M`, `16M` or `32M` each (`--ram 4M,4M`); `4M` by default |
 | `--clock HZ`       | clock rate, with an optional `k`, `M` or `G` suffix; `32M` by default |
 | `--hdd PATH`       | disk image for disk 0; a second `--hdd` attaches disk 1 (see [Booting from disk](#booting-from-disk)) |
+| `--hdd-serial N=SERIAL` | the serial number disk `N` reports to `IDENTIFY`, up to 31 printable characters; by default it is made from the image's path |
 | `--floppy PATH`    | disk image in the floppy drive; a file dropped on the window replaces it while the machine runs |
+| `--share PATH[:ro]` | share a host folder with the guest (see [Shared folder](#shared-folder)); read-only with `:ro` |
 | `--mute`           | no sound from the beeper and the audio card               |
 | `--no-net`         | cut the network card off the host's network (see [Network](#network)) |
-| `--net=ADDR`       | listening sockets of the network card bind to `ADDR`, `127.0.0.1` by default |
+| `--net-allow RULE` | let the guest connect and send to `RULE`, `ADDR[/BITS][:PORT[-PORT]]` (e.g. `127.0.0.1:8000-8099`); see [Network](#network) |
+| `--net-deny RULE`  | keep the guest from `RULE`; of all the rules, the last that matches wins |
+| `--net-forward [ADDR:]HOST_PORT:GUEST_PORT` | a guest listening on `GUEST_PORT` listens on `ADDR:HOST_PORT` of the host (`ADDR` is `127.0.0.1` if left out) |
 | `--headless`       | no window and no sound (the video card, the beeper and the audio card still run, but nothing is shown or heard); the UART console still uses stdin and stdout |
 | `--unthrottled`    | run as fast as the host can, not at the clock rate (see [Speed and determinism](#speed-and-determinism)) |
-| `--deterministic`  | the same ROM, disks and input give the same run: `--unthrottled`, a virtual RTC, the network polled at fixed ticks |
+| `--deterministic`  | the same ROM, disks and input give the same run: `--unthrottled`, a virtual RTC, a seeded random number generator, the network polled at fixed ticks |
 | `--rtc=SECONDS`    | a virtual RTC: it starts at `SECONDS` after 1970-01-01 UTC and counts clock ticks (`0` with `--deterministic`) |
+| `--seed=N`         | the random number generator gives the same bits on every run, the ChaCha20 stream of `N`, instead of the host's (`0` with `--deterministic`) |
 | `--input PATH`     | feed the keyboard, the UART, the mouse and the power button from an [input script](#input-scripts) |
 | `--monitor[=PORT]` | the [monitor](#monitor), a debugging console on `127.0.0.1:PORT` (`4040` by default) |
 | `--pause`          | start with the machine stopped, for the monitor          |
@@ -75,6 +82,21 @@ guest has enabled the power controller's IRQ in the PIC and still runs,
 the emulator asks it to power off and waits; doing it again quits at
 once. A guest that doesn't listen is cut off at once, as before.
 
+## Shared folder
+
+`--share PATH` gives the guest a folder of the host: software opens,
+reads and writes its files by path through the shared folder device,
+without a disk image and without a file system driver of its own (see
+[docs/SPECIFICATION.md](docs/SPECIFICATION.md#shared-folder)). Paths
+can't leave the folder: `..` is refused, and so is a symbolic link that
+leads out of it. `--share PATH:ro` shares it read-only. Files the guest
+writes are in the folder at once; the guest's `SYNC` puts them on the
+host's disk.
+
+```sh
+bin/wrm081632 --share ./exchange          # the guest sees ./exchange as /
+```
+
 ## Mouse
 
 The mouse is relative, like a PS/2 one. Once software has enabled it, a
@@ -89,10 +111,27 @@ The network card has TCP/IP in hardware, like the WIZnet W5500: software
 opens up to 8 TCP or UDP sockets and looks up host names, and the
 emulator maps them to sockets of the host. It is connected unless the
 emulator runs with `--no-net`, which keeps a guest off the network.
-Sockets the guest listens on are opened on `127.0.0.1` (only
-programs on the host can connect) unless `--net=ADDR` names another
-address, e.g. `--net=0.0.0.0` for all of them. See
-[docs/SPECIFICATION.md](docs/SPECIFICATION.md#network-card).
+See [docs/SPECIFICATION.md](docs/SPECIFICATION.md#network-card).
+
+The guest reaches the internet, but not the host itself or the networks
+around it: connections and datagrams to `127.0.0.0/8`, the private
+networks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local
+and other non-public addresses are refused with error 8, so a guest
+can't get at services that trust the host. Rules open or close more,
+each an address with an optional prefix length and port range; the last
+rule that matches decides:
+
+```sh
+bin/wrm081632 --net-allow 127.0.0.1:8000           # a server on the host
+bin/wrm081632 --net-allow 192.168.1.0/24           # the local network
+bin/wrm081632 --net-deny 0.0.0.0/0 --net-allow 93.184.215.14:443  # one site
+```
+
+Sockets the guest listens on are opened on `127.0.0.1` and the same
+port, so only programs on the host can connect. `--net-forward` opens a
+guest's port somewhere else, e.g. `--net-forward 0.0.0.0:8080:80` lets
+the whole network reach a server on the guest's port 80 through the
+host's port 8080.
 
 A browser can't open TCP connections or look up host names, so the web
 build asks a proxy on the host to do it, `tools/netproxy.py` (only the
@@ -134,7 +173,8 @@ in pieces; the RTC still tells the host's time unless it is virtual.
 
 `--deterministic` makes a run depend only on what the machine is given:
 it runs unthrottled, the RTC is virtual (from `--rtc=SECONDS`, or 1970),
-and the network is polled every millisecond of machine time instead of
+the random number generator is seeded (from `--seed=N`, or 0), disk
+serial numbers are made from the images' file names, and the network is polled every millisecond of machine time instead of
 whenever the host gets to it. Input from the window and the terminal
 still comes when it comes; an input script gives it at exact ticks.
 
@@ -161,19 +201,20 @@ disabled mouse ignores them.
 
 A disk image is a plain file of 512-byte sectors. The disk is written
 back to the file, and a file the emulator can't write is attached
-read-only.
+read-only. The emulator locks the images it uses: an image another
+emulator already has is attached read-only, with a warning, and one it
+writes isn't attached at all, so two machines never write one image.
 
 The firmware (`firmware/`, written in M: see
 [m/docs/spec](m/docs/spec/README.md)) boots from the floppy, or else from
 disk 0, when it holds a boot image. A boot image starts with a small
 header and is loaded to `0x00010000`
 ([docs/SPECIFICATION.md](docs/SPECIFICATION.md#boot-protocol)). The M
-compiler makes one by default; assembled at that address and padded to
-whole sectors, the assembler output is itself a bootable disk image:
+compiler makes one by default; padded to whole sectors, it is itself a
+bootable disk image:
 
 ```sh
-python3 tools/m.py firmware/disk/hello.m -o hello.s
-python3 tools/asm.py hello.s --base 0x10000 -o hdd0.img
+python3 tools/m.py firmware/disk/hello.m -o hdd0.img
 bin/wrm081632 --hdd hdd0.img
 bin/wrm081632 --floppy hdd0.img     # the same image boots from the floppy
 ```
@@ -184,6 +225,37 @@ the window; the guest sees it in the drive's `STATUS`
 ([docs/SPECIFICATION.md](docs/SPECIFICATION.md#floppy-drive)).
 The calling conventions for code on the machine are in
 [docs/ABI.md](docs/ABI.md).
+
+## Toolchain
+
+| Tool              | What it does                                              |
+|-------------------|-----------------------------------------------------------|
+| `tools/asm.py`    | assembler: a flat image at `--base` (the test ROMs), or with `-c` an ELF object file |
+| `tools/ld.py`     | linker: object files and `ar` archives to a boot image, a ROM image or an ELF executable (`--layout boot\|rom\|exec`), with veneers for far calls and a symbol map (`--map`) |
+| `tools/m.py`      | the M compiler: each module to an object file of its own, linked with the runtime |
+| `tools/disasm.py` | disassembler for flat images                              |
+
+Object files and executables are ELF32 with `e_machine` = `0x0816`
+([docs/ABI.md](docs/ABI.md#object-files)), so `llvm-readelf` and
+`llvm-objdump -h` read their headers, sections, symbols and relocations.
+Modules can be compiled one by one and linked later:
+
+```sh
+python3 tools/m.py -c lib.m -o lib.o          # one module (imports are read, not compiled)
+python3 tools/m.py -c main.m -o main.o
+python3 tools/m.py main.o lib.o -o prog.img   # linked with the runtime: a boot image
+python3 tools/m.py -S lib.m -o lib.s          # the assembly asm.py -c gets
+
+python3 tools/asm.py -c start.s -o start.o    # assembly by hand
+python3 tools/ld.py --layout exec start.o lib.o -o prog.elf --map prog.map
+```
+
+In an object file a label is an offset in its section; `.text`, `.data`,
+`.rodata`, `.bss`, `.tdata`, `.tbss` and `.section` switch sections,
+`.globl` and `.weak` export symbols, and a name defined nowhere in the
+file is another file's. `%pcrel_hi`/`%pcrel_lo` and `%tprel*` give
+position-independent and thread-local addresses (`asm.py --help` lists
+the syntax, `ld.py --help` the layouts and the symbols it defines).
 
 ## Debugging
 
@@ -283,7 +355,10 @@ down to its pipeline and TLB, RAM, VRAM and every device. Loading one
 (`load`, Ctrl+Alt+L, `--load PATH`) goes on exactly where it was saved.
 Disk images are referenced, not copied: loading warns if one has changed
 since, and the floppy drive gets back the disk it had. Network
-connections can't be saved; after a load the guest sees them closed. A
+connections can't be saved; after a load the guest sees them closed,
+and so are the shared folder's open files. The random number generator
+takes new bits from the host after a load (a seeded one goes on with its
+stream). A
 snapshot loads only with the same ROM, clock rate and RAM, into the same
 build of the emulator.
 
@@ -303,13 +378,15 @@ runs every ROM through it as a test of its own.
 | `isa`      | every instruction, control registers, exceptions, user mode |
 | `pipeline` | forwarding and stalls, cycle timing, precise faults and interrupts |
 | `mmu`      | pages and superpages, permissions, TLB invalidation and its modes, `U` |
-| `disk`     | the disk controller, the floppy drive, the firmware booting from disk |
+| `disk`     | the disk controller: transfers, scatter-gather lists, `FLUSH`, `IDENTIFY`; the floppy drive, the firmware booting from disk |
 | `video`    | the video card: modes, palette, drawing engine, DMA, VBLANK |
 | `sound`    | the beeper's registers and `DURATION` timing; the audio card's voices, loops, signals and DMA faults |
 | `mouse`    | the mouse's registers (headless, so without events)         |
 | `input`    | an input script in deterministic mode, the UART from stdin  |
-| `net`      | the network card without a link (`--no-net`), and with one over the host's loopback: TCP, UDP, DNS |
+| `net`      | the network card without a link (`--no-net`), and with one over the host's loopback: TCP, UDP, DNS; the rules and a forwarded port |
 | `rtc`      | the real-time clock: the host's time and its latch, the alarm and its IRQ line; the virtual time |
+| `rng`      | the random number generator: the host's bits, and the ChaCha20 stream of a seed |
+| `share`    | the shared folder: paths and their limits, files, directories, handles; read-only, and no folder |
 | `power`    | the power controller: its state at power-on, a reset by software and `RESET_CAUSE`; what a reset clears and what it keeps |
 | `devices`  | every device's `ID` register, unused pages of the I/O region |
 
@@ -330,6 +407,7 @@ Comment lines in a test set up the machine it runs on:
 | `; @rom FILE.m`   | run a ROM compiled from M (e.g. `../../firmware/main.m`) instead of the test itself |
 | `; @input EVENT`  | a line of the [input script](#input-scripts), e.g. `; @input 1000 key 4 down` |
 | `; @stdin TEXT`   | bytes on the emulator's stdin (the UART), with `\n`, `\t`, `\\` and `\xNN` escapes |
+| `; @share [ro]`   | share a fresh folder holding `hello.txt` and `sub/data.bin` (see `tests/run.py`); `ro` makes it read-only |
 
 Each `@hdd` attaches the next disk, 0 and then 1.
 

@@ -4,6 +4,7 @@
 ; @output ""
 ; @exit 0xA5
 
+	.globl main
 main:
 	li r1, 0x123456A5
 	ret

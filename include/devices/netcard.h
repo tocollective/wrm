@@ -4,6 +4,7 @@
 
 #include "bus.h"
 #include "devices/pic.h"
+#include "netpolicy.h"
 #include "network.h"
 
 #define NET_SOCKET_COUNT 8
@@ -80,6 +81,7 @@
 #define NET_ERROR_UNSUPPORTED 5 // LISTEN or UDP in a browser
 #define NET_ERROR_NETWORK 6 // the host's network failed
 #define NET_ERROR_LENGTH 7 // the datagram is too long
+#define NET_ERROR_DENIED 8 // the rules keep the guest from the address
 
 #define NET_PORT_MASK 0xFFFF
 
@@ -102,14 +104,16 @@ typedef struct net_socket {
 
 // Network card with TCP/IP in hardware: each socket is a socket of the
 // host. Commands run at once, in the store that writes them; the network
-// moves data when the host polls the card (netcard_poll).
+// moves data when the host polls the card (netcard_poll). The policy
+// says where sockets may connect and send to, and on which address and
+// port of the host a guest's port listens.
 // IRQ line is asserted while PENDING is not 0.
 typedef struct netcard {
 	pic_t* pic;
 	uint8_t irq;
 	bus_t dma; // reads RAM or ROM, writes RAM
 	bool link; // connected to the host's network (not --no-net)
-	uint32_t local_addr; // where LISTEN and UDP on a port listen
+	const net_policy_t* policy; // kept, not copied
 	net_socket_t socket[NET_SOCKET_COUNT];
 	uint32_t dns_status;
 	uint32_t dns_control;
@@ -118,9 +122,9 @@ typedef struct netcard {
 	network_lookup_t* lookup; // the one running, NULL if none
 } netcard_t;
 
-// link = false makes a card whose link is down; local_addr as in netcard_t
+// link = false makes a card whose link is down
 netcard_t* netcard_create(pic_t* pic, const uint8_t irq, const bus_t dma,
-						  const bool link, const uint32_t local_addr);
+						  const bool link, const net_policy_t* policy);
 void netcard_destroy(netcard_t* net);
 
 // Closes every socket and forgets a running lookup.

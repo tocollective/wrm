@@ -246,12 +246,14 @@ static void snap_disk(snapshot_stream_t* s, disk_t* disk, const char* name) {
 	snap_u32(s, &disk->count);
 	snap_u32(s, &disk->address);
 	snap_u32(s, &disk->error);
+	snap_u32(s, &disk->list);
 	snap_u32(s, &disk->command);
 	snap_bool(s, &disk->busy);
 	snap_bool(s, &disk->done);
 	snap_bytes(s, disk->buffer, sizeof(disk->buffer));
 	snap_u32(s, &disk->position);
 	snap_u32(s, &disk->wait);
+	snap_u32(s, &disk->left);
 	if (!s->load) return;
 	// a transfer to a disk that isn't there any more
 	if (!disk->file && disk->busy) {
@@ -427,6 +429,33 @@ static void snap_rtc(snapshot_stream_t* s, rtc_t* rtc) {
 	if (rtc->ticks >= rtc->period) s->failed = true;
 }
 
+// The host's random bits are never given out twice: a loaded machine
+// takes new ones. A seeded generator goes on with its stream.
+static void snap_rng(snapshot_stream_t* s, rng_t* rng) {
+	snap_tag(s, "RNG ");
+	snap_u64(s, &rng->counter);
+	snap_u32s(s, rng->pool, RNG_POOL_WORDS);
+	snap_u32(s, &rng->used);
+	if (rng->used > RNG_POOL_WORDS) s->failed = true;
+	if (s->load && !rng->seeded) rng_drop_pool(rng);
+}
+
+// The host's files can't be saved: a loaded machine has every handle
+// closed, as if the host had closed them.
+static void snap_share(snapshot_stream_t* s, share_t* share) {
+	snap_tag(s, "SHR ");
+	if (s->load) share_close_handles(share);
+	snap_u32(s, &share->error);
+	snap_u32(s, &share->current);
+	snap_u32(s, &share->path);
+	snap_u32(s, &share->path2);
+	snap_u32(s, &share->address);
+	snap_u32(s, &share->count);
+	snap_u64(s, &share->position);
+	snap_u32(s, &share->flags);
+	snap_u32(s, &share->result);
+}
+
 // ---- the machine --------------------------------------------------------------
 
 // What the machine is made of: a snapshot only loads into the same.
@@ -509,6 +538,8 @@ static void snap_machine(snapshot_stream_t* s, machine_t* machine) {
 	snap_netcard(s, mb->netcard);
 	snap_audio(s, mb->audiocard);
 	snap_rtc(s, mb->rtc);
+	snap_rng(s, mb->rng);
+	snap_share(s, mb->share);
 	snap_tag(s, "END ");
 }
 

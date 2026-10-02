@@ -127,6 +127,11 @@ if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32)
 endif()
 
+# the random number generator's bits come from BCryptGenRandom on Windows
+if(WIN32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE bcrypt)
+endif()
+
 # sqrtf and fmaf of the CPU's floating point (and miniaudio's resampler)
 # are in libm on Linux
 find_library(WRM081632_LIBM m)

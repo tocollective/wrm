@@ -12,8 +12,7 @@
 // video modes and the mouse's pointer.
 //
 // Build (m/docs/COMPILER.md, "Цель: ROM"):
-//   python3 tools/m.py --rom firmware/main.m -o firmware.s
-//   python3 tools/asm.py firmware.s -o firmware.rom
+//   python3 tools/m.py --rom firmware/main.m -o firmware.rom
 //
 // Files:
 //   main.m           the order of the demos

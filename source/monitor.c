@@ -446,15 +446,17 @@ static void monitor_print_disk(monitor_t* monitor, const char* name,
 		return;
 	}
 	monitor_printf(monitor,
-				   "%-7s %u sectors%s%s, sector %u count %u address %08X "
-				   "error %u\n",
+				   "%-7s %u sectors%s%s, command %X sector %u count %u "
+				   "address %08X list %08X error %u\n",
 				   name,
 				   (unsigned)disk->sectors,
 				   disk->readonly ? " read-only" : "",
 				   disk->busy ? " busy" : "",
+				   (unsigned)disk->command,
 				   (unsigned)disk->sector,
 				   (unsigned)disk->count,
 				   (unsigned)disk->address,
+				   (unsigned)disk->list,
 				   (unsigned)disk->error);
 }
 
@@ -511,6 +513,21 @@ static void monitor_info(monitor_t* monitor) {
 				   (unsigned)mb->rtc->control,
 				   (unsigned long long)mb->rtc->alarm,
 				   mb->rtc->fired ? " fired" : "");
+	if (mb->share->root)
+		monitor_printf(monitor,
+					   "share   %s%s, %d handles open, error %u\n",
+					   mb->share->root,
+					   mb->share->readonly ? " read-only" : "",
+					   share_open_handles(mb->share),
+					   (unsigned)mb->share->error);
+	else
+		monitor_printf(monitor, "share   none\n");
+	if (mb->rng->seeded)
+		monitor_printf(monitor,
+					   "rng     seeded, block %llu\n",
+					   (unsigned long long)mb->rng->counter);
+	else
+		monitor_printf(monitor, "rng     from the host\n");
 }
 
 static void monitor_snapshot(monitor_t* monitor, char** cursor,

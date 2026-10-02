@@ -24,10 +24,10 @@ tests.
 The reported errors have to be exactly the expected ones, and so do the
 warnings if the test expects any (otherwise warnings are not checked).
 A test without @output and @exit is only checked (m.py --check). Any
-other test without @error is compiled with tools/m.py, assembled with
-tools/asm.py into a boot image, and booted from disk 0 by the firmware in
-the emulator (--headless), then its UART output (the emulator's stdout;
-its own messages go to stderr) and exit code are compared.
+other test without @error is compiled and linked by tools/m.py into a
+boot image and booted from disk 0 by the firmware in the emulator
+(--headless), then its UART output (the emulator's stdout; its own
+messages go to stderr) and exit code are compared.
 
 usage: m/tests/run.py [--emulator PATH] [tests...]
 """
@@ -46,13 +46,11 @@ import time
 M_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 ROOT = os.path.dirname(M_DIR)
 COMPILER = os.path.join(ROOT, "tools", "m.py")
-ASSEMBLER = os.path.join(ROOT, "tools", "asm.py")
 FIRMWARE = os.path.join(ROOT, "firmware", "main.m")    # in M: built with m.py --rom
 EMULATOR = os.path.join(ROOT, "bin", "wrm081632.exe" if os.name == "nt" else "wrm081632")
 
 TEST_DIRS = ("tests", "examples")
 INPUT_DELAY = 1.0   # seconds
-BOOT_LOAD = 0x00010000
 
 DIRECTIVE = {
 	".m": re.compile(r"^\s*//\s*@(\w+)\b\s*(.*?)\s*$"),
@@ -182,10 +180,10 @@ def check_diags(test, stderr):
 def run_test(test, emulator, firmware, timeout, workdir):
 	"""Returns (passed, message, details)."""
 	base = os.path.join(workdir, test_name(test.path).replace("/", "_"))
-	source, image = base + ".s", base + ".img"
+	image = base + ".img"
 	expect_error = any(kind == "error" for kind, _, _ in test.diags)
 	check_only = not test.run and not expect_error
-	command = [sys.executable, COMPILER, test.path] + (["--check"] if check_only else ["-o", source]) + \
+	command = [sys.executable, COMPILER, test.path] + (["--check"] if check_only else ["-o", image]) + \
 		(["--rom"] if test.rom else [])
 	compile_ = subprocess.run(command, capture_output=True, text=True)
 	compile_out = compile_.stdout + compile_.stderr
@@ -198,12 +196,6 @@ def run_test(test, emulator, firmware, timeout, workdir):
 		return False, "diagnostics differ", "\n".join(problems) + "\n" + compile_out
 	if expect_error or check_only:
 		return True, "", compile_out
-
-	base_args = [] if test.rom else ["--base", hex(BOOT_LOAD)]
-	asm = subprocess.run([sys.executable, ASSEMBLER, source] + base_args + ["-o", image],
-						 capture_output=True, text=True)
-	if asm.returncode != 0:
-		return False, "assembler failed", asm.stdout + asm.stderr
 
 	if test.rom:
 		command = [emulator, "--headless", "--rom", image] + test.args
@@ -255,7 +247,7 @@ def main(argv=None):
 	p.add_argument("-v", "--verbose", action="store_true",
 				   help="show the output of passing tests too")
 	p.add_argument("--keep", metavar="DIR",
-				   help="keep the generated assembly and images in DIR")
+				   help="keep the images in DIR")
 	args = p.parse_args(argv)
 
 	if not os.path.isfile(args.emulator):
@@ -281,13 +273,11 @@ def main(argv=None):
 		workdir = args.keep or tmp
 		os.makedirs(workdir, exist_ok=True)
 		firmware = os.path.join(workdir, "firmware.rom")
-		source = os.path.join(workdir, "firmware.s")
-		for command in ([COMPILER, "--rom", FIRMWARE, "-o", source],
-						[ASSEMBLER, source, "-o", firmware]):
-			build = subprocess.run([sys.executable] + command, capture_output=True, text=True)
-			if build.returncode != 0:
-				print(build.stdout + build.stderr, end="")
-				p.exit(1, "run.py: can't build the firmware\n")
+		build = subprocess.run([sys.executable, COMPILER, "--rom", FIRMWARE, "-o", firmware],
+							   capture_output=True, text=True)
+		if build.returncode != 0:
+			print(build.stdout + build.stderr, end="")
+			p.exit(1, "run.py: can't build the firmware\n")
 
 		with concurrent.futures.ThreadPoolExecutor(max(1, args.jobs)) as pool:
 			jobs = [pool.submit(run_test, t, args.emulator, firmware, args.timeout, workdir)

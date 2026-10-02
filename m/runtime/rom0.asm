@@ -2,27 +2,22 @@
 ;  crt0 of an M ROM image, such as the firmware (m/docs/COMPILER.md,
 ;  "Цель: ROM")
 ;
-;  tools/m.py --rom puts this file first in its output, then trap.asm and
-;  mem.asm; the image is assembled at ROM_BASE, where the CPU starts after
-;  reset. Code and constants stay in ROM. .data is copied from
-;  __data_load in ROM to __data_start in RAM, .bss after it is zeroed.
-;  The compiler defines __data_load, __data_start, __data_end,
-;  __bss_start, __bss_end (all word aligned) and main.
+;  tools/m.py --rom links this object first, at ROM_BASE (tools/ld.py
+;  --layout rom), where the CPU starts after reset. Code and constants
+;  stay in ROM. .data is copied from __data_load in ROM to __data_start
+;  in RAM, .bss after it is zeroed. The linker defines __data_load,
+;  __data_start, __data_end, __bss_start and __bss_end (all word
+;  aligned); the program defines main.
 ;
-;  RAM: .data and .bss from __RAM_DATA up (the compiler keeps them below
-;  BOOT_LOAD, where a boot image can't overwrite them), the stack from
-;  __STACK_TOP down. Both fit in the smallest RAM, 1MB.
+;  RAM: .data and .bss from 0x00002000 up (the linker's --data; m.py keeps
+;  them below BOOT_LOAD, where a boot image can't overwrite them), the
+;  stack from __STACK_TOP down. Both fit in the smallest RAM, 1MB.
 ; ============================================================================
 
-__ROM_BASE      = 0xFE000000
-__RAM_DATA      = 0x00002000        ; above the boot info block
 __STACK_TOP     = 0x00100000        ; the end of 1MB of RAM
 __POWER_OFF     = 0xFD004000        ; power controller, OFF register
 
-__data_start    = __RAM_DATA
-
-	.org __ROM_BASE
-__image_start:
+	.text
 __start:                            ; pc = ROM_BASE after reset, STATUS = EXL
 	li sp, __STACK_TOP
 	la r1, __data_start
