@@ -98,6 +98,10 @@ let diskError(drive: *UByte, error: UWord): Void {
 let bootDisk(d: Disk, drive: *UByte): Void {
     if d.status & DISK_PRESENT == 0 return
 
+    write("Loading from ")
+    write(drive)
+    write("...\n")
+
     // sector 0 starts with the header
     let mut error: UWord = diskIo(d, DISK_READ, 0, 1, BOOT_LOAD)
     if error != 0 {

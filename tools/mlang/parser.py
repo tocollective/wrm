@@ -185,8 +185,16 @@ class Parser:
 		self.expect("from")
 		if self.tok.kind != "str":
 			self.unexpected("a file name in quotes")
-		path = self.next().value.decode("ascii", "replace")
+		path = self.string_text()
 		return Import(loc, names, path)
+
+	def string_text(self):
+		"""Decode strings used as source text rather than runtime bytes."""
+		tok = self.next()
+		try:
+			return tok.value.decode("utf-8")
+		except UnicodeDecodeError:
+			raise ParseError(tok, "this string must contain valid UTF-8 text")
 
 	def name_as(self):
 		loc = self.tok.loc
@@ -574,7 +582,7 @@ class Parser:
 		self.expect("{")
 		lines = []
 		while self.tok.kind == "str":
-			lines.append(self.next().value.decode("ascii", "replace"))
+			lines.append(self.string_text())
 		if not lines:
 			self.unexpected("a line of assembly in quotes")
 		self.expect("}", "another line in quotes or '}'")
@@ -655,7 +663,7 @@ class Parser:
 		if k == "float":
 			return FloatLit(self.next().loc, tok.value)
 		if k == "char":
-			return CharLit(self.next().loc, tok.value)
+			return CharLit(self.next().loc, tok.value, tok.wide)
 		if k == "str":
 			return StringLit(self.next().loc, tok.value)
 		if tok.is_("true") or tok.is_("false"):

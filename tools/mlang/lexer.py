@@ -114,7 +114,7 @@ class Lexer:
 					if c.isascii():
 						self.error(loc, f"unexpected character '{c}'")
 					else:
-						self.error(loc, "characters outside ASCII are allowed only in comments")
+						self.error(loc, "characters outside ASCII are allowed only in comments and literals")
 		self.add("eof", None, self.loc(), self.i)
 		return self.tokens
 
@@ -202,11 +202,11 @@ class Lexer:
 			self.error(loc, f"bad number '{word}'" + ("; '_' goes only between digits" if "_" in word else ""))
 		self.add("int", value, loc, start)
 
-	def literal_bytes(self, quote, loc):
+	def literal_body(self, quote, loc):
 		"""Reads the body of a character or string literal up to the closing
-		quote; returns its bytes, or None if it isn't closed."""
+		quote; returns character codes or UTF-8 bytes, or None if unclosed."""
 		src, n = self.src, len(self.src)
-		out = bytearray()
+		out = [] if quote == "'" else bytearray()
 		what = "character" if quote == "'" else "string"
 		while True:
 			if self.i >= n or src[self.i] == "\n":
@@ -215,7 +215,7 @@ class Lexer:
 			c = src[self.i]
 			if c == quote:
 				self.i += 1
-				return bytes(out)
+				return out if quote == "'" else bytes(out)
 			if c == "\\":
 				eloc = self.loc()
 				e = src[self.i + 1:self.i + 2]
@@ -236,16 +236,17 @@ class Lexer:
 			else:
 				if c == "\t":
 					self.error(self.loc(), "a tab inside a literal; write '\\t'")
-				elif not c.isascii():
-					self.error(self.loc(), f"'{c}' is not ASCII; write its bytes as '\\xNN'")
-				elif not c.isprintable():
+				elif c.isascii() and not c.isprintable():
 					self.error(self.loc(), f"a control character inside a literal; write it as '\\x{ord(c):02X}'")
-				out.append(ord(c) if c.isascii() else 0x3F)
+				if quote == '"':
+					out.extend(c.encode("utf-8"))
+				else:
+					out.append(ord(c))
 				self.i += 1
 
 	def char(self, start, loc):
 		self.i += 1
-		body = self.literal_bytes("'", loc)
+		body = self.literal_body("'", loc)
 		value = 0
 		if body is not None:
 			if len(body) != 1:
@@ -253,8 +254,10 @@ class Lexer:
 			else:
 				value = body[0]
 		self.add("char", value, loc, start)
+		# Keep ASCII and escaped byte literals compatible with existing code.
+		self.tokens[-1].wide = any(not c.isascii() for c in self.src[start:self.i])
 
 	def string(self, start, loc):
 		self.i += 1
-		body = self.literal_bytes('"', loc)
+		body = self.literal_body('"', loc)
 		self.add("str", body or b"", loc, start)

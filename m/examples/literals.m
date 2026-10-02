@@ -4,9 +4,10 @@
 //   - an integer literal has no type until the context gives one
 //   - a constant expression of literals is computed exactly, and the result
 //     must fit in the type of the context
-//   - 'a' is a UByte
-//   - source files are UTF-8, but characters and strings may contain only
-//     ASCII; other bytes are written as '\xNN'
+//   - ASCII and escaped byte characters are UByte; non-ASCII characters
+//     written directly are UWord Unicode codes ('д' = 0x0434)
+//   - strings encode Unicode characters as UTF-8; character literals
+//     contain one Unicode code or an escaped byte
 //   - "..." is a zero-terminated array of bytes in .rodata, of type *UByte
 
 import { puts } from "externs.m"
@@ -47,6 +48,9 @@ let characters(): Void {
     let quote: UByte = '\''
     let backslash: UByte = '\\'
     let esc: UByte = '\x1B'
+    let cyrillic: UWord = 'д'       // 0x0434
+    let accented: UWord = 'é'       // 0x00E9, not a UTF-8 byte
+    let emoji: UWord = '😀'         // 0x1F600
 
     let upper: UByte = a - 'a' + 'A'  // 'A'
 }
@@ -55,12 +59,13 @@ let strings(): Void {
     puts("Hello, M!\n")
     puts("tab\tquote\" backslash\\\n")
 
-    // Bytes outside ASCII are written as \xNN. The video font is
-    // Windows-1252, so this shows "café" on the screen.
+    // Raw bytes can be written as \xNN. The video font is Windows-1252,
+    // so this shows "café" on the screen.
     puts("caf\xE9\n")
 
-    // Compile error: non-ASCII character in a string
-    //     puts("café\n")
+    // UTF-8 bytes, for output to a UTF-8 terminal through the UART.
+    puts("café\n")
+    puts("Привет 日本語 😀\n")
 }
 
 let main(argc: UWord, argv: *UByte[]): Word {
@@ -71,5 +76,6 @@ let main(argc: UWord, argv: *UByte[]): Word {
 }
 
 // Test directives (m/tests/run.py)
-// @output "Hello, M!\ntab\tquote\" backslash\\\ncaf\xE9\n"
+// @output "Hello, M!\ntab\tquote\" backslash\\\ncaf\xE9\ncaf\xC3\xA9\n"
+// @output "\xD0\x9F\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82 \xE6\x97\xA5\xE6\x9C\xAC\xE8\xAA\x9E \xF0\x9F\x98\x80\n"
 // @exit 0

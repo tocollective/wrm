@@ -7,7 +7,9 @@ before the screen is ready without using the UART. The firmware installs
 a screen-only fatal trap handler when `main` starts.
 
 The firmware sets up a 640x480, 8 bpp screen console, prints the reset
-cause and RAM size, then tries the floppy followed by disk 0. A valid
+cause and RAM size, then tries the floppy followed by disk 0. Before reading
+each present drive, it prints `Loading from floppy...` or
+`Loading from disk 0...`, so the source is visible while loading. A valid
 `WRMB` image is loaded at `0x00010000` and entered with the boot info block
 and CPU state specified in [the boot protocol](../docs/SPECIFICATION.md#boot-protocol).
 Invalid images and disk errors are shown on the screen. The firmware does

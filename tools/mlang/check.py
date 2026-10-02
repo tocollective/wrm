@@ -1031,7 +1031,7 @@ class Checker:
 
 	def ex_CharLit(self, e, want):
 		e.const = e.value
-		return UBYTE
+		return UWORD if e.wide else UBYTE
 
 	def ex_FloatLit(self, e, want):
 		e.const = f32(e.value)

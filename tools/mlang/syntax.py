@@ -53,7 +53,7 @@ ExprStmt = node("ExprStmt", "expr")
 # expressions
 IntLit = node("IntLit", "value")
 FloatLit = node("FloatLit", "value")
-CharLit = node("CharLit", "value")
+CharLit = node("CharLit", "value wide")
 StringLit = node("StringLit", "value")
 BoolLit = node("BoolLit", "value")
 NullLit = node("NullLit")
