@@ -89,29 +89,52 @@ static void display_update(display_t* display, const videocard_t* videocard) {
 		error(SDL_GetError());
 }
 
+// Where a width x height frame is shown in the window: scaled to fit, with
+// the aspect ratio kept, in the middle.
+static SDL_FRect display_frame_rect(const display_t* display,
+									const float width, const float height) {
+	int window_width, window_height;
+	SDL_GetWindowSize(display->window, &window_width, &window_height);
+	const float ratio =
+		fminf((float)window_width / width, (float)window_height / height);
+	const SDL_FRect rect = {
+		(window_width - width * ratio) / 2,
+		(window_height - height * ratio) / 2,
+		width * ratio,
+		height * ratio,
+	};
+	return rect;
+}
+
+static uint32_t display_clamp(const float value, const uint32_t size) {
+	if (!(value >= 0)) return 0; // NaN too
+	if (value >= (float)size) return size - 1;
+	return (uint32_t)value;
+}
+
+void display_frame_point(const display_t* display, const float x,
+						 const float y, const uint32_t width,
+						 const uint32_t height, uint32_t* frame_x,
+						 uint32_t* frame_y) {
+	const SDL_FRect rect =
+		display_frame_rect(display, (float)width, (float)height);
+	*frame_x = display_clamp((x - rect.x) * (float)width / rect.w, width);
+	*frame_y = display_clamp((y - rect.y) * (float)height / rect.h, height);
+}
+
 void display_render(display_t* display, const videocard_t* videocard) {
 	if (!display) return;
 	display_update(display, videocard);
 	SDL_Renderer* renderer = display->renderer;
-	SDL_Window* window = display->window;
 	SDL_Texture* texture = display->texture;
 
 	SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
 	SDL_RenderClear(renderer);
 	if (texture) {
-		int window_width, window_height;
-		SDL_GetWindowSize(window, &window_width, &window_height);
 		float texture_width, texture_height;
 		SDL_GetTextureSize(texture, &texture_width, &texture_height);
-
-		const float ratio = fminf((float)window_width / texture_width,
-								  (float)window_height / texture_height);
-		SDL_FRect rect = {
-			(window_width - texture_width * ratio) / 2,
-			(window_height - texture_height * ratio) / 2,
-			texture_width * ratio,
-			texture_height * ratio,
-		};
+		const SDL_FRect rect =
+			display_frame_rect(display, texture_width, texture_height);
 		SDL_RenderTexture(renderer, texture, NULL, &rect);
 	}
 	SDL_RenderPresent(renderer);

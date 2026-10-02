@@ -23,7 +23,7 @@
 //   debugger, the speed, the host's input not taken yet.
 // Snapshots are made by one build of the emulator for the same build: the
 // format has a version, and an older one isn't read.
-#define SNAPSHOT_VERSION 2
+#define SNAPSHOT_VERSION 3
 
 // Saves the machine to path; false (with a warning) if it can't.
 bool snapshot_save(const machine_t* machine, const char* path);

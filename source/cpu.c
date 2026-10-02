@@ -1,9 +1,9 @@
 #include "cpu.h"
 
-#include <math.h>
 #include <string.h>
 
 #include "disasm.h"
+#include "softfloat.h"
 
 // Instruction layout (little-endian, 32-bit):
 // [7:0] opcode, [12:8] rd, [17:13] rs1, [22:18] rs2
@@ -39,8 +39,10 @@
 // - The mode (STATUS.UM), the translation and the triggers only change in
 //   WB, and every change squashes the younger instructions: a trap, IRET
 //   (which jumps to EPC when it retires), MTCR STATUS, MTCR PTBR, MTCR to a
-//   trigger register and TLBI. So each stage can check privileges and
-//   triggers against the current state.
+//   trigger register or FCSR, and TLBI. So each stage can check privileges,
+//   triggers and the rounding mode against the current state.
+// - FP instructions work out their exception flags in EX and set them in
+//   FCSR when they retire, so a squashed one sets none.
 
 static uint32_t sign_extend(const uint32_t value, const int bits) {
 	const uint32_t sign = 1u << (bits - 1);
@@ -54,43 +56,55 @@ static uint32_t shift_right_arithmetic(const uint32_t value,
 	return value >> s;
 }
 
-// Floating point: IEEE 754 binary32 in the GPRs, computed with the host's
-// float, which rounds to nearest even. Every NaN result is the canonical
-// one, so the outcome doesn't depend on how the host propagates payloads.
-#define CPU_FP_NAN 0x7FC00000u
-#define CPU_FP_SIGN 0x80000000u
-
-static float fp_value(const uint32_t bits) {
-	float f;
-	memcpy(&f, &bits, sizeof(f));
-	return f;
+// Bit manipulation
+static uint32_t count_leading_zeros(uint32_t value) {
+	if (!value) return 32;
+	uint32_t count = 0;
+	while (!(value & 0x80000000u)) {
+		value <<= 1;
+		count++;
+	}
+	return count;
 }
 
-static uint32_t fp_result(const float f) {
-	if (isnan(f)) return CPU_FP_NAN;
-	uint32_t bits;
-	memcpy(&bits, &f, sizeof(bits));
-	return bits;
+static uint32_t count_trailing_zeros(uint32_t value) {
+	if (!value) return 32;
+	uint32_t count = 0;
+	while (!(value & 1)) {
+		value >>= 1;
+		count++;
+	}
+	return count;
 }
 
-static bool fp_is_nan(const uint32_t bits) {
-	return (bits & 0x7FFFFFFFu) > 0x7F800000u;
+static uint32_t count_ones(uint32_t value) {
+	value = value - ((value >> 1) & 0x55555555u);
+	value = (value & 0x33333333u) + ((value >> 2) & 0x33333333u);
+	value = (value + (value >> 4)) & 0x0F0F0F0Fu;
+	return (value * 0x01010101u) >> 24;
 }
 
-// FMIN/FMAX: a NaN operand is ignored, and -0 is less than +0
-static uint32_t fp_min_max(const uint32_t a, const uint32_t b,
-						   const bool max) {
-	if (fp_is_nan(a)) return fp_is_nan(b) ? CPU_FP_NAN : b;
-	if (fp_is_nan(b)) return a;
-	const float fa = fp_value(a), fb = fp_value(b);
-	if (fa == fb) return max ? a & b : a | b; // only zeros differ in bits
-	return (max ? fa > fb : fa < fb) ? a : b;
+static uint32_t rotate_left(const uint32_t value, const uint32_t shift) {
+	const uint32_t s = shift & 31;
+	return s ? (value << s) | (value >> (32 - s)) : value;
 }
+
+static uint32_t rotate_right(const uint32_t value, const uint32_t shift) {
+	return rotate_left(value, 32 - (shift & 31));
+}
+
+static uint32_t byte_swap(const uint32_t value) {
+	return (value >> 24) | ((value >> 8) & 0xFF00u) | ((value << 8) & 0xFF0000u)
+		 | (value << 24);
+}
+
+// Floating point: IEEE 754 binary32 in the GPRs, computed by softfloat.c
+// with the rounding mode of FCSR. Every NaN result is the canonical one.
 
 // FCLASS: one bit set, from 0 = -inf up to 7 = +inf, 8 = signaling NaN,
 // 9 = quiet NaN
 static uint32_t fp_class(const uint32_t bits) {
-	const bool negative = bits & CPU_FP_SIGN;
+	const bool negative = bits & SF_SIGN;
 	const uint32_t exponent = BITS(bits, 23, 8);
 	const uint32_t fraction = BITS(bits, 0, 23);
 	if (exponent == 0xFF) {
@@ -102,66 +116,51 @@ static uint32_t fp_class(const uint32_t bits) {
 	return negative ? 1u << 3 : 1u << 4;
 }
 
-// FTOI: rounds toward zero, saturates; NaN gives INT32_MAX
-static uint32_t fp_to_int(const uint32_t bits) {
-	const float f = fp_value(bits);
-	if (isnan(f) || f >= 2147483648.0f) return INT32_MAX;
-	if (f < -2147483648.0f) return (uint32_t)INT32_MIN;
-	return (uint32_t)(int32_t)f;
-}
-
-// FTOU: rounds toward zero, saturates; NaN gives UINT32_MAX
-static uint32_t fp_to_unsigned(const uint32_t bits) {
-	const float f = fp_value(bits);
-	if (isnan(f) || f >= 4294967296.0f) return UINT32_MAX;
-	if (f <= -1.0f) return 0;
-	return (uint32_t)f;
-}
-
+// rounding: FCSR.FRM; flags gets the exceptions raised
 static uint32_t cpu_execute_fp(const uint8_t opcode, const uint32_t a,
-							   const uint32_t b, const uint32_t d) {
-	const float fa = fp_value(a), fb = fp_value(b), fd = fp_value(d);
+							   const uint32_t b, const uint32_t d,
+							   const uint8_t rounding, uint8_t* flags) {
 	switch (opcode) {
 		case CPU_OP_FADD:
-			return fp_result(fa + fb);
+			return sf_add(a, b, rounding, flags);
 		case CPU_OP_FSUB:
-			return fp_result(fa - fb);
+			return sf_sub(a, b, rounding, flags);
 		case CPU_OP_FMUL:
-			return fp_result(fa * fb);
+			return sf_mul(a, b, rounding, flags);
 		case CPU_OP_FDIV:
-			return fp_result(fa / fb);
+			return sf_div(a, b, rounding, flags);
 		case CPU_OP_FSQRT:
-			return fp_result(sqrtf(fa));
+			return sf_sqrt(a, rounding, flags);
 		case CPU_OP_FMIN:
-			return fp_min_max(a, b, false);
+			return sf_min(a, b, flags);
 		case CPU_OP_FMAX:
-			return fp_min_max(a, b, true);
+			return sf_max(a, b, flags);
 		case CPU_OP_FMADD: // rounded once
-			return fp_result(fmaf(fa, fb, fd));
+			return sf_fma(a, b, d, rounding, flags);
 		case CPU_OP_FMSUB:
-			return fp_result(fmaf(-fa, fb, fd));
+			return sf_fma(a ^ SF_SIGN, b, d, rounding, flags);
 		case CPU_OP_FSGNJ:
-			return (a & ~CPU_FP_SIGN) | (b & CPU_FP_SIGN);
+			return (a & ~SF_SIGN) | (b & SF_SIGN);
 		case CPU_OP_FSGNJN:
-			return (a & ~CPU_FP_SIGN) | (~b & CPU_FP_SIGN);
+			return (a & ~SF_SIGN) | (~b & SF_SIGN);
 		case CPU_OP_FSGNJX:
-			return a ^ (b & CPU_FP_SIGN);
+			return a ^ (b & SF_SIGN);
 		case CPU_OP_FEQ: // false when either is NaN
-			return fa == fb;
+			return sf_eq(a, b, flags);
 		case CPU_OP_FLT:
-			return fa < fb;
+			return sf_lt(a, b, flags);
 		case CPU_OP_FLE:
-			return fa <= fb;
+			return sf_le(a, b, flags);
 		case CPU_OP_FCLASS:
 			return fp_class(a);
 		case CPU_OP_FTOI:
-			return fp_to_int(a);
+			return sf_to_int(a, flags);
 		case CPU_OP_FTOU:
-			return fp_to_unsigned(a);
+			return sf_to_uint(a, flags);
 		case CPU_OP_ITOF:
-			return fp_result((float)(int32_t)a);
+			return sf_from_int((int32_t)a, rounding, flags);
 		case CPU_OP_UTOF:
-			return fp_result((float)a);
+			return sf_from_uint(a, rounding, flags);
 	}
 	return 0;
 }
@@ -262,6 +261,18 @@ static cpu_format_t cpu_opcode_format(const uint8_t opcode) {
 		case CPU_OP_FTOU:
 		case CPU_OP_ITOF:
 		case CPU_OP_UTOF:
+		case CPU_OP_CLZ:
+		case CPU_OP_CTZ:
+		case CPU_OP_POPCNT:
+		case CPU_OP_BSWAP:
+		case CPU_OP_SEXTB:
+		case CPU_OP_SEXTH:
+		case CPU_OP_ROL:
+		case CPU_OP_ROR:
+		case CPU_OP_MIN:
+		case CPU_OP_MAX:
+		case CPU_OP_MINU:
+		case CPU_OP_MAXU:
 			return CPU_FORMAT_R;
 
 		case CPU_OP_ADDI:
@@ -273,6 +284,7 @@ static cpu_format_t cpu_opcode_format(const uint8_t opcode) {
 		case CPU_OP_SARI:
 		case CPU_OP_SLTI:
 		case CPU_OP_SLTIU:
+		case CPU_OP_RORI:
 		case CPU_OP_MFCR:
 		case CPU_OP_MTCR:
 		case CPU_OP_TLBI:
@@ -333,6 +345,7 @@ cpu_instruction_t cpu_decode(const uint32_t raw) {
 				case CPU_OP_SHLI:
 				case CPU_OP_SHRI:
 				case CPU_OP_SARI:
+				case CPU_OP_RORI:
 					in.imm = imm14;
 					break;
 				default:
@@ -424,9 +437,9 @@ static bool cpu_cr_is_counter(const uint32_t cr) {
 	return cr >= CPU_CR_CYCLE && cr <= CPU_CR_INSTRETH;
 }
 
-// the counters and CPUID
+// the counters, CPUID and HARTID
 static bool cpu_cr_is_read_only(const uint32_t cr) {
-	return cpu_cr_is_counter(cr) || cr == CPU_CR_CPUID;
+	return cpu_cr_is_counter(cr) || cr == CPU_CR_CPUID || cr == CPU_CR_HARTID;
 }
 
 bool cpu_rs2_is_reserved(const uint8_t opcode) {
@@ -438,6 +451,12 @@ bool cpu_rs2_is_reserved(const uint8_t opcode) {
 		case CPU_OP_FTOU:
 		case CPU_OP_ITOF:
 		case CPU_OP_UTOF:
+		case CPU_OP_CLZ:
+		case CPU_OP_CTZ:
+		case CPU_OP_POPCNT:
+		case CPU_OP_BSWAP:
+		case CPU_OP_SEXTB:
+		case CPU_OP_SEXTH:
 			return true;
 	}
 	return false;
@@ -480,11 +499,12 @@ static bool cpu_opcode_is_privileged(const cpu_instruction_t* in) {
 		case CPU_OP_HLT:
 		case CPU_OP_WFI:
 		case CPU_OP_IRET:
-		case CPU_OP_MTCR:
 		case CPU_OP_TLBI:
 			return true;
-		case CPU_OP_MFCR:
-			return !cpu_cr_is_counter(in->imm); // counters are for everyone
+		case CPU_OP_MTCR: // FCSR is for everyone
+			return in->imm != CPU_CR_FCSR;
+		case CPU_OP_MFCR: // so are the counters
+			return !cpu_cr_is_counter(in->imm) && in->imm != CPU_CR_FCSR;
 	}
 	return false;
 }
@@ -726,6 +746,8 @@ static uint32_t cpu_read_cr(const cpu_t* cpu, const uint32_t cr) {
 			return (uint32_t)(cpu->retired >> 32);
 		case CPU_CR_CPUID:
 			return CPU_CPUID;
+		case CPU_CR_HARTID:
+			return 0; // the only core
 	}
 	return cpu->cr[cr];
 }
@@ -739,6 +761,14 @@ static void cpu_write_cr(cpu_t* cpu, const uint32_t cr, const uint32_t value) {
 			cpu->reservation_valid = false;
 			mmu_set_ptbr(cpu->mmu, value);
 			break;
+		case CPU_CR_FCSR: {
+			// a reserved rounding mode isn't taken
+			uint32_t frm = cpu->cr[cr] & CPU_FCSR_FRM_MASK;
+			if (((value & CPU_FCSR_FRM_MASK) >> CPU_FCSR_FRM_SHIFT)
+				< SF_ROUND_COUNT)
+				frm = value & CPU_FCSR_FRM_MASK;
+			cpu->cr[cr] = frm | (value & CPU_FCSR_FLAGS_MASK);
+		} break;
 		case CPU_CR_TCTRL0:
 		case CPU_CR_TCTRL1:
 			cpu->cr[cr] = value & CPU_TCTRL_MASK;
@@ -1076,6 +1106,46 @@ static bool cpu_stage_ex(cpu_t* cpu, cpu_latch_t* out, uint32_t* target) {
 			r = a < imm;
 			break;
 
+		case CPU_OP_CLZ:
+			r = count_leading_zeros(a);
+			break;
+		case CPU_OP_CTZ:
+			r = count_trailing_zeros(a);
+			break;
+		case CPU_OP_POPCNT:
+			r = count_ones(a);
+			break;
+		case CPU_OP_BSWAP:
+			r = byte_swap(a);
+			break;
+		case CPU_OP_SEXTB:
+			r = sign_extend(a & 0xFF, 8);
+			break;
+		case CPU_OP_SEXTH:
+			r = sign_extend(a & 0xFFFF, 16);
+			break;
+		case CPU_OP_ROL:
+			r = rotate_left(a, b);
+			break;
+		case CPU_OP_ROR:
+			r = rotate_right(a, b);
+			break;
+		case CPU_OP_RORI:
+			r = rotate_right(a, imm);
+			break;
+		case CPU_OP_MIN:
+			r = (int32_t)a < (int32_t)b ? a : b;
+			break;
+		case CPU_OP_MAX:
+			r = (int32_t)a > (int32_t)b ? a : b;
+			break;
+		case CPU_OP_MINU:
+			r = a < b ? a : b;
+			break;
+		case CPU_OP_MAXU:
+			r = a > b ? a : b;
+			break;
+
 		case CPU_OP_LUI:
 			r = imm;
 			break;
@@ -1136,8 +1206,13 @@ static bool cpu_stage_ex(cpu_t* cpu, cpu_latch_t* out, uint32_t* target) {
 			break;
 
 		default:
-			if (in->opcode >= CPU_OP_FADD && in->opcode <= CPU_OP_UTOF)
-				r = cpu_execute_fp(in->opcode, a, b, d);
+			if (in->opcode >= CPU_OP_FADD && in->opcode <= CPU_OP_UTOF) {
+				const uint8_t rounding =
+					(cpu->cr[CPU_CR_FCSR] & CPU_FCSR_FRM_MASK)
+					>> CPU_FCSR_FRM_SHIFT;
+				r = cpu_execute_fp(
+						in->opcode, a, b, d, rounding, &out->fflags);
+			}
 			break;
 	}
 
@@ -1269,6 +1344,8 @@ static bool cpu_stage_wb(cpu_t* cpu) {
 
 	if (cpu_writes_rd(&wb->in) && wb->in.rd != CPU_GPR_ZERO)
 		cpu->gpr[wb->in.rd] = wb->result;
+	// FP exceptions only count once the instruction has retired
+	cpu->cr[CPU_CR_FCSR] |= wb->fflags;
 	cpu->retired++;
 
 	// a flush clears the latch wb points at
@@ -1298,9 +1375,11 @@ static bool cpu_retire(cpu_t* cpu, const cpu_latch_t* wb) {
 		case CPU_OP_MTCR:
 			cpu_write_cr(cpu, wb->in.imm, wb->result);
 			// the next instructions are fetched again under the new mode,
-			// translation or triggers
+			// translation, triggers or rounding mode
 			if (wb->in.imm == CPU_CR_STATUS || wb->in.imm == CPU_CR_PTBR
-				|| wb->in.imm >= CPU_CR_TADDR0) {
+				|| (wb->in.imm >= CPU_CR_TADDR0
+					&& wb->in.imm <= CPU_CR_TCTRL1)
+				|| wb->in.imm == CPU_CR_FCSR) {
 				cpu_refetch(cpu, wb->pc + 4);
 				return true;
 			}
@@ -1485,6 +1564,20 @@ void cpu_dump(const cpu_t* cpu, FILE* out) {
 			fputs(value & MMU_PTBR_ENABLE ? "  paging on" : "  paging off",
 				  out);
 		}
+		fputc('\n', out);
+	}
+	{
+		static const char* const fp_flags[] = { "NX", "UF", "OF", "DZ", "NV" };
+		static const char* const rounding[] = { "RNE", "RTZ", "RDN", "RUP",
+												"RMM", "?",   "?",   "?" };
+		const uint32_t fcsr = cpu->cr[CPU_CR_FCSR];
+		fprintf(out,
+				"  %-8s %08X  %s",
+				disasm_cr_name(CPU_CR_FCSR),
+				(unsigned)fcsr,
+				rounding[(fcsr & CPU_FCSR_FRM_MASK) >> CPU_FCSR_FRM_SHIFT]);
+		for (int bit = 0; bit < 5; bit++)
+			if (fcsr & (1u << bit)) fprintf(out, " %s", fp_flags[bit]);
 		fputc('\n', out);
 	}
 	for (int i = 0; i < CPU_TRIGGER_COUNT; i++) {

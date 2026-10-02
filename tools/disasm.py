@@ -28,12 +28,15 @@ R.update({0x70 + i: name for i, name in enumerate((
 	"fadd", "fsub", "fmul", "fdiv", None, "fmin", "fmax", "fmadd", "fmsub",
 	"fsgnj", "fsgnjn", "fsgnjx")) if name})
 R.update({0x80: "feq", 0x81: "flt", 0x82: "fle"})
+R.update({0x96: "rol", 0x97: "ror", 0x99: "min", 0x9A: "max", 0x9B: "minu",
+		  0x9C: "maxu"})
 R1 = {0x74: "fsqrt", 0x83: "fclass", 0x84: "ftoi", 0x85: "ftou", 0x86: "itof",
-	  0x87: "utof"}  # rs2 is reserved
+	  0x87: "utof", 0x90: "clz", 0x91: "ctz", 0x92: "popcnt", 0x93: "bswap",
+	  0x94: "sext.b", 0x95: "sext.h"}  # rs2 is reserved
 ATOMIC = {0x4B: "ll", 0x4C: "sc"}
 I_SIGNED = {0x20: "addi", 0x28: "slti", 0x29: "sltiu"}
 I_UNSIGNED = {0x22: "andi", 0x23: "ori", 0x24: "xori"}
-I_SHIFT = {0x25: "shli", 0x26: "shri", 0x27: "sari"}
+I_SHIFT = {0x25: "shli", 0x26: "shri", 0x27: "sari", 0x98: "rori"}
 UPPER = {0x30: "lui", 0x31: "auipc"}
 MEMORY = {0x40: "lb", 0x41: "lbu", 0x42: "lh", 0x43: "lhu", 0x44: "lw",
 		  0x48: "sb", 0x49: "sh", 0x4A: "sw"}

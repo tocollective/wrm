@@ -6,6 +6,7 @@
 #include "config.h"
 #include "console.h"
 #include "snapshot.h"
+#include "web.h"
 
 // How often the title shows the speed the machine really runs at.
 #define APPLICATION_SPEED_PERIOD_NS 1000000000ULL // 1s
@@ -55,11 +56,17 @@ application_t* application_create(int argc, char* argv[]) {
 		warning("--pause without a monitor: the machine runs");
 	app->running = true;
 	console_open();
+#ifdef __EMSCRIPTEN__
+	web_attach(app);
+#endif
 	return app;
 }
 
 void application_destroy(application_t* app) {
 	if (!app) return;
+#ifdef __EMSCRIPTEN__
+	web_attach(NULL);
+#endif
 	console_close();
 	app->running = false;
 	// --debug: also when quitting while the machine still runs
@@ -93,9 +100,18 @@ static void application_report_stop(application_t* app) {
 
 // Stops the app when the guest powers the machine off, with its exit code.
 // In headless mode a halted CPU stops it too: 0 after HLT, 1 after a fault
-// that couldn't be handled. The window stays open after a halt.
+// that couldn't be handled. The window stays open after a halt. In the
+// browser the page stays too: the machine is off until its reset button.
 static void application_check_stopped(application_t* app) {
 	machine_t* machine = app->machine;
+#ifdef __EMSCRIPTEN__
+	if (machine_powered_off(machine)) {
+		if (!app->off_reported)
+			print("The machine is off; Reset machine starts it again");
+		app->off_reported = true;
+		return;
+	}
+#endif
 	if (machine_powered_off(machine)) {
 		app->exit_code = machine->motherboard->power->exit_code;
 		app->running = false;
@@ -172,8 +188,10 @@ static void application_run_machine(application_t* app) {
 
 bool application_update(application_t* app) {
 	monitor_poll(app->monitor);
-	// the guest has disabled the mouse: the pointer goes back to the host
-	if (!app->machine->motherboard->mouse->enabled)
+	// the guest has disabled the mouse, or made it absolute: the pointer
+	// goes back to the host
+	const mouse_t* mouse = app->machine->motherboard->mouse;
+	if (!mouse->enabled || mouse->absolute)
 		application_capture_mouse(app, false);
 	const bool held = machine_held(app->machine);
 	// going on after a stop: the clock doesn't make up for the pause
@@ -219,10 +237,49 @@ static void application_mouse_motion(application_t* app, const float dx,
 	mouse_move(app->machine->motherboard->mouse, (int32_t)x, (int32_t)y);
 }
 
+// An absolute mouse follows the host's pointer over the window, in the
+// pixels of the video mode, without capturing it.
+static void application_mouse_point(application_t* app, const float x,
+									const float y) {
+	motherboard_t* mb = app->machine->motherboard;
+	uint32_t width, height, frame_x, frame_y;
+	videocard_mode_size(mb->videocard, &width, &height);
+	display_frame_point(
+			app->display, x, y, width, height, &frame_x, &frame_y);
+	mouse_point(mb->mouse, frame_x, frame_y);
+}
+
+static void application_absolute_mouse_event(application_t* app,
+											 SDL_Event* event) {
+	mouse_t* mouse = app->machine->motherboard->mouse;
+	switch (event->type) {
+		case SDL_EVENT_MOUSE_BUTTON_DOWN:
+		case SDL_EVENT_MOUSE_BUTTON_UP:
+			application_mouse_point(app, event->button.x, event->button.y);
+			mouse_button(mouse,
+						 application_mouse_button(event->button.button),
+						 event->type == SDL_EVENT_MOUSE_BUTTON_DOWN);
+			break;
+		case SDL_EVENT_MOUSE_MOTION:
+			application_mouse_point(app, event->motion.x, event->motion.y);
+			break;
+		case SDL_EVENT_MOUSE_WHEEL:
+			application_mouse_point(
+					app, event->wheel.mouse_x, event->wheel.mouse_y);
+			mouse_wheel(mouse, event->wheel.integer_y);
+			break;
+	}
+}
+
 // Mouse events go to the machine only while it has the pointer; a click
-// gives it the pointer once software has enabled the mouse.
+// gives it the pointer once software has enabled the mouse. An absolute
+// mouse has them all, with no capture.
 static void application_mouse_event(application_t* app, SDL_Event* event) {
 	mouse_t* mouse = app->machine->motherboard->mouse;
+	if (app->display && mouse->enabled && mouse->absolute) {
+		application_absolute_mouse_event(app, event);
+		return;
+	}
 	const bool captured = app->display && app->display->mouse_captured;
 	switch (event->type) {
 		case SDL_EVENT_MOUSE_BUTTON_DOWN:
@@ -269,10 +326,11 @@ static bool application_quit(application_t* app) {
 }
 
 // Ctrl+Alt+R: resets the machine, also after it has halted.
-static void application_reset(application_t* app) {
+void application_reset(application_t* app) {
 	machine_reset(app->machine);
 	app->stop_reported = false;
 	app->off_requested = false;
+	app->off_reported = false;
 	print("Reset");
 }
 
@@ -289,6 +347,9 @@ bool application_process_events(application_t* app, SDL_Event* event) {
 		} break;
 		case SDL_EVENT_WINDOW_FOCUS_LOST: {
 			application_capture_mouse(app, false);
+			// an absolute mouse has no capture to end: the buttons go up
+			if (app->machine->motherboard->mouse->absolute)
+				mouse_release_buttons(app->machine->motherboard->mouse);
 		} break;
 		case SDL_EVENT_MOUSE_BUTTON_DOWN:
 		case SDL_EVENT_MOUSE_BUTTON_UP:
@@ -322,6 +383,7 @@ bool application_process_events(application_t* app, SDL_Event* event) {
 										 APPLICATION_SNAPSHOT_PATH)) {
 						app->stop_reported = false;
 						app->off_requested = false;
+						app->off_reported = false;
 						print("Loaded %s", APPLICATION_SNAPSHOT_PATH);
 					}
 					break;

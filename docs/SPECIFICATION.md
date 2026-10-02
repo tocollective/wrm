@@ -5,6 +5,7 @@
 | Range                     | Device                                  |
 |---------------------------|-----------------------------------------|
 | `0x00000000`–…            | RAM, installed slots mapped back to back |
+| `0xFC000000`–`0xFC3FFFFF` | VRAM window, see [Video card](#vram-window) |
 | `0xFD000000`–`0xFD000FFF` | PIC                                     |
 | `0xFD001000`–`0xFD001FFF` | Keyboard                                |
 | `0xFD002000`–`0xFD002FFF` | UART                                    |
@@ -16,18 +17,20 @@
 | `0xFD008000`–`0xFD008FFF` | Floppy drive                            |
 | `0xFD009000`–`0xFD009FFF` | Beeper                                  |
 | `0xFD00A000`–`0xFD00AFFF` | Mouse                                   |
-| `0xFD00B000`–`0xFD00BFFF` | Network card                            |
+| `0xFD00B000`–`0xFD00BFFF` | Ethernet card                           |
 | `0xFD00C000`–`0xFD00CFFF` | Audio card                              |
 | `0xFD00D000`–`0xFD00DFFF` | Real-time clock                         |
 | `0xFD00E000`–`0xFD00EFFF` | Random number generator                 |
 | `0xFD00F000`–`0xFD00FFFF` | Shared folder                           |
+| `0xFD010000`–`0xFD010FFF` | Watchdog                                |
 | `0xFE000000`–`0xFFFFFFFF` | ROM (32MB, read-only)                   |
 
-Addresses between the end of RAM and `0xFD000000` are unmapped, as are
-unused pages of the I/O region (`0xFD000000`–`0xFDFFFFFF`).
-Instructions can't be fetched from the I/O region: a fetch there is a
-bus error that never reaches the device, and so is a page table entry
-read from it (see [INSTRUCTIONS.md](INSTRUCTIONS.md#exceptions)).
+Addresses between the end of RAM and `0xFD000000`, but the VRAM window,
+are unmapped, as are unused pages of the I/O region
+(`0xFD000000`–`0xFDFFFFFF`). Instructions can't be fetched from the I/O
+region or the VRAM window: a fetch there is a bus error that never
+reaches the device, and so is a page table entry read from there (see
+[INSTRUCTIONS.md](INSTRUCTIONS.md#exceptions)).
 RAM slots are laid out in slot order; empty slots take no address space.
 
 These are physical addresses. While the MMU is on, software sees virtual
@@ -54,14 +57,14 @@ lists the devices it finds for the image it boots (see
 
 | `TYPE` | Device          | `TYPE` | Device          |
 |--------|-----------------|--------|-----------------|
-| `1`    | PIC             | `8`    | Floppy drive    |
-| `2`    | Keyboard        | `9`    | Beeper          |
-| `3`    | UART            | `10`   | Mouse           |
-| `4`    | Timer           | `11`   | Network card    |
-| `5`    | Power controller| `12`   | Audio card      |
-| `6`    | Hard disk       | `13`   | Real-time clock |
-| `7`    | Video card      | `14`   | Random number generator |
-|        |                 | `15`   | Shared folder   |
+| `1`    | PIC             | `9`    | Beeper          |
+| `2`    | Keyboard        | `10`   | Mouse           |
+| `3`    | UART            | `11`   | Ethernet card   |
+| `4`    | Timer           | `12`   | Audio card      |
+| `5`    | Power controller| `13`   | Real-time clock |
+| `6`    | Hard disk       | `14`   | Random number generator |
+| `7`    | Video card      | `15`   | Shared folder   |
+| `8`    | Floppy drive    | `16`   | Watchdog        |
 
 For example, disk 1's `ID` reads `0x00060104`.
 
@@ -92,10 +95,11 @@ with `ENABLE` left at 0.
 | 5   | Video    | `STATUS.DONE` or `STATUS.VBLANK` is set and enabled in `CONTROL` |
 | 6   | Floppy   | `STATUS.DONE` or `STATUS.CHANGED` is set |
 | 7   | Mouse    | event FIFO is not empty |
-| 8   | Network  | `PENDING` is not zero   |
+| 8   | Ethernet | a bit of `PENDING` is set and enabled in `CONTROL` |
 | 9   | Audio    | `STATUS` is not zero    |
 | 10  | RTC      | `STATUS.ALARM` is set   |
 | 11  | Power    | `STATUS` is not zero    |
+| 12  | Watchdog | `STATUS.BARK` is set    |
 
 ### Keyboard
 
@@ -189,6 +193,7 @@ whatever software does with the first.
 | `1`           | a write to `RESET`        |
 | `2`           | the host's reset key (Ctrl+Alt+R) |
 | `3`           | reserved: a double fault  |
+| `4`           | the [watchdog](#watchdog) |
 
 ### Disks
 
@@ -363,12 +368,13 @@ drop the cache when it sees `CHANGED`. The hard disks never set it.
 
 ### Video card
 
-A graphics card with 4MB of its own video memory (VRAM) and a 2D drawing
-engine. VRAM is not in the address space: the CPU draws with engine
-commands and moves data between memory and VRAM by DMA. Once per frame
-the card shows the visible frame, a part of VRAM, in the emulator's
-window. There is no text mode; text is drawn from a font in VRAM with
-`EXPAND` (see [Text](#text)).
+A graphics card with 4MB of its own video memory (VRAM), a 2D drawing
+engine and a hardware cursor. The CPU draws with engine commands, moves
+data between memory and VRAM by DMA, or reads and writes VRAM directly
+through the [VRAM window](#vram-window). Once per frame the card shows
+the visible frame, a part of VRAM, in the emulator's window. There is no
+text mode; text is drawn from a font in VRAM with `EXPAND` (see
+[Text](#text)).
 
 | Offset | Register        | Access | Description                                   |
 |--------|-----------------|--------|-----------------------------------------------|
@@ -397,6 +403,10 @@ window. There is no text mode; text is drawn from a font in VRAM with
 | `0x68` | `BG`            | RW     | pixel value of 0 bits in `EXPAND`             |
 | `0x6C` | `ADDRESS`       | RW     | physical address of the next DMA word         |
 | `0x70` | `COUNT`         | RW     | bytes left to move by DMA                     |
+| `0x80` | `CURSOR_CONTROL`| RW     | bit 0 = the cursor is shown                   |
+| `0x84` | `CURSOR_BASE`   | RW     | VRAM offset of the cursor's image, bits 21:2  |
+| `0x88` | `CURSOR_XY`     | RW     | where the hotspot is on the screen: bits 0–15 = x, bits 16–31 = y, both signed |
+| `0x8C` | `CURSOR_HOT`    | RW     | the hotspot in the image: bits 0–5 = x, bits 16–21 = y |
 
 #### Modes
 
@@ -512,6 +522,35 @@ and `CONTROL` bit 1 is set, or `VBLANK` is set and `CONTROL` bit 2 is
 set. The handler clears the condition by writing 1 to the bit in
 `STATUS` (or, for `DONE`, by starting the next command).
 
+#### VRAM window
+
+VRAM is also mapped at `0xFC000000`–`0xFC3FFFFF`: byte N of VRAM is at
+`0xFC000000` + N. Loads and stores of any size reach it like RAM, at no
+cost in ticks beyond the access, and see the same bytes as the engine
+and the display: a store there shows at the end of the frame like a
+pixel the engine draws. DMA reaches it too, so a disk can read an image
+straight into VRAM and `LOAD` can copy within VRAM. Instructions can't
+run from it and page tables can't be in it.
+
+`LL` and `SC` work on it, but the engine's writes don't clear a
+reservation there; DMA's and the CPU's do, as in RAM.
+
+#### Cursor
+
+The hardware cursor is a 64×64 image of ARGB8888 pixels in VRAM,
+`0xAARRGGBB` little-endian, 256 bytes per line, starting at
+`CURSOR_BASE`. While `CURSOR_CONTROL` bit 0 and the display are on, it
+is blended over the frame as the frame is shown: each colour channel is
+(cursor × A + frame × (255 − A)) / 255, rounded to nearest, so A = 255 is
+the cursor alone and A = 0 the frame alone. VRAM itself never changes,
+whatever the depth of the mode.
+
+The image is placed so that its pixel `CURSOR_HOT` falls on the screen
+pixel `CURSOR_XY`. Pixels off the screen, and pixels past the end of
+VRAM, aren't drawn. The registers can be changed at any time; the
+display shows them as they are at the end of the frame. They are zero
+after reset: the cursor is hidden.
+
 #### Text
 
 A font is a 1 bpp bitmap in VRAM, loaded once with `LOAD` from ROM or
@@ -556,15 +595,18 @@ to about 85ms. There is no IRQ line.
 ### Mouse
 
 A relative mouse, like a PS/2 one: it reports how far it moved and which
-buttons are down, not where the pointer is. Software draws its own
-pointer. Events are queued in a 64-entry FIFO, and only while the mouse
-is enabled.
+buttons are down, not where the pointer is; or, in absolute mode, like a
+USB tablet: it reports where the host's pointer is in the frame.
+Software draws its own pointer, or has the video card's
+[cursor](#cursor) draw it. Events are queued in a 64-entry FIFO, and only
+while the mouse is enabled.
 
-| Offset | Register  | Access | Description                              |
-|--------|-----------|--------|------------------------------------------|
-| `0x00` | `STATUS`  | R      | bit 0 = event ready, bit 1 = overflow    |
-| `0x04` | `DATA`    | R      | pops the next event, `0` if empty        |
-| `0x08` | `CONTROL` | RW     | bit 0 = flush the FIFO (reads as 0), bit 1 = enabled |
+| Offset | Register   | Access | Description                              |
+|--------|------------|--------|------------------------------------------|
+| `0x00` | `STATUS`   | R      | bit 0 = event ready, bit 1 = overflow    |
+| `0x04` | `DATA`     | R      | pops the next event, `0` if empty        |
+| `0x08` | `CONTROL`  | RW     | bit 0 = flush the FIFO (reads as 0), bit 1 = enabled, bit 2 = absolute |
+| `0x0C` | `POSITION` | R      | absolute mode: where the event last popped from `DATA` happened, bits 0–15 = x, bits 16–31 = y |
 
 Event:
 
@@ -576,6 +618,7 @@ Event:
 | 24    | `LEFT`  | the left button is down                                  |
 | 25    | `RIGHT` | the right button is down                                 |
 | 26    | `MIDDLE`| the middle button is down                                |
+| 27    | `ABSOLUTE` | the event is of absolute mode: `DX` and `DY` are 0, `POSITION` has its place |
 | 31    | —       | always 1, so an event is never `0`                       |
 
 The buttons are their state after the event: an event that only presses
@@ -593,180 +636,117 @@ the emulator's window captures the host pointer for the machine (that
 click is not an event); Ctrl+Alt, switching to another window, or
 clearing bit 1 gives it back. Buttons held when the pointer is given back count as
 released: if the mouse is still enabled, an event says so. Without a
-window (`--headless`) there are no events.
+window (`--headless`) there are no events, but those of an
+[input script](../README.md#input-scripts).
 
-### Network card
+#### Absolute mode
 
-A network card with the TCP/IP stack in hardware, like the WIZnet W5500:
-software opens up to 8 sockets and moves bytes, the card does the rest
-through the host's network. Software needs no TCP/IP stack of its own,
-and doesn't see packets, MAC addresses or IP configuration.
+With `CONTROL` bit 2 set the mouse follows the host's pointer over the
+window without capturing it: the host's pointer stays the host's, and
+the machine learns where it is. Positions are pixels of the current
+video mode, from 0, 0 at the top left to `WIDTH` − 1, `HEIGHT` − 1; a
+pointer beside the frame (the window is wider or taller than the frame's
+shape) counts as on its nearest edge.
 
-The card is connected unless the emulator is started with `--no-net`
-(see [README](../README.md#running)); otherwise the link is down and
-every command fails with error 4. Addresses are IPv4, as a word with the
-first byte of the dotted form on top: `127.0.0.1` is `0x7F000001`.
+Every event of absolute mode has `ABSOLUTE` set, no motion and the
+position of the pointer when it happened, which `POSITION` holds once
+the event is popped from `DATA`. A move is an event with neither a
+button change nor a wheel step; a move after a move in the FIFO, with the
+same buttons, replaces the older one's position instead of queueing
+another event, so a slow reader sees where the pointer went, not every
+step. Buttons and wheel steps are events as in relative mode, at the
+pointer's position. Switching to another window releases the buttons.
 
-| Offset  | Register      | Access | Description                                 |
-|---------|---------------|--------|---------------------------------------------|
-| `0x00`  | `STATUS`      | R      | bit 0 = link up, bit 1 = `LISTEN` works, bit 2 = UDP works |
-| `0x04`  | `PENDING`     | R      | bits 0–7 = socket N asserts the IRQ line, bit 8 = the DNS lookup does |
-| `0x08`  | `SOCKETS`     | R      | `8`                                         |
-| `0x10`  | `DNS_COMMAND` | W      | `1` = look up the name at `DNS_NAME`        |
-| `0x14`  | `DNS_STATUS`  | RW     | bit 0 = busy, bit 1 = done, bit 2 = failed; writing 1 to bit 1 clears it |
-| `0x18`  | `DNS_CONTROL` | RW     | bit 0 = IRQ on done                         |
-| `0x1C`  | `DNS_NAME`    | RW     | physical address of the host name           |
-| `0x20`  | `DNS_RESULT`  | R      | the address found, `0` if the lookup failed |
-| `0x100` | socket 0      |        | the socket registers below                  |
-| …       |               |        | socket N at `0x100` + N × `0x40`            |
+`POSITION` keeps its value while the FIFO is empty; reset clears it.
+Relative motion is ignored in absolute mode, and positions in relative
+mode.
 
-Socket registers (offsets from the socket's base):
+### Ethernet card
 
-| Offset | Register     | Access | Description                                 |
-|--------|--------------|--------|---------------------------------------------|
-| `0x00` | `STATE`      | R      | see below                                   |
-| `0x04` | `COMMAND`    | W      | see below                                   |
-| `0x08` | `ERROR`      | R      | why the last command, or the connection, failed; `0` if it didn't |
-| `0x0C` | `EVENTS`     | RW     | bit 0 = connected, bit 1 = closed, bit 2 = received, bit 3 = sent; writing 1 to a bit clears it |
-| `0x10` | `IRQ_MASK`   | RW     | the `EVENTS` bits that assert the IRQ line  |
-| `0x14` | `LOCAL_PORT` | RW     | the socket's own port, low 16 bits          |
-| `0x18` | `PEER_ADDR`  | RW     | the other end's address                     |
-| `0x1C` | `PEER_PORT`  | RW     | the other end's port, low 16 bits           |
-| `0x20` | `ADDRESS`    | RW     | physical address of the next byte to move   |
-| `0x24` | `COUNT`      | RW     | bytes left to move                          |
-| `0x28` | `RX_SIZE`    | R      | bytes received and not yet moved to memory  |
-| `0x2C` | `TX_FREE`    | R      | free bytes in the send buffer               |
+A network card that sends and receives Ethernet frames: software brings
+a TCP/IP stack of its own. Its cable leads to a virtual network in the
+emulator, as in QEMU's user networking: a gateway that does NAT for the
+guest, a DHCP server and a DNS server. The guest needs no setup on the
+host and no privileges.
 
-| `STATE` | Name        | Description                                      |
-|---------|-------------|--------------------------------------------------|
-| `0`     | closed      | free for a command                               |
-| `1`     | connecting  | `CONNECT` is waiting for the other end           |
-| `2`     | listening   | `LISTEN` is waiting for a connection             |
-| `3`     | connected   | a TCP connection: bytes go both ways             |
-| `4`     | peer closed | the connection ended: the bytes received stay readable, nothing can be sent |
-| `5`     | UDP         | an open UDP socket                               |
+| Address     | What it is                                              |
+|-------------|---------------------------------------------------------|
+| `10.0.2.0/24` | the network                                           |
+| `10.0.2.2`  | the gateway, router and DHCP server; connections to it go to the host itself (its `127.0.0.1`) |
+| `10.0.2.3`  | the DNS server: it answers A queries with the host's lookups, other types with no answer |
+| `10.0.2.15` | the guest's address, which DHCP gives (any request for another is refused) |
 
-| `COMMAND` | Name      | In state       | Operation                     |
-|-----------|-----------|----------------|-------------------------------|
-| `1`       | `CONNECT` | closed         | opens a TCP connection to `PEER_ADDR`:`PEER_PORT` |
-| `2`       | `LISTEN`  | closed         | waits for one TCP connection on `LOCAL_PORT` |
-| `3`       | `UDP`     | closed         | opens a UDP socket on `LOCAL_PORT` |
-| `4`       | `SEND`    | connected, UDP | moves `COUNT` bytes from memory at `ADDRESS` to the network |
-| `5`       | `RECEIVE` | connected, peer closed, UDP | moves received bytes to RAM at `ADDRESS`, at most `COUNT` |
-| `6`       | `CLOSE`   | any            | closes the socket             |
+The card's MAC address is `52:54:00:12:34:56`, the gateway's (and the
+DNS server's) `52:55:0A:00:02:02`. The gateway answers ARP for both and
+ping itself. Through it the guest reaches the host's networks with TCP
+and UDP, and with ping where the host allows it without privileges
+(macOS; Linux if `net.ipv4.ping_group_range` lets the user). By default
+the guest reaches public addresses only, not the host itself (so not
+`10.0.2.2` either) or the networks around it; the rules of `--net-allow`
+and `--net-deny` open or close more (see [README](../README.md#network)).
+A connection they deny is refused with a reset, a datagram or ping is
+dropped. Ports forwarded with `--net-forward` lead to the guest's TCP and
+UDP ports while the card is on: a connection to the host's port comes to
+`10.0.2.15` from `10.0.2.2`, and so does a datagram; what the guest
+sends from that UDP port leaves from the host's port. In a browser the
+gateway has TCP and DNS only, through the network proxy.
 
-Writing `COMMAND` clears `ERROR` and runs the command at once, in the
-same store. A command that can't run changes nothing else and sets
-`ERROR`. The network itself is serviced between the CPU's instructions
-by the emulator, every few milliseconds of host time: `STATE`, `EVENTS`,
-`RX_SIZE` and `TX_FREE` change on their own as it goes.
+The card is connected unless the emulator is started with `--no-net`;
+otherwise the link is down: frames are sent into nothing and none come
+in. Frames are Ethernet II, 14 to 1514 bytes, without the FCS. The
+gateway doesn't put fragments together and doesn't send them; TCP takes
+an MSS of up to 1460 bytes.
 
-- **`CONNECT`** goes to connecting. When the other end accepts, the
-  socket goes to connected, `LOCAL_PORT` takes the port the host chose,
-  and `EVENTS.connected` is set. If it can't connect, the socket goes
-  back to closed with error 6 and `EVENTS.closed` set; the host may know
-  that at once, and then the socket never leaves closed. An address the
-  [rules](#network-rules) don't allow fails at once the same way, with
-  error 8.
-- **`LISTEN`** goes to listening on `LOCAL_PORT`; `0` picks a free port,
-  which `LOCAL_PORT` then shows. The first connection that comes in
-  turns the socket into a connected one, with the other end in
-  `PEER_ADDR` and `PEER_PORT`, and sets `EVENTS.connected`. The socket
-  stops listening then: to take another connection, `LISTEN` on another
-  socket. The host listens on `127.0.0.1`, so only programs on the host
-  can connect, unless the port is [forwarded](#network-rules).
-- **`UDP`** opens a UDP socket on `LOCAL_PORT`. With `0` the host picks
-  the port (and `LOCAL_PORT` shows it) and listens on all its
-  addresses, as any UDP client does; another port is opened on
-  `127.0.0.1`, or where it is forwarded, like `LISTEN`.
-- **`SEND`** on a connection moves as many of the `COUNT` bytes as
-  `TX_FREE` allows into the send buffer (16KB); `ADDRESS` goes up and
-  `COUNT` down by the bytes moved, so a `COUNT` left over is sent with
-  another `SEND`. The card sends the buffer on its own and sets
-  `EVENTS.sent` when it is empty. On a UDP socket `SEND` sends the
-  `COUNT` bytes, at most 8192, as one datagram to `PEER_ADDR`:`PEER_PORT`;
-  `ADDRESS` goes up by `COUNT` and `COUNT` becomes 0. A datagram may be
-  lost, as UDP allows. The bytes may come from RAM or ROM. A datagram to
-  an address the rules don't allow is not sent: error 8, and `ADDRESS`
-  and `COUNT` stay.
-- **`RECEIVE`** moves `RX_SIZE` bytes, or `COUNT` if that is less, from
-  the receive buffer (16KB) to RAM; `ADDRESS` and `COUNT` go on by the
-  bytes moved. Every time bytes arrive `EVENTS.received` is set. On a
-  UDP socket the buffer holds whole datagrams, each after an 8-byte
-  header: the sender's address (a word), its port and the datagram's
-  length (half-words), little-endian like everything else. A datagram
-  that doesn't fit in the free part of the buffer is dropped.
-- **`CLOSE`** closes the socket from any state and empties both buffers;
-  bytes not yet sent are dropped. The socket goes to closed and `EVENTS`
-  is cleared.
+| Offset | Register   | Access | Description                                   |
+|--------|------------|--------|-----------------------------------------------|
+| `0x00` | `STATUS`   | R      | bit 0 = link up                               |
+| `0x04` | `CONTROL`  | RW     | bit 0 = on, bit 1 = IRQ on `RX` and `LOST`, bit 2 = IRQ on `TX` |
+| `0x08` | `PENDING`  | RW     | bit 0 = `RX`, bit 1 = `TX`, bit 2 = `LOST`, bit 3 = `FAULT`; writing 1 to a bit clears it |
+| `0x0C` | `MAC_LO`   | R      | bytes 0–3 of the MAC address, byte 0 in bits 0–7 |
+| `0x10` | `MAC_HI`   | R      | bytes 4–5 in bits 0–15                        |
+| `0x14` | `RX_RING`  | RW     | physical address of the receive ring, a multiple of 8 |
+| `0x18` | `RX_SIZE`  | RW     | descriptors in it, up to 1024                 |
+| `0x1C` | `RX_NEXT`  | R      | the descriptor the next frame goes in         |
+| `0x20` | `TX_RING`  | RW     | physical address of the send ring, a multiple of 8 |
+| `0x24` | `TX_SIZE`  | RW     | descriptors in it, up to 1024                 |
+| `0x28` | `TX_NEXT`  | R      | the descriptor the card sends next            |
+| `0x2C` | `TX_KICK`  | W      | any value: send what software has handed over |
 
-When the other end closes the connection, or it breaks (then with error
-6), a connected socket goes to peer closed and `EVENTS.closed` is set.
-The bytes in the receive buffer stay there for `RECEIVE`; the socket is
-free again after `CLOSE`.
+The rings are arrays of 8-byte descriptors in RAM, used in order and
+round again from the first after the last:
 
-The DMA moves bytes, so `ADDRESS` and `COUNT` need no alignment. It uses
-physical addresses and ignores the MMU. A byte the DMA can't reach stops
-the command with error 3, with `ADDRESS` and `COUNT` at that byte; the
-bytes before it have been moved.
+| Offset | Field     | Description                                         |
+|--------|-----------|-----------------------------------------------------|
+| `0x00` | `ADDRESS` | physical address of the buffer, any byte            |
+| `0x04` | `CONTROL` | bits 0–15 = length, bit 30 = `ERROR`, bit 31 = `OWN` |
 
-| `ERROR` | Reason                                                        |
-|---------|---------------------------------------------------------------|
-| `1`     | unknown command                                               |
-| `2`     | the command can't be used in the socket's state               |
-| `3`     | the DMA reached memory it can't: not RAM (or ROM, for `SEND`) |
-| `4`     | the link is down: the emulator runs with `--no-net`           |
-| `5`     | not available on this host: `LISTEN` or UDP in a browser      |
-| `6`     | the host's network failed: refused, unreachable, the port is taken, the connection broke |
-| `7`     | the UDP datagram is longer than 8192 bytes                    |
-| `8`     | the rules don't let the guest reach `PEER_ADDR`:`PEER_PORT`   |
+A descriptor with `OWN` set is the card's. Software gives the card a
+receive buffer by writing its address, its size as the length and
+`OWN`; the card stores a frame in it, writes the frame's length and
+clears `OWN` (and sets `ERROR` if the frame was longer than the buffer:
+the length is then the bytes stored). To send, software writes the
+frame's address and length and `OWN`, then writes `TX_KICK`; the card
+sends the frames of the descriptors it owns, from `TX_NEXT` on, up to one
+it doesn't own, and clears `OWN` of each, keeping the length; a frame
+shorter than 14 bytes or longer than 1514 isn't sent and gets `ERROR`.
+Sending is done when the store to `TX_KICK` completes. Frames come in
+when the host polls the network (between batches of ticks, or every
+millisecond of machine time with `--deterministic`); those that find no
+free receive descriptor wait, up to 64, and the next ones are lost.
 
-<a id="network-rules"></a>**Rules.** The emulator decides where the guest may
-connect and send datagrams to, so that a guest can't reach services that
-trust the host: on the host itself, or in its local network. By default
-it may reach any address except these:
+`RX_RING`, `RX_SIZE`, `TX_RING` and `TX_SIZE` can only be written while
+the card is off. Turning it on sets `RX_NEXT` and `TX_NEXT` to 0. The
+card sets `RX` when it has stored a frame, `TX` when it has sent one,
+`LOST` when a frame was lost, and `FAULT` when its DMA reached memory
+that isn't RAM (or ROM, for what it reads): then it stops at that
+descriptor and turns itself off. IRQ 8 is asserted while a bit of
+`PENDING` is set whose IRQ `CONTROL` enables (`FAULT` with either).
+Frames that come while the card is off are dropped.
 
-| Range              | What                                  |
-|--------------------|---------------------------------------|
-| `0.0.0.0/8`        | "this network"                        |
-| `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16` | private networks |
-| `100.64.0.0/10`    | carrier-grade NAT                     |
-| `127.0.0.0/8`      | the host itself (loopback)            |
-| `169.254.0.0/16`   | link-local                            |
-| `192.0.0.0/24`, `198.18.0.0/15` | protocol assignments, benchmarking |
-| `224.0.0.0/4`, `240.0.0.0/4` | multicast, reserved and the broadcast |
-
-`--net-allow` and `--net-deny` add rules after these, each an address
-range and optionally a port range (see the README); the last rule that
-matches the address and port decides. The rules apply to `CONNECT` and
-to datagrams the guest sends, not to DNS lookups, `LISTEN`, or what
-comes in. `--net-forward [ADDR:]HOST_PORT:GUEST_PORT` makes `LISTEN` and
-`UDP` on `GUEST_PORT` open on `ADDR:HOST_PORT` of the host (`ADDR` is
-`127.0.0.1` if left out; `0.0.0.0` for all the host's addresses) while
-`LOCAL_PORT` still reads `GUEST_PORT`; other ports open on `127.0.0.1`
-and the same port.
-
-**DNS.** `DNS_COMMAND` = 1 looks up the zero-terminated host name, up to
-255 characters, at `DNS_NAME` in RAM or ROM (a dotted address such as
-`"10.0.0.1"` works too). It sets `DNS_STATUS.busy` and clears
-`DNS_STATUS.done` and `.failed`; when the lookup ends, busy is cleared,
-`DNS_RESULT` holds the first IPv4 address found and done is set, with
-failed too if there was none. Without the link, or with no terminator
-in 256 bytes, the lookup fails at once. Writes to `DNS_COMMAND` while
-busy are ignored. Only one lookup runs at a time; it may take seconds,
-but the machine runs on meanwhile.
-
-IRQ line 8 is asserted while any socket has an `EVENTS` bit set that is
-also set in its `IRQ_MASK`, or `DNS_STATUS.done` is set with
-`DNS_CONTROL` bit 0. `PENDING` tells which; the handler writes 1 to the
-`EVENTS` bits it has handled (or to `DNS_STATUS.done`).
-
-In a browser (the web build) connections and lookups go through the
-network proxy on the host (`tools/netproxy.py`): a connection is a
-WebSocket to `ws://PROXY/tcp/ADDR/PORT`, a lookup `GET
-http://PROXY/resolve/NAME`. Without the proxy, `CONNECT` fails with
-error 6 and lookups find nothing. `LISTEN` and UDP fail with error 5,
-and `STATUS` bits 1 and 2 are clear.
+The gateway's connections live in the host's sockets: a reset of the
+machine drops them, and a [snapshot](../README.md#snapshots) can't hold
+them, so after loading one the guest's connections are gone, as if the
+network had been down a while.
 
 ### Audio card
 
@@ -917,8 +897,8 @@ with its stream.
 
 A folder of the host that the guest uses file by file, given with
 `--share PATH` (see the README): the way to move files in and out of the
-machine without a disk image. As the network card has TCP/IP, the device
-has the file system: software opens, reads and writes files by path and
+machine without a disk image. The device has the file system: software
+opens, reads and writes files by path and
 needs no file system driver of its own. Commands run at once, in the
 tick of the store to `COMMAND`, so software reads `ERROR` and `RESULT`
 right after it; there is no IRQ.
@@ -1039,6 +1019,45 @@ A reset closes every handle. The files stay as they are: what was
 written is in the folder. A snapshot doesn't hold open files either, so
 after a load every handle is closed and using one fails with error 7.
 
+### Watchdog
+
+A watchdog timer: software that is still running kicks it before the
+timeout; if it doesn't, the watchdog barks (an interrupt, the last chance
+to save a log or to recover) and then, after a grace period, resets the
+machine. Both periods count clock ticks.
+
+| Offset | Register  | Access | Description                                   |
+|--------|-----------|--------|-----------------------------------------------|
+| `0x00` | `CONTROL` | RW     | bit 0 = enable, bit 1 = lock                  |
+| `0x04` | `TIMEOUT` | RW     | ticks from a kick until it barks              |
+| `0x08` | `GRACE`   | RW     | ticks from the bark until it resets the machine |
+| `0x0C` | `KICK`    | W      | any value: start again from `TIMEOUT`         |
+| `0x10` | `VALUE`   | R      | ticks left in the current period              |
+| `0x14` | `STATUS`  | RW     | bit 0 = `BARK`, writing 1 clears it; bit 1 = in the grace period |
+
+Turning bit 0 of `CONTROL` on loads `VALUE` from `TIMEOUT` and starts the
+countdown; from the next tick `VALUE` goes down by one every tick.
+`TIMEOUT` = N barks after N ticks; 0 acts as 1, and so does a `GRACE`
+of 0. On the tick `VALUE` reaches 0 the watchdog barks: `STATUS.BARK`
+is set, which asserts IRQ 12, and `VALUE` is loaded from `GRACE`
+(`STATUS` bit 1). If that runs out too, the machine resets at the end of
+the tick, like the power controller's `RESET`, with `RESET_CAUSE` = 4.
+
+`KICK` loads `VALUE` from `TIMEOUT` again, ends the grace period and
+clears `BARK`; while the watchdog is off it does nothing. Writing 1 to
+`BARK` only quiets the interrupt: the grace period goes on. A change to
+`TIMEOUT` or `GRACE` counts from the next kick. Turning bit 0 off stops
+the countdown where it is.
+
+Bit 1 of `CONTROL`, `LOCK`, makes `CONTROL`, `TIMEOUT` and `GRACE`
+read-only until the next reset, so a runaway program can't turn the
+watchdog off; kicks still work. The watchdog is off and unlocked after
+reset.
+
+There is no non-maskable interrupt: a program stuck with interrupts off
+doesn't take the bark, and the grace period ends in the reset. Nothing
+runs once the CPU has halted, the watchdog neither.
+
 ## Reset
 
 On reset all registers are zero and `pc = 0xFE000000`, so execution starts
@@ -1049,12 +1068,13 @@ The power controller's `RESET` does the same at run time: the CPU and all
 devices return to their reset state (FIFOs are emptied, the PIC `ENABLE`
 mask, the timer and its `COUNT` are cleared, disk transfers stop and the
 disk registers are cleared, the video card stops its DMA, turns the
-display off and clears its palette and `FRAME`, the beeper goes quiet,
-the mouse is disabled, the network card closes its sockets and forgets a
-DNS lookup, the audio card's voices stop, the real-time clock's alarm is
+display off, hides the cursor and clears its palette and `FRAME`, the
+beeper goes quiet, the mouse is disabled and made relative, the Ethernet
+card is turned off and its network drops every connection, the audio
+card's voices stop, the real-time clock's alarm is
 disarmed and cleared, the shared folder closes its handles, the power
-controller's `STATUS` is cleared). The
-real-time clock's time is not reset: it keeps following the host's
+controller's `STATUS` is cleared, the watchdog is turned off and
+unlocked). The real-time clock's time is not reset: it keeps following the host's
 clock, and neither is the random number generator.
 The power controller's `RESET_CAUSE` says which reset it was. The host's
 reset key, Ctrl+Alt+R in the window, resets the machine the same way,
@@ -1140,8 +1160,8 @@ most 507 devices.
 - The PIC `ENABLE` mask is 0. The boot disk is idle with `DONE` clear.
   The beeper may still be sounding the firmware's beep, for up to 1/10 s
   of ticks.
-  The timer, the mouse, the network card, the audio card and the
-  real-time clock's alarm are as after reset. The UART RX FIFO was flushed at reset, but
+  The timer, the mouse, the Ethernet card, the audio card, the
+  real-time clock's alarm and the watchdog are as after reset. The UART RX FIFO was flushed at reset, but
   it may hold input typed since then, as may the keyboard FIFO.
 - The video card shows the firmware's screen console: 640×480, 8 bpp,
   `START` = 0, display on, IRQs off, the engine idle. The palette holds
@@ -1161,8 +1181,9 @@ the end of the frame, then the floppy counts the tick towards its next
 word, then the beeper
 advances its wave and `DURATION`, then the audio card counts the tick
 towards its next frame, then the real-time clock counts the tick
-towards its next alarm comparison, then the CPU samples the IRQ line and
-advances its pipeline by one stage. Nothing runs once the CPU has
+towards its next alarm comparison, then the watchdog counts the tick,
+then the CPU samples the IRQ line and advances its pipeline by one
+stage. Nothing runs once the CPU has
 halted or the machine is powered off.
 
 The emulator gets the same result with less work: a device runs only on
@@ -1206,9 +1227,12 @@ results are always seen by the next instruction.
   effects. Loads and stores in MEM are never speculative: an instruction
   reaches MEM only once every older one has retired without redirecting
   the flow.
-- **Mode and translation changes:** `MTCR STATUS`, `MTCR PTBR` and `TLBI`
-  squash the younger instructions in flight when they retire and refetch
-  them, so these see the new mode and translation. `IRET` jumps to `EPC`
+- **Mode and translation changes:** `MTCR STATUS`, `MTCR PTBR`, `MTCR`
+  to a trigger register or `FCSR`, and `TLBI` squash the younger
+  instructions in flight when they retire and refetch them, so these see
+  the new mode, translation, triggers and rounding mode.
+- **FP flags** are computed in EX and set in `FCSR` when the instruction
+  retires in WB, so a squashed instruction sets none. `IRET` jumps to `EPC`
   when it retires (4-cycle penalty) rather than in EX.
 - **TLB misses** are walked in the same cycle; the walk takes no extra
   cycles.

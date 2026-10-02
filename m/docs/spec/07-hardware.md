@@ -67,6 +67,9 @@ let putc(c: UByte): Void {
 | `tlbi(addr)`, `tlbi(x, mode)` | `TLBI` | `Void`; `addr`, `x: UWord`; `mode` — константа 0–2 |
 | `fence()` | `FENCE` | `Void` |
 | `breakpoint()` | `BREAK` | `Void` |
+| `clz(x)`, `ctz(x)`, `popcount(x)` | `CLZ`, `CTZ`, `POPCNT` | `UWord`; `x: Word` или `UWord` |
+| `bswap(x)` | `BSWAP` | тип `x`; `x: Word` или `UWord` |
+| `rotl(x, n)`, `rotr(x, n)` | `ROL`, `ROR` | тип `x`; `x: Word` или `UWord`, `n: UWord` |
 | `sizeof(T)` | — | `UWord`, константа |
 | `alignof(T)` | — | `UWord`, константа |
 | `offsetof(T, поле)` | — | `UWord`, константа |
@@ -79,8 +82,22 @@ let putc(c: UByte): Void {
 - Номера (INSTRUCTIONS, «Control registers»): `STATUS` 0, `EPC` 1,
   `IVEC` 2, `SCRATCH` 3, `CAUSE` 4, `BADADDR` 5, `PTBR` 6, `CYCLE` 7,
   `CYCLEH` 8, `INSTRET` 9, `INSTRETH` 10, `CPUID` 11, `TADDR0` 12,
-  `TCTRL0` 13, `TADDR1` 14, `TCTRL1` 15. Язык имён не
-  вводит: их объявляют константами.
+  `TCTRL0` 13, `TADDR1` 14, `TCTRL1` 15, `HARTID` 16, `FCSR` 17. Язык
+  имён не вводит: их объявляют константами. Другой номер — ошибка.
+- `FCSR` (флаги исключений и режим округления `Float`) доступен и в
+  user mode: `mfcr(17)` читает флаги, `mtcr(17, x)` сбрасывает их или
+  меняет режим. Компилятор не переставляет операции с `Float` через
+  `mtcr(17, ...)` и `mfcr(17)`. Константные выражения с `Float`
+  вычисляются при компиляции: всегда к ближайшему и без флагов.
+
+### Битовые операции
+
+- `clz(x)` — число нулей перед старшей единицей, `ctz(x)` — после
+  младшей; для `0` обе дают 32. `popcount(x)` — число единиц.
+- `bswap(x)` — байты в обратном порядке (смена порядка байт в сети).
+- `rotl(x, n)`, `rotr(x, n)` — циклический сдвиг влево и вправо на
+  `n & 31` бит.
+- Литерал в `x` получает тип `UWord`. Для `Byte` и `Half` нужно `as`.
 - `mtcr` не переставляется с обращениями к памяти: после `mtcr(PTBR, ...)`
   следующие обращения уже идут через новую таблицу страниц.
 

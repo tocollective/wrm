@@ -55,11 +55,11 @@ test_main:
 	; ---- illegal instruction: control registers that don't exist or are
 	; read-only
 	li r28, 10
-.cr16:
-	.dw 0x00400104              ; mfcr r1, cr16
+.cr18:
+	.dw 0x00480104              ; mfcr r1, cr18
 	li r1, 1
-	la r2, .cr16
-	li r3, 0x00400104
+	la r2, .cr18
+	li r3, 0x00480104
 	call check_trap
 	li r28, 11
 .crneg:
@@ -90,11 +90,11 @@ test_main:
 	li r3, 0x002C0005
 	call check_trap
 	li r28, 15
-.mtcr16:
-	.dw 0x00400005              ; mtcr cr16, r0
+.mtcr18:
+	.dw 0x00480005              ; mtcr cr18, r0
 	li r1, 1
-	la r2, .mtcr16
-	li r3, 0x00400005
+	la r2, .mtcr18
+	li r3, 0x00480005
 	call check_trap
 
 	; ---- illegal instruction: reserved bits set in a known opcode
@@ -582,8 +582,6 @@ illegal_opcodes:
 	.dw 0x5A5A5A96
 	ret
 	.dw 0x5A5A5A97
-	ret
-	.dw 0x5A5A5A98
 	ret
 	.dw 0x5A5A5A99
 	ret

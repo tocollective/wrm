@@ -62,8 +62,10 @@ param_type  = [ "mut" ] type "[" "]"      (* только в параметре 
 
 ```ebnf
 var_decl    = "let" [ "mut" ] identifier ":" type [ "=" expr ] ;
-func_decl   = "let" identifier "(" [ param { "," param } [ "," ] ] ")"
+func_decl   = "let" [ "mut" ] identifier "(" [ param { "," param } [ "," ] ] ")"
               ":" type block ;
+              (* после 'let [mut] identifier': ':' — переменная,
+                 '(' — функция *)
 param       = identifier ":" param_type ;
 extern_decl = "extern" "let" identifier
               "(" [ param { "," param } [ "," ] ] ")" ":" type
@@ -76,6 +78,7 @@ extern_decl = "extern" "let" identifier
 block       = "{" { statement } "}" ;
 
 statement   = var_decl
+            | func_decl
             | block
             | if_stmt
             | while_stmt
@@ -95,7 +98,7 @@ assign_op   = "=" | "+=" | "-=" | "*=" | "/=" | "%="
 place       = postfix_expr | "*" unary_expr ;
 
 body        = block | statement ;
-              (* не var_decl *)
+              (* не var_decl и не func_decl *)
 condition   = "(" expr ")"
             | expr ;
               (* если первый токен '(' — условие ровно в этих скобках;
@@ -113,7 +116,7 @@ condition_end = expr ;
 switch_stmt = "switch" expr "{" { switch_case } "}" ;
 switch_case = ( "case" const_expr | "default" ) ":" { case_stmt } ;
 case_stmt   = statement ;
-              (* кроме var_decl: переменные — в блоке *)
+              (* кроме var_decl и func_decl: объявления — в блоке *)
 
 asm_stmt    = "asm" "{" string_literal { string_literal } "}" ;
 ```
@@ -124,8 +127,8 @@ asm_stmt    = "asm" "{" string_literal { string_literal } "}" ;
 `x = 1` — это два оператора, а не `return x`.
 
 В условии `if`, `while`, `for` и в выражении `switch` литерал структуры
-`{ ... }` на верхнем уровне не допускается: `{` там начинает тело. Внутри
-скобок — можно.
+`{ ... }` и литерал функции на верхнем уровне не допускаются: `{` там
+начинает тело. Внутри скобок — можно.
 
 ## Выражения
 
@@ -154,9 +157,13 @@ primary     = int_literal | float_literal | char_literal | string_literal
             | identifier "." identifier          (* элемент enum *)
             | "(" expr ")"
             | struct_lit
+            | func_lit
             | array_lit
             | builtin_call ;
 
+func_lit    = "(" [ param { "," param } [ "," ] ] ")" ":" type block ;
+              (* '(' и затем ')' или 'identifier :' — литерал функции,
+                 иначе — выражение в скобках *)
 struct_lit  = "{" [ field_init { "," field_init } [ "," ] ] "}" ;
 field_init  = "." identifier "=" expr ;
 array_lit   = "[" [ expr { "," expr } [ "," ] ] "]" ;
@@ -165,7 +172,8 @@ builtin_call = ( "sizeof" | "alignof" ) "(" type ")"
              | "offsetof" "(" type "," identifier ")"
              | builtin_name call_suffix ;
 builtin_name = "mfcr" | "mtcr" | "syscall" | "wfi" | "hlt" | "tlbi"
-             | "fence" | "breakpoint" | "atomicLoad" | "atomicStore"
+             | "fence" | "breakpoint" | "clz" | "ctz" | "popcount"
+             | "bswap" | "rotl" | "rotr" | "atomicLoad" | "atomicStore"
              | "atomicSwap" | "atomicAdd" | "atomicCompareSwap" ;
 
 const_expr  = expr ;                        (* значение известно при компиляции *)
@@ -174,5 +182,7 @@ const_expr  = expr ;                        (* значение известно
 - `{` в начале выражения — всегда литерал структуры: блок не бывает
   выражением.
 - `[` в начале выражения — литерал массива, после выражения — индекс.
+- `(` в начале выражения, за которой идёт `)` или `identifier ":"`, —
+  литерал функции, иначе — выражение в скобках.
 - `identifier "." identifier` — элемент `enum`, если слева имя `enum`,
   иначе — поле.

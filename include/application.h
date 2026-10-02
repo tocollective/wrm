@@ -12,6 +12,7 @@ typedef struct application {
 	bool running;
 	bool stop_reported; // the machine has stopped and the state was dumped
 	bool off_requested; // the guest was asked to power off: next quit forces
+	bool off_reported; // web: the guest powered off and the page was told
 	int exit_code; // process exit status once the app stops running
 	machine_t* machine;
 	display_t* display; // NULL in headless mode
@@ -29,5 +30,7 @@ void application_destroy(application_t* app);
 
 bool application_update(application_t* app);
 bool application_process_events(application_t* app, SDL_Event* event);
+// Ctrl+Alt+R and the web page's reset button
+void application_reset(application_t* app);
 
 #endif // WRM_APPLICATION_H

@@ -26,6 +26,7 @@ class Parser:
 		self.last = tokens[0]       # the last token taken
 		self.no_struct = False      # '{' starts a body, not a struct literal
 		self.void_result = False    # 'return' takes no expression
+		self.func_name = None       # for messages: "'f'" or "the function literal"
 		self.docs_used = set()
 		# the leading white space of every line, for the indentation warning
 		self.indents = [l[:len(l) - len(l.lstrip(" \t"))] for l in src.split("\n")]
@@ -163,7 +164,7 @@ class Parser:
 			if not self.at("let"):
 				self.unexpected("'let': 'align' is only for global variables")
 			decl = self.let_decl(top=True)
-			if isinstance(decl, FuncDecl):
+			if isinstance(decl, FuncDecl) or getattr(decl, "func_form", False):
 				self.error(tok.loc, "'align' is only for global variables, not for functions")
 			else:
 				decl.align = align
@@ -232,17 +233,17 @@ class Parser:
 		return EnumItem(tok.loc, name, value)
 
 	def let_decl(self, top):
-		"""'let' at the top level or in a function: a variable or, at the
-		top level, a function."""
+		"""'let' at the top level or in a function: a variable or a
+		function (3.8 for one in a function and for 'let mut f()')."""
+		let = self.tok
 		loc = self.expect("let").loc
 		mut = bool(self.accept("mut"))
-		name_tok = self.tok
 		name = self.name()
 		if self.at("("):
-			if mut:
-				raise ParseError(name_tok, "a function can't be 'mut'")
 			if not top:
-				raise ParseError(name_tok, "functions are declared only at the top level")
+				self.use_doc(let)
+			if mut:
+				return self.mut_func(loc, name)
 			return self.func_rest(loc, name)
 		if self.at("="):
 			raise ParseError(self.tok, f"the type of '{name}' must be written: 'let {name}: T = ...'")
@@ -285,10 +286,31 @@ class Parser:
 	def func_rest(self, loc, name):
 		params = self.params()
 		result = self.result_type(name)
-		self.void_result = isinstance(result, TypeName) and result.name == "Void"
-		self.func_name = name
-		body = self.block()
+		body = self.func_body(f"'{name}'", result)
 		return FuncDecl(loc, name, params, result, body, False)
+
+	def mut_func(self, loc, name):
+		"""'let mut f(...): R { ... }' is 'let mut f: (...): R' that starts
+		as a function literal with that body (3.8)."""
+		params = self.params()
+		result = self.result_type(name)
+		body = self.func_body(f"'{name}'", result)
+		lit = FuncLit(loc, params, result, body)
+		lit.label_name = name
+		decl = VarDecl(loc, name, True, FuncType(loc, params, result), lit, None, False)
+		decl.func_form = True
+		return decl
+
+	def func_body(self, what, result):
+		"""The body of a function or a function literal, which may be
+		inside another function."""
+		saved = self.void_result, self.func_name
+		self.void_result = isinstance(result, TypeName) and result.name == "Void"
+		self.func_name = what
+		try:
+			return self.block()
+		finally:
+			self.void_result, self.func_name = saved
 
 	def extern_decl(self):
 		loc = self.expect("extern").loc
@@ -298,7 +320,8 @@ class Parser:
 		name = self.name()
 		if self.at("("):
 			if mut:
-				raise ParseError(name_tok, "a function can't be 'mut'")
+				raise ParseError(name_tok, f"there is no 'extern let mut {name}(...)'; an external variable "
+										   f"of a function type is 'extern let mut {name}: (...): R'")
 			params = self.params()
 			result = self.result_type(name)
 			if self.at("{"):
@@ -368,7 +391,7 @@ class Parser:
 		if tok.is_("let"):
 			if where == "body":
 				self.error(tok.loc, "a declaration can't be the body of a statement without braces: "
-									"its variable would be visible nowhere")
+									"its name would be visible nowhere")
 			elif where == "case":
 				self.error(tok.loc, "'let' can't go right inside a 'case'; put the case in a block: "
 									"'case X: { ... }'")
@@ -427,7 +450,7 @@ class Parser:
 			return ExprStmt(start.loc, target)
 		before = self.tokens[self.tokens.index(start) - 1]
 		if before.is_("return") and self.void_result:
-			raise ParseError(start, f"'{self.func_name}' returns Void, so its 'return' takes no value")
+			raise ParseError(start, f"{self.func_name} returns Void, so its 'return' takes no value")
 		end = self.last
 		if tok.kind == "op" and tok.value not in ("{", "}", ")", "]", ",", ":"):
 			try:
@@ -645,6 +668,9 @@ class Parser:
 				return self.builtin(tok)
 			return Name(tok.loc, tok.value)
 		if tok.is_("("):
+			after = self.peek()
+			if after.is_(")") or (after.kind == "id" and self.peek(2).is_(":")):
+				return self.func_lit()
 			self.next()
 			e = self.with_struct(self.expr)
 			self.expect(")")
@@ -671,6 +697,20 @@ class Parser:
 			self.expect(")")
 			return TypeQuery(tok.loc, tok.value, typ, field)
 		return BuiltinCall(tok.loc, tok.value, self.args())
+
+	def func_lit(self):
+		"""(params): R { body }, the same rule as a function type (9)."""
+		tok = self.tok
+		if self.no_struct:
+			raise ParseError(tok, "a function literal here must be in parentheses: "
+								  "its '{' would start the body of the statement")
+		params = self.params()
+		self.expect(":", "':' and the result type")
+		result = self.type()
+		if not self.at("{"):
+			self.unexpected("'{' and the body of the function literal")
+		body = self.func_body("the function literal", result)
+		return FuncLit(tok.loc, params, result, body)
 
 	def struct_lit(self):
 		loc = self.next().loc

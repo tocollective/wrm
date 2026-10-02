@@ -33,8 +33,19 @@ typedef enum cpu_cr {
 	CPU_CR_TCTRL0 = 13,
 	CPU_CR_TADDR1 = 14,
 	CPU_CR_TCTRL1 = 15,
+	// read-only, supervisor: this core's number, always 0 (one core)
+	CPU_CR_HARTID = 16,
+	// floating-point exception flags and rounding mode, also for user mode
+	CPU_CR_FCSR = 17,
 	CPU_CR_COUNT,
 } cpu_cr_t;
+
+// FCSR: the flags are SF_FLAG_*, which FP instructions set when they
+// retire; FRM is the sf_rounding_t of the ones that round. Other bits read
+// as zero; a write of a reserved FRM (5-7) leaves FRM as it was.
+#define CPU_FCSR_FLAGS_MASK 0x1F
+#define CPU_FCSR_FRM_SHIFT 5
+#define CPU_FCSR_FRM_MASK 0xE0
 
 #define CPU_TRIGGER_COUNT 2 // TADDRn = TADDR0 + 2n, TCTRLn = TCTRL0 + 2n
 
@@ -56,10 +67,12 @@ typedef enum cpu_cr {
 #define CPU_CPUID_MULH 0x08 // MULH, MULHU and MULHSU
 #define CPU_CPUID_TLBI_MODES 0x10 // TLBI of an ASID and of the whole TLB
 #define CPU_CPUID_DEBUG 0x20 // STATUS.SS and the triggers
+#define CPU_CPUID_BITS 0x40 // bit manipulation: CLZ, ROR, MIN, ...
+#define CPU_CPUID_FCSR 0x80 // FP exception flags and rounding modes
 #define CPU_CPUID                                                              \
 	(CPU_CPUID_VERSION << 24 | CPU_CPUID_MMU | CPU_CPUID_FPU                   \
 	 | CPU_CPUID_ATOMIC | CPU_CPUID_MULH | CPU_CPUID_TLBI_MODES               \
-	 | CPU_CPUID_DEBUG)
+	 | CPU_CPUID_DEBUG | CPU_CPUID_BITS | CPU_CPUID_FCSR)
 
 // TLBI modes, in imm14
 typedef enum cpu_tlbi_mode {
@@ -195,6 +208,21 @@ typedef enum cpu_opcode {
 	CPU_OP_FTOU = 0x85, // rs2 must be zero
 	CPU_OP_ITOF = 0x86, // rs2 must be zero
 	CPU_OP_UTOF = 0x87, // rs2 must be zero
+
+	// bit manipulation (R-format, but RORI)
+	CPU_OP_CLZ = 0x90, // rs2 must be zero
+	CPU_OP_CTZ = 0x91, // rs2 must be zero
+	CPU_OP_POPCNT = 0x92, // rs2 must be zero
+	CPU_OP_BSWAP = 0x93, // rs2 must be zero
+	CPU_OP_SEXTB = 0x94, // SEXT.B, rs2 must be zero
+	CPU_OP_SEXTH = 0x95, // SEXT.H, rs2 must be zero
+	CPU_OP_ROL = 0x96,
+	CPU_OP_ROR = 0x97,
+	CPU_OP_RORI = 0x98, // I-format, zero-extended imm
+	CPU_OP_MIN = 0x99,
+	CPU_OP_MAX = 0x9A,
+	CPU_OP_MINU = 0x9B,
+	CPU_OP_MAXU = 0x9C,
 } cpu_opcode_t;
 
 typedef enum cpu_format {
@@ -245,6 +273,7 @@ typedef struct cpu_latch {
 	uint32_t result; // ALU result, link address, load address/data
 	uint8_t fault; // cpu_cause_t, 0 = no fault, raised when retired in WB
 	uint32_t fault_value; // BADADDR
+	uint8_t fflags; // SF_FLAG_* of an FP instruction, into FCSR in WB
 } cpu_latch_t;
 
 typedef struct cpu_pipeline {

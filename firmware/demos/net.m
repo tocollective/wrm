@@ -1,65 +1,63 @@
-// [11] Network: a DNS lookup and an HTTP request, through the network
-// card's TCP/IP in hardware. Needs a link: with the emulator's --no-net the
-// demo says so and goes on.
+// [11] Network: the Ethernet card and a little IPv4 on top of it
+// (net.m). An address from DHCP, the gateway's MAC address by ARP, a
+// ping, and a DNS lookup that the host makes for the DNS server. Needs a
+// link: with the emulator's --no-net the demo says so and goes on.
 
-import { puts, putc, show, strlen } from "../lib.m"
-import { netLinked, netResolve, netConnect, netSend, netReceive, netClose, printAddr } from "../net.m"
+import { puts, putc } from "../lib.m"
+import {
+    mac, myAddr, gateway, dnsServer,
+    ethInit, ethStop, arpResolve, ping, dhcpConfigure, dnsResolve, printAddr, printMac,
+} from "../net.m"
 
 let HOST: *UByte = "example.com"
-let PORT: UWord = 80
-let REQUEST: *UByte = "GET / HTTP/1.0\r\nHost: example.com\r\nConnection: close\r\n\r\n"
-let SOCKET: UWord = 0
 
-let mut reply: UByte[512]
+let mut gatewayMac: UByte[6]
+let mut dnsMac: UByte[6]
 
 let demoNet(): Void {
     puts("\n[11] network\n")
-    if !netLinked() {
+    if !ethInit() {
         puts("no link: run the emulator without --no-net to try it\n")
         return
     }
-
-    puts(HOST)
-    puts(" is ")
-    let addr: UWord = netResolve(HOST)
-    if addr == 0 {
-        puts("not found\n")
-        return
-    }
-    printAddr(addr)
+    puts("MAC address ")
+    printMac(&mac[0])
     putc('\n')
 
-    let failure: UWord = netConnect(SOCKET, addr, PORT)
-    if failure != 0 {
-        show("can't connect, error", failure)
+    if !dhcpConfigure() {
+        puts("no answer from DHCP\n")
+        ethStop()
         return
     }
-    puts("connected, sending the request\n")
-    if netSend(SOCKET, REQUEST, strlen(REQUEST)) != 0 {
-        puts("can't send\n")
-        netClose(SOCKET)
-        return
-    }
+    puts("DHCP: address ")
+    printAddr(myAddr)
+    puts(", gateway ")
+    printAddr(gateway)
+    puts(", DNS server ")
+    printAddr(dnsServer)
+    putc('\n')
 
-    // the reply until the server closes; its first line is the status
-    let mut total: UWord = 0
-    let mut firstLine: Bool = true
-    while true {
-        let n: UWord = netReceive(SOCKET, &mut reply[0], 512)
-        if n == 0 break
-        for i: UWord in 0..n {
-            if !firstLine break
-            if reply[i] == '\n' {
-                firstLine = false
-                putc('\n')
-            } else if reply[i] != '\r' {
-                putc(reply[i])
-            }
-        }
-        total += n
+    if !arpResolve(gateway, &mut gatewayMac[0]) {
+        puts("the gateway doesn't answer ARP\n")
+        ethStop()
+        return
     }
-    netClose(SOCKET)
-    show("reply, bytes", total)
+    puts("gateway's MAC address ")
+    printMac(&gatewayMac[0])
+    putc('\n')
+
+    printAddr(gateway)
+    if ping(&gatewayMac[0], gateway, 1) puts(" answers ping\n") else puts(" doesn't answer ping\n")
+
+    // the DNS server is on our network too: ask for its MAC address
+    if arpResolve(dnsServer, &mut dnsMac[0]) {
+        puts(HOST)
+        puts(" is ")
+        let addr: UWord = dnsResolve(&dnsMac[0], HOST)
+        if addr == 0 puts("not found") else printAddr(addr)
+        putc('\n')
+    }
+    ethStop()
 }
 
 export { demoNet }

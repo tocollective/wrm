@@ -4,7 +4,7 @@
 
 #define NET_RULE_MAX 64
 #define NET_FORWARD_MAX 16
-#define NET_LOCAL_ADDR 0x7F000001 // 127.0.0.1: where the guest listens
+#define NET_LOCAL_ADDR 0x7F000001 // 127.0.0.1: where forwards listen by default
 
 // An address range and a port range the guest may or may not reach.
 typedef struct net_rule {
@@ -15,8 +15,8 @@ typedef struct net_rule {
 	uint16_t port_max;
 } net_rule_t;
 
-// A guest port that LISTEN and UDP open on another address and port of
-// the host.
+// A port of the host whose TCP connections and datagrams go to a port of
+// the guest.
 typedef struct net_forward {
 	uint32_t host_addr;
 	uint16_t host_port;
@@ -27,7 +27,7 @@ typedef struct net_forward {
 // host forwards. Rules are matched in order and the last one that
 // matches decides; the defaults come first (net_policy_defaults): every
 // address but the host itself, private networks and other non-public
-// ones. LISTEN and what comes in are not filtered.
+// ones. What comes in through the forwards is not filtered.
 typedef struct net_policy {
 	net_rule_t rule[NET_RULE_MAX];
 	int rules;

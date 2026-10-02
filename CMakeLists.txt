@@ -121,7 +121,7 @@ if(WRM081632_SANITIZE)
         -fsanitize=${WRM081632_SANITIZE})
 endif()
 
-# the network card's sockets: Winsock on Windows; elsewhere they are in
+# the Ethernet card's network goes through the host's sockets: Winsock on Windows; elsewhere they are in
 # libc (on the web Emscripten turns them into WebSockets)
 if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32)
@@ -132,8 +132,8 @@ if(WIN32)
     target_link_libraries(${PROJECT_NAME} PRIVATE bcrypt)
 endif()
 
-# sqrtf and fmaf of the CPU's floating point (and miniaudio's resampler)
-# are in libm on Linux
+# the host side's float functions (and miniaudio's resampler) are in libm
+# on Linux; the CPU's floating point is softfloat.c
 find_library(WRM081632_LIBM m)
 if(WRM081632_LIBM)
     target_link_libraries(${PROJECT_NAME} PRIVATE ${WRM081632_LIBM})
@@ -182,12 +182,20 @@ if(EMSCRIPTEN)
             "Firmware for the web build is missing: ${WRM081632_WEB_FIRMWARE}")
     endif()
 
+    # The page (web/shell.html) keeps disk images in the browser's
+    # IndexedDB and starts the machine with them, so main runs when it
+    # says.
+    set(WRM081632_WEB_SHELL "${CMAKE_CURRENT_SOURCE_DIR}/web/shell.html")
     set_target_properties(${PROJECT_NAME} PROPERTIES SUFFIX ".html")
     set_property(TARGET ${PROJECT_NAME} APPEND PROPERTY LINK_DEPENDS
-        "${WRM081632_WEB_FIRMWARE}")
+        "${WRM081632_WEB_FIRMWARE}" "${WRM081632_WEB_SHELL}")
 
     target_link_options(${PROJECT_NAME} PRIVATE
         "SHELL:--preload-file \"${WRM081632_WEB_FIRMWARE}@/firmware.rom\""
+        "SHELL:--shell-file \"${WRM081632_WEB_SHELL}\""
+        "-lidbfs.js"
+        "-sINVOKE_RUN=0"
+        "-sEXPORTED_RUNTIME_METHODS=FS,callMain,ccall"
         "-sALLOW_MEMORY_GROWTH=1" # ROM alone is 32MB
     )
 endif()

@@ -77,7 +77,7 @@ typedef struct share_handle {
 } share_handle_t;
 
 // Shared folder: a host directory the guest uses file by file, with the
-// file system in the device, as the network card has TCP/IP. Commands run
+// file system in the device, not in the guest. Commands run
 // at once, in the tick of the store to COMMAND, and move data by DMA (RAM
 // or ROM to read from, RAM to write to). Paths are relative to the folder
 // and can't leave it. There is no IRQ.

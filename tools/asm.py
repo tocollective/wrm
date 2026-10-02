@@ -20,7 +20,8 @@ syntax:
              ra (= r31)
   control registers: status, epc, ivec, scratch, cause, badaddr, ptbr,
                      cycle, cycleh, instret, instreth, cpuid (read-only),
-                     taddr0, tctrl0, taddr1, tctrl1, cr0-cr15 or a number
+                     taddr0, tctrl0, taddr1, tctrl1, hartid (read-only),
+                     fcsr, cr0-cr17 or a number
 
   expressions: C operators | ^ & << >> + - * / % ~ and parentheses,
     numbers 42 0x2A 0b101010 0o52 'c', $ = address of the current line,
@@ -40,6 +41,7 @@ syntax:
     TLBI rs1                  LL rd, (rs1)           SC rd, rs2, (rs1)
     TLBI.ASID rs1             TLBI.ALL
     FADD rd, rs1, rs2         FSQRT rd, rs1           ITOF rd, rs1
+    CLZ rd, rs1               ROR rd, rs1, rs2        RORI rd, rs1, imm
   branch and JAL targets are addresses (labels), not offsets.
   float values (fli, .float): 1.5 -2e-3 inf nan, or an integer expression
 
@@ -213,11 +215,11 @@ def check_range(v, lo, hi, what):
 REGS = {f"r{i}": i for i in range(32)}
 REGS.update(zero=0, tp=28, fp=29, sp=30, ra=31)  # roles from docs/ABI.md
 
-CREGS = {f"cr{i}": i for i in range(16)}
+CREGS = {f"cr{i}": i for i in range(18)}
 CREGS.update(status=0, epc=1, ivec=2, scratch=3, cause=4, badaddr=5, ptbr=6,
              cycle=7, cycleh=8, instret=9, instreth=10, cpuid=11,
-             taddr0=12, tctrl0=13, taddr1=14, tctrl1=15)
-CREGS_READONLY = {7, 8, 9, 10, 11}  # MTCR to them is an illegal instruction
+             taddr0=12, tctrl0=13, taddr1=14, tctrl1=15, hartid=16, fcsr=17)
+CREGS_READONLY = {7, 8, 9, 10, 11, 16}  # MTCR to them is an illegal instruction
 TLBI_PAGE, TLBI_ASID, TLBI_ALL = 0, 1, 2  # TLBI modes, in imm14
 
 
@@ -762,6 +764,14 @@ def define_instructions():
 	for name, op in (("fclass", 0x83), ("ftoi", 0x84), ("ftou", 0x85), ("itof", 0x86),
 					 ("utof", 0x87)):
 		ins[name] = (4, fmt_r1(op))
+
+	for name, op in (("clz", 0x90), ("ctz", 0x91), ("popcnt", 0x92), ("bswap", 0x93),
+					 ("sext.b", 0x94), ("sext.h", 0x95)):
+		ins[name] = (4, fmt_r1(op))
+	for name, op in (("rol", 0x96), ("ror", 0x97), ("min", 0x99), ("max", 0x9A),
+					 ("minu", 0x9B), ("maxu", 0x9C)):
+		ins[name] = (4, fmt_r(op))
+	ins["rori"] = (4, fmt_alu_i(0x98, "shift"))
 
 	# pseudo-instructions
 	ins["li"] = (size_li, enc_li)

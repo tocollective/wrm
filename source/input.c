@@ -116,6 +116,13 @@ static void input_parse_event(input_parser_t* parser, input_event_t* event) {
 		event->kind = INPUT_MOUSE;
 		event->a = (int32_t)input_number(parser, "invalid motion");
 		event->b = (int32_t)input_number(parser, "invalid motion");
+	} else if (strcmp(kind, "point") == 0) {
+		event->kind = INPUT_POINT;
+		event->a = (int32_t)input_number(parser, "invalid position");
+		event->b = (int32_t)input_number(parser, "invalid position");
+		if (event->a < 0 || event->a > 0xFFFF || event->b < 0
+			|| event->b > 0xFFFF)
+			input_fail(parser, "invalid position");
 	} else if (strcmp(kind, "button") == 0) {
 		char name[16];
 		input_word(parser, name, sizeof(name));
@@ -215,6 +222,9 @@ static void input_apply(const input_event_t* event, motherboard_t* mb) {
 			break;
 		case INPUT_MOUSE:
 			mouse_move(mb->mouse, event->a, event->b);
+			break;
+		case INPUT_POINT:
+			mouse_point(mb->mouse, (uint32_t)event->a, (uint32_t)event->b);
 			break;
 		case INPUT_BUTTON:
 			mouse_button(mb->mouse, (uint32_t)event->a, event->b != 0);

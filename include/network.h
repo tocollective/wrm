@@ -4,8 +4,8 @@
 
 // The host's network: non-blocking IPv4 sockets over BSD sockets or
 // Winsock (network.c), or in a browser WebSockets to the network proxy
-// on the host (network_web.c, tools/netproxy.py). The network card polls
-// them from the main loop, so nothing here waits.
+// on the host (network_web.c, tools/netproxy.py). The Ethernet card's
+// network (nat.c) polls them from the main loop, so nothing here waits.
 // Addresses are host-order words, 127.0.0.1 = 0x7F000001.
 
 // A host socket: an int, a Winsock SOCKET, which is pointer-sized, or in
@@ -40,6 +40,15 @@ network_socket_t network_accept(const network_socket_t socket, uint32_t* addr,
 								uint16_t* port);
 // UDP socket on local_addr:port, port 0 = any
 network_socket_t network_udp(const uint32_t local_addr, const uint16_t port);
+// ICMP echo socket that needs no privileges (a datagram socket of ICMP, on
+// macOS and on Linux where ping_group_range allows it), NETWORK_NO_SOCKET
+// if the host has none. network_send_to sends an echo request (the port is
+// unused, the host may change the identifier); network_receive_from gets
+// the reply, after its IP header on some hosts.
+network_socket_t network_icmp(void);
+// Ends a TCP connection's sending side: the other end reads an end of
+// file and can still send. In a browser it does nothing.
+void network_shutdown(const network_socket_t socket);
 void network_close(const network_socket_t socket);
 // the local port of a socket, 0 if unknown
 uint16_t network_local_port(const network_socket_t socket);

@@ -91,33 +91,26 @@ type MouseRegs {
     control: UWord,
 }
 
-type NetRegs {
-    status:     UWord,      // 0x00
-    pending:    UWord,      // sockets (bits 0-7) and DNS (bit 8) raising the IRQ
-    sockets:    UWord,
-    reserved:   UWord,
-    dnsCommand: UWord,      // 0x10
-    dnsStatus:  UWord,
-    dnsControl: UWord,
-    dnsName:    UWord,      // address of a zero-terminated host name
-    dnsResult:  UWord,      // 0x20: IPv4, 0 if the lookup failed
+type EthRegs {
+    status:  UWord,         // 0x00
+    control: UWord,
+    pending: UWord,         // writing 1 to a bit clears it
+    macLo:   UWord,         // bytes 0-3 of the MAC address, byte 0 in bits 7:0
+    macHi:   UWord,         // 0x10: bytes 4-5
+    rxRing:  UWord,         // the receive ring, set while the card is off
+    rxSize:  UWord,         // its descriptors
+    rxNext:  UWord,         // the descriptor the next frame goes in
+    txRing:  UWord,         // 0x20: the send ring, set while the card is off
+    txSize:  UWord,
+    txNext:  UWord,         // the descriptor sent next
+    txKick:  UWord,         // any value: send what software has handed over
 }
 
-/// A socket of the network card: netSocket[n] is socket n.
-type NetSocketRegs {
-    state:     UWord,       // 0x00
-    command:   UWord,
-    error:     UWord,
-    events:    UWord,       // writing 1 to a bit clears it
-    irqMask:   UWord,       // 0x10
-    localPort: UWord,
-    peerAddr:  UWord,       // IPv4, 127.0.0.1 = 0x7F00_0001
-    peerPort:  UWord,
-    address:   UWord,       // 0x20: of the next byte to move
-    count:     UWord,       // bytes left to move
-    rxSize:    UWord,
-    txFree:    UWord,
-    reserved:  UWord[4],    // 0x30, the next socket at 0x40
+/// A descriptor of the Ethernet card's rings, in RAM: the card owns it
+/// while OWN is set in word.
+type EthDesc {
+    buffer: UWord,          // physical address of the frame's bytes
+    word:   UWord,          // length | ETH_DESC_ERROR | ETH_DESC_OWN
 }
 
 type AudioRegs {
@@ -161,8 +154,7 @@ let video: *volatile mut VideoRegs = 0xFD00_7000 as *volatile mut VideoRegs
 let floppy: *volatile mut DiskRegs = 0xFD00_8000 as *volatile mut DiskRegs
 let beeper: *volatile mut BeeperRegs = 0xFD00_9000 as *volatile mut BeeperRegs
 let mouse: *volatile mut MouseRegs = 0xFD00_A000 as *volatile mut MouseRegs
-let net: *volatile mut NetRegs = 0xFD00_B000 as *volatile mut NetRegs
-let netSocket: *volatile mut NetSocketRegs = 0xFD00_B100 as *volatile mut NetSocketRegs
+let eth: *volatile mut EthRegs = 0xFD00_B000 as *volatile mut EthRegs
 let audio: *volatile mut AudioRegs = 0xFD00_C000 as *volatile mut AudioRegs
 let audioVoice: *volatile mut AudioVoiceRegs = 0xFD00_C100 as *volatile mut AudioVoiceRegs
 let rtc: *volatile mut RtcRegs = 0xFD00_D000 as *volatile mut RtcRegs
@@ -174,7 +166,7 @@ let IRQ_KBD: UWord = 0
 let IRQ_UART: UWord = 1
 let IRQ_TIMER: UWord = 2
 let IRQ_MOUSE: UWord = 7
-let IRQ_NET: UWord = 8
+let IRQ_ETH: UWord = 8
 let IRQ_AUDIO: UWord = 9
 let IRQ_RTC: UWord = 10
 let IRQ_POWER: UWord = 11
@@ -229,28 +221,11 @@ let MOUSE_LEFT: UWord = 1 << 0         // buttons of an event
 let MOUSE_RIGHT: UWord = 1 << 1
 let MOUSE_MIDDLE: UWord = 1 << 2
 
-let NET_LINK: UWord = 1 << 0           // STATUS
-let NET_DNS_LOOKUP: UWord = 1          // DNS_COMMAND
-let NET_DNS_BUSY: UWord = 1 << 0       // DNS_STATUS
-let NET_DNS_DONE: UWord = 1 << 1
-let NET_CLOSED: UWord = 0              // socket states
-let NET_CONNECTING: UWord = 1
-let NET_LISTENING: UWord = 2
-let NET_CONNECTED: UWord = 3
-let NET_PEER_CLOSED: UWord = 4
-let NET_UDP_OPEN: UWord = 5
-let NET_CONNECT: UWord = 1             // socket commands
-let NET_LISTEN: UWord = 2
-let NET_UDP: UWord = 3
-let NET_SEND: UWord = 4
-let NET_RECEIVE: UWord = 5
-let NET_CLOSE: UWord = 6
-let NET_EV_CONNECTED: UWord = 1 << 0   // socket events
-let NET_EV_CLOSED: UWord = 1 << 1
-let NET_EV_RECEIVED: UWord = 1 << 2
-let NET_EV_SENT: UWord = 1 << 3
-let NET_ERR_STATE: UWord = 2           // socket errors
-let NET_ERR_NETWORK: UWord = 6
+let ETH_LINK: UWord = 1 << 0           // STATUS
+let ETH_ENABLE: UWord = 1 << 0         // CONTROL
+let ETH_DESC_LENGTH: UWord = 0xFFFF    // descriptor word
+let ETH_DESC_ERROR: UWord = 1 << 30
+let ETH_DESC_OWN: UWord = 1 << 31
 
 let VOICE_ON: UWord = 1 << 0           // voice CONTROL
 let VOICE_LOOP: UWord = 1 << 1
@@ -341,11 +316,11 @@ let HID_ESCAPE: UWord = 0x29
 
 export {
     PicRegs, KbdRegs, UartRegs, TimerRegs, PowerRegs, DiskRegs, VideoRegs, BeeperRegs,
-    MouseRegs, NetRegs, NetSocketRegs, AudioRegs, AudioVoiceRegs, RtcRegs,
+    MouseRegs, EthRegs, EthDesc, AudioRegs, AudioVoiceRegs, RtcRegs,
     pic, kbd, uart, timer, power, disk0, video, floppy, beeper,
-    mouse, net, netSocket, audio, audioVoice, rtc,
+    mouse, eth, audio, audioVoice, rtc,
     PIC_BASE, ROM_BASE,
-    IRQ_KBD, IRQ_UART, IRQ_TIMER, IRQ_MOUSE, IRQ_NET, IRQ_AUDIO, IRQ_RTC, IRQ_POWER, IO_ID,
+    IRQ_KBD, IRQ_UART, IRQ_TIMER, IRQ_MOUSE, IRQ_ETH, IRQ_AUDIO, IRQ_RTC, IRQ_POWER, IO_ID,
     KBD_READY, KBD_OVERFLOW, KBD_FLUSH,
     UART_RX_READY, UART_TX_READY, UART_FLUSH, HOST_ESCAPE,
     TIMER_ENABLE, TIMER_PERIODIC, TIMER_EXPIRED,
@@ -355,10 +330,7 @@ export {
     VIDEO_FILL, VIDEO_COPY, VIDEO_EXPAND, VIDEO_LOAD, VIDEO_TRANSPARENT, VIDEO_MEMORY, VRAM_SIZE,
     BEEPER_ON,
     MOUSE_READY, MOUSE_OVERFLOW, MOUSE_FLUSH, MOUSE_ENABLE, MOUSE_LEFT, MOUSE_RIGHT, MOUSE_MIDDLE,
-    NET_LINK, NET_DNS_LOOKUP, NET_DNS_BUSY, NET_DNS_DONE,
-    NET_CLOSED, NET_CONNECTING, NET_LISTENING, NET_CONNECTED, NET_PEER_CLOSED, NET_UDP_OPEN,
-    NET_CONNECT, NET_LISTEN, NET_UDP, NET_SEND, NET_RECEIVE, NET_CLOSE,
-    NET_EV_CONNECTED, NET_EV_CLOSED, NET_EV_RECEIVED, NET_EV_SENT, NET_ERR_STATE, NET_ERR_NETWORK,
+    ETH_LINK, ETH_ENABLE, ETH_DESC_LENGTH, ETH_DESC_ERROR, ETH_DESC_OWN,
     VOICE_ON, VOICE_LOOP, VOICE_16BIT, VOICE_STEREO, VOICE_SIGNAL_END, VOICE_SIGNAL_HALF,
     AUDIO_VOICES,
     RTC_ARMED, RTC_ALARM,

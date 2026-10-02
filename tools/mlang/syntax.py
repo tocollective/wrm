@@ -69,6 +69,7 @@ FieldInit = node("FieldInit", "name value")
 ArrayLit = node("ArrayLit", "elems")
 TypeQuery = node("TypeQuery", "op type field")          # sizeof alignof offsetof
 BuiltinCall = node("BuiltinCall", "name args")
+FuncLit = node("FuncLit", "params result body")      # (a: A): R { ... }; also 'let mut f()'
 
 
 def dump(n, indent=0):

@@ -34,6 +34,15 @@ Floating point is IEEE 754. `float` (binary32) arithmetic is done by the
 general purpose registers; `double` (binary64) is done in software. Float
 values are passed and stored like integers of the same size.
 
+`FCSR` is the floating-point environment of `<fenv.h>`: its rounding mode
+is preserved across calls (a function that changes it puts it back,
+unless changing it is what the function is for, like `fesetround`), its
+exception flags aren't. It belongs to the thread: the kernel saves and
+restores it with the user's registers when it switches threads, and a
+signal handler starts with the rounding mode to nearest. The software
+`double` routines read the rounding mode from `FCSR` and set its flags
+like the instructions do, so `<fenv.h>` covers both types.
+
 ## Registers
 
 | Register  | Assembler | Role                                  | Preserved by the callee |

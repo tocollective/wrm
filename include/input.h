@@ -12,7 +12,8 @@
 //   TICK uart TEXT                bytes for the UART: the rest of the line,
 //                                 with \n, \r, \t, \\ and \xNN escapes
 //                                 ('#' is \x23, a space at the end \x20)
-//   TICK mouse DX DY              mouse motion
+//   TICK mouse DX DY              mouse motion (relative mode)
+//   TICK point X Y                where the pointer is (absolute mode)
 //   TICK button left|right|middle down|up
 //   TICK wheel STEPS
 //   TICK power                    the power button: asks to power off
@@ -21,12 +22,13 @@
 // comes, before the next tick runs; +N means N ticks after the event
 // before it. Events must come in order. Like the host's input, they reach
 // the devices as they are: a full FIFO drops them, a disabled mouse
-// ignores them.
+// ignores them, and so does a mouse in the other mode.
 
 typedef enum input_kind {
 	INPUT_KEY,
 	INPUT_UART,
 	INPUT_MOUSE,
+	INPUT_POINT,
 	INPUT_BUTTON,
 	INPUT_WHEEL,
 	INPUT_POWER,
@@ -35,8 +37,8 @@ typedef enum input_kind {
 typedef struct input_event {
 	uint64_t tick;
 	input_kind_t kind;
-	int32_t a, b; // key: usage, down; mouse: dx, dy; button: bit, down;
-				  // wheel: steps
+	int32_t a, b; // key: usage, down; mouse: dx, dy; point: x, y;
+				  // button: bit, down; wheel: steps
 	char* text; // uart: the bytes, length in a
 } input_event_t;
 

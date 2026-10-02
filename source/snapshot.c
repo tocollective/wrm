@@ -105,18 +105,6 @@ static void snap_tag(snapshot_stream_t* s, const char* tag) {
 	if (s->load && memcmp(bytes, tag, 4) != 0) s->failed = true;
 }
 
-// A buffer whose used part is saved: *used bytes of capacity.
-static void snap_buffer(snapshot_stream_t* s, uint8_t* buffer, uint32_t* used,
-						const uint32_t capacity) {
-	snap_u32(s, used);
-	if (*used > capacity) {
-		s->failed = true;
-		*used = 0;
-		return;
-	}
-	snap_bytes(s, buffer, *used);
-}
-
 // ---- the CPU ----------------------------------------------------------------
 
 static void snap_latch(snapshot_stream_t* s, cpu_latch_t* latch,
@@ -130,6 +118,7 @@ static void snap_latch(snapshot_stream_t* s, cpu_latch_t* latch,
 	snap_u32(s, &latch->result);
 	snap_u8(s, &latch->fault);
 	snap_u32(s, &latch->fault_value);
+	snap_u8(s, &latch->fflags);
 	// decoding is a function of the word; IF/ID only has the word
 	if (s->load) {
 		const uint32_t raw = latch->in.raw;
@@ -343,6 +332,10 @@ static void snap_video(snapshot_stream_t* s, videocard_t* v) {
 	snap_u32(s, &v->line_fetched);
 	snap_u32(s, &v->line_bit);
 	snap_bytes(s, v->line_buffer, sizeof(v->line_buffer));
+	snap_u32(s, &v->cursor_control);
+	snap_u32(s, &v->cursor_base);
+	snap_u32(s, &v->cursor_xy);
+	snap_u32(s, &v->cursor_hot);
 	snap_bytes(s, v->vram, VIDEO_VRAM_SIZE);
 	if (v->ticks >= v->ticks_per_frame || v->line_bytes > sizeof(v->line_buffer)
 		|| v->line_fetched > v->line_bytes)
@@ -361,40 +354,18 @@ static void snap_beeper(snapshot_stream_t* s, beeper_t* beeper) {
 static void snap_mouse(snapshot_stream_t* s, mouse_t* mouse) {
 	snap_tag(s, "MOUS");
 	snap_bool(s, &mouse->enabled);
+	snap_bool(s, &mouse->absolute);
 	snap_u32(s, &mouse->buttons);
+	snap_u32(s, &mouse->position);
 	snap_u32s(s, mouse->fifo, MOUSE_FIFO_SIZE);
+	snap_u32s(s, mouse->fifo_position, MOUSE_FIFO_SIZE);
+	snap_u32(s, &mouse->popped_position);
 	snap_u8(s, &mouse->head);
 	snap_u8(s, &mouse->count);
 	snap_bool(s, &mouse->overflow);
 	snap_bool(s, &mouse->tail_motion);
 	if (mouse->head >= MOUSE_FIFO_SIZE || mouse->count > MOUSE_FIFO_SIZE)
 		s->failed = true;
-}
-
-static void snap_netcard(snapshot_stream_t* s, netcard_t* net) {
-	snap_tag(s, "NET ");
-	// the host's sockets of the running machine go first
-	if (s->load) netcard_disconnect(net);
-	for (int i = 0; i < NET_SOCKET_COUNT; i++) {
-		net_socket_t* socket = &net->socket[i];
-		snap_u32(s, &socket->state);
-		snap_u32(s, &socket->error);
-		snap_u32(s, &socket->events);
-		snap_u32(s, &socket->irq_mask);
-		snap_u32(s, &socket->local_port);
-		snap_u32(s, &socket->peer_addr);
-		snap_u32(s, &socket->peer_port);
-		snap_u32(s, &socket->address);
-		snap_u32(s, &socket->count);
-		snap_buffer(s, socket->rx, &socket->rx_size, NET_BUFFER_SIZE);
-		snap_buffer(s, socket->tx, &socket->tx_size, NET_BUFFER_SIZE);
-	}
-	snap_u32(s, &net->dns_status);
-	snap_u32(s, &net->dns_control);
-	snap_u32(s, &net->dns_name);
-	snap_u32(s, &net->dns_result);
-	// ... and those of the saved one can't come back
-	if (s->load && !s->failed) netcard_disconnect(net);
 }
 
 static void snap_audio(snapshot_stream_t* s, audiocard_t* card) {
@@ -454,6 +425,34 @@ static void snap_share(snapshot_stream_t* s, share_t* share) {
 	snap_u64(s, &share->position);
 	snap_u32(s, &share->flags);
 	snap_u32(s, &share->result);
+}
+
+// The connections of the network behind the card can't be saved: a loaded
+// machine finds them gone, as after the network went down a while.
+static void snap_ethcard(snapshot_stream_t* s, ethcard_t* eth) {
+	snap_tag(s, "ETH ");
+	snap_u32(s, &eth->control);
+	snap_u32(s, &eth->pending);
+	snap_u32(s, &eth->rx_ring);
+	snap_u32(s, &eth->rx_size);
+	snap_u32(s, &eth->rx_next);
+	snap_u32(s, &eth->tx_ring);
+	snap_u32(s, &eth->tx_size);
+	snap_u32(s, &eth->tx_next);
+	if (eth->rx_size > ETH_RING_MAX || eth->tx_size > ETH_RING_MAX)
+		s->failed = true;
+	if (s->load && !s->failed) ethcard_disconnect(eth);
+}
+
+static void snap_watchdog(snapshot_stream_t* s, watchdog_t* watchdog) {
+	snap_tag(s, "WDOG");
+	snap_u32(s, &watchdog->control);
+	snap_u32(s, &watchdog->timeout);
+	snap_u32(s, &watchdog->grace);
+	snap_u32(s, &watchdog->value);
+	snap_bool(s, &watchdog->barked);
+	snap_bool(s, &watchdog->bark);
+	snap_bool(s, &watchdog->bitten);
 }
 
 // ---- the machine --------------------------------------------------------------
@@ -535,11 +534,12 @@ static void snap_machine(snapshot_stream_t* s, machine_t* machine) {
 	snap_disk(s, mb->floppy, "floppy");
 	snap_beeper(s, mb->beeper);
 	snap_mouse(s, mb->mouse);
-	snap_netcard(s, mb->netcard);
+	snap_ethcard(s, mb->ethcard);
 	snap_audio(s, mb->audiocard);
 	snap_rtc(s, mb->rtc);
 	snap_rng(s, mb->rng);
 	snap_share(s, mb->share);
+	snap_watchdog(s, mb->watchdog);
 	snap_tag(s, "END ");
 }
 

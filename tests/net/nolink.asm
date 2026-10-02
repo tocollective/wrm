@@ -1,178 +1,74 @@
 ; ============================================================================
-;  Network card with --no-net: the link is down, so every command fails
-;  with error 4 and a DNS lookup fails at once; the registers still work
+;  Ethernet card with --no-net: the link is down; frames are still sent
+;  (into nothing) and nothing comes back
 ; ============================================================================
 ; @args --no-net
 
 	.include "../common/harness.asm"
 
-SOCKET0         = NET + NET_SOCKET0
-SOCKET7         = NET + NET_SOCKET0 + 7 * NET_SOCKET_SIZE
+RX_RING         = 0x1000            ; reached as offset(r0)
+TX_RING         = 0x1010
+RX_BUF          = 0x1800
+WAIT            = 2000000           ; ticks: many polls of the network
 
 test_main:
-	li r10, NET
-	li r11, SOCKET0
+	li r10, ETH
 
-	; ---- reset state
 	li r28, 1
-	lw r4, NET_STATUS(r10)          ; no link, so nothing works
+	lw r4, ETH_STATUS(r10)
 	bnez r4, fail
-	lw r4, NET_PENDING(r10)
-	bnez r4, fail
-	lw r4, NET_SOCKETS(r10)
-	li r3, 8
-	bne r4, r3, fail
+
+	; ---- one descriptor each way
+	li r1, RX_BUF
+	sw r1, RX_RING(r0)
+	li r1, ETH_DESC_OWN | 0x600
+	sw r1, RX_RING + 4(r0)
+	la r1, frame
+	sw r1, TX_RING(r0)
+	li r1, ETH_DESC_OWN | 60
+	sw r1, TX_RING + 4(r0)
+	li r1, RX_RING
+	sw r1, ETH_RX_RING(r10)
+	li r1, TX_RING
+	sw r1, ETH_TX_RING(r10)
+	li r1, 1
+	sw r1, ETH_RX_SIZE(r10)
+	sw r1, ETH_TX_SIZE(r10)
+	li r1, ETH_ENABLE
+	sw r1, ETH_CONTROL(r10)
+
+	; ---- the frame is sent
 	li r28, 2
-	lw r4, NET_DNS_STATUS(r10)
-	bnez r4, fail
-	lw r4, NET_DNS_RESULT(r10)
-	bnez r4, fail
+	sw r0, ETH_TX_KICK(r10)
+	lw r4, TX_RING + 4(r0)
+	li r3, 60
+	bne r4, r3, fail
 	li r28, 3
-	lw r4, SOCK_STATE(r11)
-	li r3, SOCK_CLOSED
+	lw r4, ETH_PENDING(r10)
+	li r3, ETH_TX
 	bne r4, r3, fail
-	lw r4, SOCK_ERROR(r11)
+	lw r4, ETH_TX_NEXT(r10)         ; round the ring of one
 	bnez r4, fail
-	lw r4, SOCK_EVENTS(r11)
-	bnez r4, fail
-	lw r4, SOCK_RX_SIZE(r11)
-	bnez r4, fail
-	lw r4, SOCK_TX_FREE(r11)
-	li r3, NET_BUFFER_SIZE
-	bne r4, r3, fail
 
-	; ---- registers keep their bits only
+	; ---- and nothing comes in
 	li r28, 4
-	li r1, 0x12345
-	sw r1, SOCK_LOCAL_PORT(r11)
-	lw r4, SOCK_LOCAL_PORT(r11)
-	li r3, 0x2345                   ; ports are 16 bits
+	li r5, TIMER
+.wait:
+	lw r4, TIMER_COUNT_LO(r5)
+	li r3, WAIT
+	bltu r4, r3, .wait
+	lw r4, RX_RING + 4(r0)
+	li r3, ETH_DESC_OWN | 0x600
 	bne r4, r3, fail
-	sw r1, SOCK_PEER_PORT(r11)
-	lw r4, SOCK_PEER_PORT(r11)
+	lw r4, ETH_PENDING(r10)
+	li r3, ETH_TX
 	bne r4, r3, fail
-	li r28, 5
-	li r1, -1
-	sw r1, SOCK_IRQ_MASK(r11)
-	lw r4, SOCK_IRQ_MASK(r11)
-	li r3, SOCK_EV_CONNECTED | SOCK_EV_CLOSED | SOCK_EV_RECEIVED | SOCK_EV_SENT
-	bne r4, r3, fail
-	li r28, 6
-	li r1, LOCALHOST
-	sw r1, SOCK_PEER_ADDR(r11)
-	lw r4, SOCK_PEER_ADDR(r11)
-	bne r4, r1, fail
-	li r28, 7                       ; read-only registers ignore writes
-	li r1, -1
-	sw r1, SOCK_STATE(r11)
-	sw r1, SOCK_RX_SIZE(r11)
-	sw r1, NET_STATUS(r10)
-	sw r1, NET_SOCKETS(r10)
-	lw r4, SOCK_STATE(r11)
-	bnez r4, fail
-	lw r4, SOCK_RX_SIZE(r11)
-	bnez r4, fail
-	lw r4, NET_STATUS(r10)
-	bnez r4, fail
-	li r28, 8                       ; the last socket's registers
-	li r12, SOCKET7
-	li r1, 0xC0A80001               ; 192.168.0.1
-	sw r1, SOCK_PEER_ADDR(r12)
-	lw r4, SOCK_PEER_ADDR(r12)
-	bne r4, r1, fail
-	lw r4, SOCK_PEER_ADDR(r11)      ; socket 0 keeps its own
-	li r3, LOCALHOST
-	bne r4, r3, fail
-
-	; ---- commands: unknown ones fail with 1, the rest with 4
-	li r28, 10
-	li r1, 7
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_ERROR(r11)
-	li r3, NET_ERR_COMMAND
-	bne r4, r3, fail
-	li r28, 11
-	sw r0, SOCK_COMMAND(r11)
-	lw r4, SOCK_ERROR(r11)
-	bne r4, r3, fail
-	li r28, 12
-	li r1, NET_CONNECT
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_ERROR(r11)
-	li r3, NET_ERR_LINK
-	bne r4, r3, fail
-	lw r4, SOCK_STATE(r11)
-	bnez r4, fail
-	li r28, 13
-	li r1, NET_LISTEN
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_ERROR(r11)
-	bne r4, r3, fail
-	li r1, NET_UDP
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_ERROR(r11)
-	bne r4, r3, fail
-	li r1, NET_SEND
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_ERROR(r11)
-	bne r4, r3, fail
-	li r1, NET_RECEIVE
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_ERROR(r11)
-	bne r4, r3, fail
-	li r28, 14                      ; CLOSE always works, and clears ERROR
-	li r1, NET_CLOSE
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_ERROR(r11)
-	bnez r4, fail
-	lw r4, SOCK_STATE(r11)
-	bnez r4, fail
-	lw r4, SOCK_COMMAND(r11)        ; write-only
-	bnez r4, fail
-
-	; ---- a DNS lookup fails at once
-	li r28, 20
-	la r1, s_name
-	sw r1, NET_DNS_NAME(r10)
-	lw r4, NET_DNS_NAME(r10)
-	bne r4, r1, fail
-	li r1, NET_DNS_LOOKUP
-	sw r1, NET_DNS_COMMAND(r10)
-	lw r4, NET_DNS_STATUS(r10)
-	li r3, NET_DNS_DONE | NET_DNS_FAILED
-	bne r4, r3, fail
-	lw r4, NET_DNS_RESULT(r10)
-	bnez r4, fail
-	li r28, 21                      ; DONE alone doesn't raise the line
-	lw r4, NET_PENDING(r10)
-	bnez r4, fail
-	li r28, 22                      ; with the IRQ on, it does
-	li r1, NET_DNS_IRQ
-	sw r1, NET_DNS_CONTROL(r10)
-	lw r4, NET_DNS_CONTROL(r10)
-	bne r4, r1, fail
-	lw r4, NET_PENDING(r10)
-	li r3, NET_PENDING_DNS
-	bne r4, r3, fail
-	li r1, PIC
-	lw r4, PIC_PENDING(r1)
-	li r3, 1 << IRQ_NET
-	and r4, r4, r3
-	beqz r4, fail
-	li r28, 23                      ; writing 1 to DONE clears it
-	li r1, NET_DNS_DONE
-	sw r1, NET_DNS_STATUS(r10)
-	lw r4, NET_DNS_STATUS(r10)
-	li r3, NET_DNS_FAILED
-	bne r4, r3, fail
-	lw r4, NET_PENDING(r10)
-	bnez r4, fail
-	li r1, PIC
-	lw r4, PIC_PENDING(r1)
-	li r3, 1 << IRQ_NET
-	and r4, r4, r3
-	bnez r4, fail
 
 	j pass
 
-s_name:         .asciz "localhost"
+frame:                              ; an ARP request for 10.0.2.2, padded
+	.db 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x52, 0x54, 0x00, 0x12, 0x34, 0x56
+	.db 0x08, 0x06, 0x00, 0x01, 0x08, 0x00, 0x06, 0x04, 0x00, 0x01
+	.db 0x52, 0x54, 0x00, 0x12, 0x34, 0x56, 0x0A, 0x00, 0x02, 0x0F
+	.db 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x02, 0x02
+	.db 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0

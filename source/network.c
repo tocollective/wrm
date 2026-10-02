@@ -48,9 +48,13 @@ typedef int native_socket_t;
 #define NETWORK_SEND_FLAGS 0
 #endif
 
-bool network_can_listen(void) { return true; }
+bool network_can_listen(void) {
+	return true;
+}
 
-bool network_can_udp(void) { return true; }
+bool network_can_udp(void) {
+	return true;
+}
 
 bool network_init(void) {
 #ifdef _WIN32
@@ -218,6 +222,23 @@ network_socket_t network_udp(const uint32_t local_addr, const uint16_t port) {
 	return network_bound(SOCK_DGRAM, local_addr, port);
 }
 
+network_socket_t network_icmp(void) {
+#ifdef _WIN32
+	return NETWORK_NO_SOCKET; // only IcmpSendEcho, which blocks
+#else
+	return network_adopt(socket(AF_INET, SOCK_DGRAM, IPPROTO_ICMP));
+#endif
+}
+
+void network_shutdown(const network_socket_t s) {
+	if (s == NETWORK_NO_SOCKET) return;
+#ifdef _WIN32
+	shutdown(NATIVE(s), SD_SEND);
+#else
+	shutdown(NATIVE(s), SHUT_WR);
+#endif
+}
+
 void network_close(const network_socket_t s) {
 	if (s == NETWORK_NO_SOCKET) return;
 	network_close_native(NATIVE(s));
@@ -241,7 +262,7 @@ static long network_result(const long result) {
 long network_send(const network_socket_t s, const void* data,
 				  const size_t size) {
 	return network_result((long)send(
-			NATIVE(s), (const char*)data, (int)size, NETWORK_SEND_FLAGS));
+		NATIVE(s), (const char*)data, (int)size, NETWORK_SEND_FLAGS));
 }
 
 long network_receive(const network_socket_t s, void* buffer,

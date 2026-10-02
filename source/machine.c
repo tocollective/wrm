@@ -30,6 +30,13 @@ void machine_destroy(machine_t* machine) {
 	machine = NULL;
 }
 
+// The Ethernet card's network keeps its timers in milliseconds of machine
+// time.
+static void machine_poll_network(machine_t* machine) {
+	motherboard_t* mb = machine->motherboard;
+	ethcard_poll(mb->ethcard, mb->tick * 1000 / mb->clock->rate);
+}
+
 uint64_t machine_run(machine_t* machine, const uint64_t ticks) {
 	if (!machine) return 0;
 	motherboard_t* mb = machine->motherboard;
@@ -46,12 +53,12 @@ uint64_t machine_run(machine_t* machine, const uint64_t ticks) {
 
 		machine->ticks += motherboard_run(mb, until - machine->ticks);
 		if (machine->deterministic && machine->ticks == machine->next_poll) {
-			netcard_poll(mb->netcard);
+			machine_poll_network(machine);
 			machine->next_poll += machine->net_period;
 		}
 	}
 	// the host's network moves between batches of ticks, not every tick
-	if (!machine->deterministic) netcard_poll(mb->netcard);
+	if (!machine->deterministic) machine_poll_network(machine);
 	return machine->ticks - start;
 }
 

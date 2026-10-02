@@ -16,10 +16,11 @@
 #include <string.h>
 
 // The JavaScript side keeps sockets and lookups in tables of the page,
-// numbered from 1; their events land there between frames, and the card
-// polls them.
+// numbered from 1; their events land there between frames, and the
+// Ethernet card's network polls them.
 
 EM_JS(void, web_net_init, (void), {
+	if (globalThis.wrmNet) return; // started once per page
 	var proxy = new URLSearchParams(location.search).get("netproxy");
 	globalThis.wrmNet = {
 		proxy: proxy || "127.0.0.1:8080",
@@ -200,6 +201,14 @@ network_socket_t network_udp(const uint32_t local_addr, const uint16_t port) {
 	(void)local_addr;
 	(void)port;
 	return NETWORK_NO_SOCKET;
+}
+
+network_socket_t network_icmp(void) {
+	return NETWORK_NO_SOCKET;
+}
+
+void network_shutdown(const network_socket_t socket) {
+	(void)socket; // a WebSocket can't be half closed
 }
 
 void network_close(const network_socket_t socket) {

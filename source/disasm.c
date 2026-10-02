@@ -43,6 +43,12 @@ static const char* const disasm_mnemonics[256] = {
 	[CPU_OP_FCLASS] = "fclass",
 	[CPU_OP_FTOI] = "ftoi",   [CPU_OP_FTOU] = "ftou",   [CPU_OP_ITOF] = "itof",
 	[CPU_OP_UTOF] = "utof",
+
+	[CPU_OP_CLZ] = "clz",     [CPU_OP_CTZ] = "ctz",     [CPU_OP_POPCNT] = "popcnt",
+	[CPU_OP_BSWAP] = "bswap", [CPU_OP_SEXTB] = "sext.b", [CPU_OP_SEXTH] = "sext.h",
+	[CPU_OP_ROL] = "rol",     [CPU_OP_ROR] = "ror",     [CPU_OP_RORI] = "rori",
+	[CPU_OP_MIN] = "min",     [CPU_OP_MAX] = "max",     [CPU_OP_MINU] = "minu",
+	[CPU_OP_MAXU] = "maxu",
 };
 
 static const char* const disasm_cr_names[CPU_CR_COUNT] = {
@@ -62,6 +68,8 @@ static const char* const disasm_cr_names[CPU_CR_COUNT] = {
 	[CPU_CR_TCTRL0] = "tctrl0",
 	[CPU_CR_TADDR1] = "taddr1",
 	[CPU_CR_TCTRL1] = "tctrl1",
+	[CPU_CR_HARTID] = "hartid",
+	[CPU_CR_FCSR] = "fcsr",
 };
 
 const char* disasm_cr_name(const uint32_t cr) {
@@ -86,15 +94,17 @@ static bool disasm_is_encodable(const cpu_instruction_t* in) {
 		case CPU_OP_MFCR:
 			return !in->rs1 && in->imm < CPU_CR_COUNT;
 		case CPU_OP_MTCR:
-			// the counters and CPUID are read-only
+			// the counters, CPUID and HARTID are read-only
 			return !in->rd && in->imm < CPU_CR_COUNT
-				   && (in->imm < CPU_CR_CYCLE || in->imm > CPU_CR_CPUID);
+				   && (in->imm < CPU_CR_CYCLE || in->imm > CPU_CR_CPUID)
+				   && in->imm != CPU_CR_HARTID;
 		case CPU_OP_TLBI:
 			return !in->rd && in->imm < CPU_TLBI_MODE_COUNT
 				   && (in->imm != CPU_TLBI_ALL || !in->rs1);
 		case CPU_OP_SHLI:
 		case CPU_OP_SHRI:
 		case CPU_OP_SARI:
+		case CPU_OP_RORI:
 			return in->imm < 32;
 	}
 	return true;
@@ -147,6 +157,7 @@ void disasm_instruction(const uint32_t raw, const uint32_t pc, char* out,
 		case CPU_OP_SHLI:
 		case CPU_OP_SHRI:
 		case CPU_OP_SARI:
+		case CPU_OP_RORI:
 			snprintf(out, size, "%s r%u, r%u, %u", name, rd, rs1, uimm);
 			return;
 
@@ -185,7 +196,8 @@ void disasm_instruction(const uint32_t raw, const uint32_t pc, char* out,
 			snprintf(out, size, "%s", name);
 			break;
 		case CPU_FORMAT_R:
-			if (cpu_rs2_is_reserved(in.opcode)) // FSQRT, FCLASS, conversions
+			// FSQRT, FCLASS, conversions, CLZ, ...
+			if (cpu_rs2_is_reserved(in.opcode))
 				snprintf(out, size, "%s r%u, r%u", name, rd, rs1);
 			else
 				snprintf(out, size, "%s r%u, r%u, r%u", name, rd, rs1, rs2);

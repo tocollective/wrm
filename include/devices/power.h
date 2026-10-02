@@ -24,6 +24,7 @@ typedef enum power_reset_cause {
 	POWER_RESET_CAUSE_SOFTWARE = 1, // a write to RESET
 	POWER_RESET_CAUSE_HOST = 2, // the host's reset key
 	// 3 is reserved for a reset by a double fault
+	POWER_RESET_CAUSE_WATCHDOG = 4, // the watchdog wasn't kicked in time
 } power_reset_cause_t;
 
 // Power controller. It only records the request: the motherboard acts on

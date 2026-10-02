@@ -25,6 +25,10 @@ typedef off_t disk_offset_t;
 #define disk_ftell ftello
 #endif
 
+#ifdef __EMSCRIPTEN__
+#include "web.h"
+#endif
+
 static void disk_update_irq(disk_t* disk) {
 	pic_set_line(disk->pic, disk->irq, disk->done || disk->changed);
 }
@@ -242,10 +246,15 @@ static void disk_start(disk_t* disk, const uint32_t command) {
 		disk_finish(disk, DISK_ERROR_COMMAND);
 	else if (!disk->file)
 		disk_finish(disk, DISK_ERROR_NO_DISK);
-	else if (code == DISK_COMMAND_FLUSH)
+	else if (code == DISK_COMMAND_FLUSH) {
 		disk_finish(disk,
 					disk->readonly || disk_sync(disk->file) ? DISK_ERROR_NONE
 															: DISK_ERROR_MEDIA);
+#ifdef __EMSCRIPTEN__
+		// the browser's copy of the image is what lasts
+		if (!disk->readonly) web_persist();
+#endif
+	}
 	else if (code == DISK_COMMAND_WRITE && disk->readonly)
 		disk_finish(disk, DISK_ERROR_READONLY);
 	else if ((list ? disk->list : disk->address) & 3)

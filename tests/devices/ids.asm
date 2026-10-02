@@ -59,7 +59,7 @@ test_main:
 
 	; ---- unused pages: after the last device, and at the end of the region
 	li r28, 34
-	li r9, SHARE + PAGE_SIZE
+	li r9, WATCHDOG + PAGE_SIZE
 .f34:
 	lw r4, IO_ID(r9)
 	li r1, 6
@@ -109,9 +109,10 @@ devices:
 	.dw FLOPPY, ID_FLOPPY
 	.dw BEEPER, ID_BEEPER
 	.dw MOUSE, ID_MOUSE
-	.dw NET, ID_NET
+	.dw ETH, ID_ETH
 	.dw AUDIO, ID_AUDIO
 	.dw RTC, ID_RTC
 	.dw RNG, ID_RNG
 	.dw SHARE, ID_SHARE
+	.dw WATCHDOG, ID_WATCHDOG
 devices_end:

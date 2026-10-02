@@ -39,8 +39,14 @@ test_main:
 	li r1, -1
 	sw r1, MOUSE_CONTROL(r10)
 	lw r4, MOUSE_CONTROL(r10)
-	li r3, MOUSE_ENABLE
+	li r3, MOUSE_ENABLE | MOUSE_ABSOLUTE
 	bne r4, r3, fail
+	li r28, 8                       ; POSITION is 0 and read-only
+	sw r1, MOUSE_POSITION(r10)
+	lw r4, MOUSE_POSITION(r10)
+	bnez r4, fail
+	li r1, MOUSE_ENABLE
+	sw r1, MOUSE_CONTROL(r10)
 
 	; ---- STATUS and DATA are read-only
 	li r28, 6

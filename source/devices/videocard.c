@@ -20,6 +20,12 @@ static uint32_t videocard_bpp(const videocard_t* videocard) {
 	return videocard_depths[depth];
 }
 
+void videocard_mode_size(const videocard_t* videocard, uint32_t* width,
+						 uint32_t* height) {
+	*width = videocard_width(videocard);
+	*height = videocard_height(videocard);
+}
+
 // bytes per line of the visible frame; every width is a multiple of 8
 static uint32_t videocard_pitch(const videocard_t* videocard) {
 	return videocard_width(videocard) * videocard_bpp(videocard) / 8;
@@ -98,6 +104,10 @@ void videocard_reset(videocard_t* videocard) {
 	videocard->line_bytes = 0;
 	videocard->line_fetched = 0;
 	videocard->line_bit = 0;
+	videocard->cursor_control = 0;
+	videocard->cursor_base = 0;
+	videocard->cursor_xy = 0;
+	videocard->cursor_hot = 0;
 	videocard_update_irq(videocard);
 }
 
@@ -492,6 +502,47 @@ static void videocard_dma_tick(videocard_t* videocard) {
 
 // ---- scanout --------------------------------------------------------------
 
+// One channel of the cursor over the frame: alpha 255 is the cursor alone,
+// 0 the frame alone
+static uint32_t videocard_blend(const uint32_t cursor, const uint32_t frame,
+								const uint32_t alpha) {
+	return (cursor * alpha + frame * (255 - alpha) + 127) / 255;
+}
+
+// Blends the cursor over the screen. Its pixels that are off the screen,
+// or past the end of VRAM, aren't drawn.
+static void videocard_draw_cursor(videocard_t* videocard) {
+	const uint32_t width = videocard->screen_width;
+	const uint32_t height = videocard->screen_height;
+	// the image's top left corner on the screen
+	const int32_t left = (int32_t)(int16_t)(videocard->cursor_xy & 0xFFFF)
+					   - (int32_t)(videocard->cursor_hot & 0xFFFF);
+	const int32_t top = (int32_t)(int16_t)(videocard->cursor_xy >> 16)
+					  - (int32_t)(videocard->cursor_hot >> 16);
+	for (int32_t cy = 0; cy < VIDEO_CURSOR_SIZE; cy++) {
+		const int32_t y = top + cy;
+		if (y < 0 || y >= (int32_t)height) continue;
+		for (int32_t cx = 0; cx < VIDEO_CURSOR_SIZE; cx++) {
+			const int32_t x = left + cx;
+			if (x < 0 || x >= (int32_t)width) continue;
+			const uint64_t at = (uint64_t)videocard->cursor_base
+							  + ((uint64_t)cy * VIDEO_CURSOR_SIZE + cx) * 4;
+			if (at + 4 > VIDEO_VRAM_SIZE) return; // and so are the rest
+			const uint32_t pixel = videocard_peek(videocard, at * 8, 32);
+			const uint32_t alpha = pixel >> 24;
+			if (alpha == 0) continue;
+			uint32_t* out = &videocard->screen[(uint32_t)y * width + x];
+			uint32_t color = 0;
+			for (int shift = 0; shift < 24; shift += 8)
+				color |= videocard_blend((pixel >> shift) & 0xFF,
+										 (*out >> shift) & 0xFF,
+										 alpha)
+					   << shift;
+			*out = color;
+		}
+	}
+}
+
 // Converts the visible frame to the screen. Lines that run past the end of
 // VRAM are black, and so is everything while the display is off.
 static void videocard_scanout(videocard_t* videocard) {
@@ -516,6 +567,8 @@ static void videocard_scanout(videocard_t* videocard) {
 			out[x] = videocard_color(videocard, pixel, bpp);
 		}
 	}
+	if (enabled && (videocard->cursor_control & VIDEO_CURSOR_SHOWN))
+		videocard_draw_cursor(videocard);
 	videocard->screen_updates++;
 }
 
@@ -637,6 +690,18 @@ bool videocard_read(videocard_t* videocard, const uint32_t offset,
 		case VIDEO_REG_COUNT:
 			*value = videocard->count;
 			return false;
+		case VIDEO_REG_CURSOR_CONTROL:
+			*value = videocard->cursor_control;
+			return false;
+		case VIDEO_REG_CURSOR_BASE:
+			*value = videocard->cursor_base;
+			return false;
+		case VIDEO_REG_CURSOR_XY:
+			*value = videocard->cursor_xy;
+			return false;
+		case VIDEO_REG_CURSOR_HOT:
+			*value = videocard->cursor_hot;
+			return false;
 	}
 	return true;
 }
@@ -723,6 +788,18 @@ bool videocard_write(videocard_t* videocard, const uint32_t offset,
 			return false;
 		case VIDEO_REG_PALETTE_DATA:
 			videocard->palette[videocard->palette_index++] = value & 0xFFFFFF;
+			return false;
+		case VIDEO_REG_CURSOR_CONTROL:
+			videocard->cursor_control = value & VIDEO_CURSOR_SHOWN;
+			return false;
+		case VIDEO_REG_CURSOR_BASE:
+			videocard->cursor_base = value & (VIDEO_VRAM_SIZE - 4);
+			return false;
+		case VIDEO_REG_CURSOR_XY:
+			videocard->cursor_xy = value;
+			return false;
+		case VIDEO_REG_CURSOR_HOT:
+			videocard->cursor_hot = value & VIDEO_CURSOR_HOT_MASK;
 			return false;
 	}
 	return videocard_write_engine(videocard, offset, value);

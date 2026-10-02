@@ -9,7 +9,8 @@ class Sym:
 	"""A named thing: kind 'var', 'func', 'type' or 'import'.
 
 	var: storage is 'global', 'local', 'param' or 'for'; const is the
-	value of a global 'let' when it's a scalar constant."""
+	value of a global 'let' when it's a scalar constant. func: storage is
+	'nested' for a function in a function or a function literal (3.8)."""
 
 	def __init__(self, kind, name, decl, module):
 		self.kind = kind
@@ -33,6 +34,10 @@ class Sym:
 		self.written = False        # changed after the declaration
 		self.uninit = False         # 'let mut x: T' without '='
 		self.warned_unset = False
+		self.owner = None           # locals: the function, for messages ("'main'")
+		# functions
+		self.title = f"'{name}'"    # for messages: "'f'" or "the function literal"
+		self.local_name = None      # nested: the label without the module, see CodeGen
 
 
 def show(e):
@@ -81,6 +86,9 @@ class Checker:
 		self.func = None        # Sym of the function being checked
 		self.current = None     # the declaration being checked, for 'used'
 		self.loops = []         # ('loop' | 'switch', node)
+		self.base = 0           # scopes[base:] are the current function's, the rest are
+								# of the functions around it (3.8)
+		self.path = []          # names of the functions around, for labels of nested ones
 
 	def error(self, loc, msg):
 		self.diag.error(loc, msg)
@@ -107,21 +115,24 @@ class Checker:
 
 	def enter(self, module, current, scopes=None):
 		"""Switches the context to a declaration; returns the old one."""
-		saved = (self.module, self.current, self.scopes, self.func, self.loops)
+		saved = (self.module, self.current, self.scopes, self.func, self.loops, self.base, self.path)
 		self.module, self.current = module, current
 		self.scopes = [] if scopes is None else scopes
+		self.base, self.path = 0, []
 		if scopes is None:
 			self.func, self.loops = None, []
 		return saved
 
 	def leave(self, saved):
-		self.module, self.current, self.scopes, self.func, self.loops = saved
+		self.module, self.current, self.scopes, self.func, self.loops, self.base, self.path = saved
 
 	# -- modules
 
 	def declare_module(self, m):
 		m.scope = {}
 		m.exports = {}
+		m.nested = []           # nested functions and function literals, for the code generator
+		m.literals = {}         # path of the function around -> literals numbered so far
 		for d in m.decls:
 			if isinstance(d, Import):
 				for na in d.names:
@@ -198,9 +209,16 @@ class Checker:
 				na.sym.target = target
 
 	def lookup(self, name, loc, report=True):
-		for scope in reversed(self.scopes):
-			if name in scope:
-				return scope[name]
+		for i in range(len(self.scopes) - 1, -1, -1):
+			sym = self.scopes[i].get(name)
+			if sym is None:
+				continue
+			if i < self.base and sym.kind == "var" and report:
+				# a local of a function around this one: no capture (3.8)
+				self.error(loc, f"'{name}' is a local of {sym.owner}: a nested function can't capture it")
+			if sym is not self.current:
+				sym.used = True
+			return sym
 		sym = self.module.scope.get(name)
 		if sym is None:
 			if report:
@@ -239,11 +257,11 @@ class Checker:
 					return ERROR
 				typ = self.type_of(sym)
 			if typ is VOID and not void_ok:
-				self.error(t.loc, "'Void' is only for the result of a function")
+				self.error(t.loc, "'Void' is only for the result of a function and after '*'")
 				return ERROR
 			return typ
 		if isinstance(t, PointerType):
-			return PtrT(self.resolve_type(t.target), t.mut, t.volatile)
+			return PtrT(self.resolve_type(t.target, void_ok=True), t.mut, t.volatile)
 		if isinstance(t, ArrayType):
 			elem = self.resolve_type(t.elem)
 			n = self.const_int(t.size, UWORD, "the length of an array")
@@ -356,16 +374,18 @@ class Checker:
 			sym.state = "busy"
 			saved = self.enter(sym.module, sym)
 			d = sym.decl
-			names = set()
-			for p in d.params:
-				if p.name in names:
-					self.error(p.loc, f"parameter '{p.name}' is already declared")
-				names.add(p.name)
-			sym.type = FuncT([self.resolve_type(p.type) for p in d.params],
-							 self.resolve_type(d.result, void_ok=True))
+			sym.type = FuncT(self.param_types(d.params), self.resolve_type(d.result, void_ok=True))
 			self.leave(saved)
 			sym.state = "done"
 		return sym.type
+
+	def param_types(self, params):
+		names = set()
+		for p in params:
+			if p.name in names:
+				self.error(p.loc, f"parameter '{p.name}' is already declared")
+			names.add(p.name)
+		return [self.resolve_type(p.type) for p in params]
 
 	def global_var(self, sym):
 		"""Checks a global variable on first use: its initializer may use
@@ -421,7 +441,7 @@ class Checker:
 		isn't; returns True if all is."""
 		if getattr(e, "type", ERROR) is ERROR or e.const is not None:
 			return True
-		if isinstance(e, (StringLit, NullLit)):
+		if isinstance(e, (StringLit, NullLit, FuncLit)):
 			return True
 		if isinstance(e, Name):
 			sym = getattr(e, "sym", None)
@@ -521,44 +541,83 @@ class Checker:
 	def check_function(self, m, d):
 		sym = d.sym
 		ft = self.func_type(sym)
-		saved = self.enter(m, sym, scopes=[{}])
-		self.func, self.loops = sym, []
+		saved = self.enter(m, sym, scopes=[])
+		self.function_body(sym, d, ft, d.name)
+		self.leave(saved)
+
+	def function_body(self, sym, d, ft, name):
+		"""Checks the body of a function, a nested function or a function
+		literal (3.8). The scopes of the functions around stay, for the
+		nested functions they declare, but their locals can't be used:
+		lookup reports them."""
+		saved = (self.current, self.scopes, self.func, self.loops, self.base, self.path)
+		self.current, self.func, self.loops = sym, sym, []
+		self.base = len(self.scopes)
+		self.scopes = self.scopes + [{}]
+		self.path = self.path + [name]
 		d.locals = []
 		for p, pt in zip(d.params, ft.params):
-			var = Sym("var", p.name, p, m)
-			var.storage, var.type = "param", pt
+			var = Sym("var", p.name, p, self.module)
+			var.storage, var.type, var.owner = "param", pt, sym.title
 			p.var = var
-			if p.name in m.scope:
-				self.error(p.loc, f"parameter '{p.name}' has the name of a top-level declaration "
-								  f"of this file; there is no shadowing")
-			self.scopes[0][p.name] = var
+			self.declare_param(var, p.loc)
 		self.block(d.body)
 		if ft.result is not VOID and ft.result is not ERROR and not self.returns(d.body):
-			self.error(d.loc, f"'{d.name}' can reach its end without 'return'")
-		self.leave(saved)
+			self.error(d.loc, f"{sym.title} can reach its end without 'return'")
+		self.current, self.scopes, self.func, self.loops, self.base, self.path = saved
+
+	def declare_param(self, var, loc):
+		name = var.name
+		if name in self.scopes[-1]:
+			return      # a second parameter of that name, already reported
+		old = self.visible_local(name)
+		if old is not None:
+			self.error(loc, f"parameter '{name}' has the name of the function at line "
+							f"{old.decl.loc.line}; there is no shadowing")
+		elif name in self.module.scope:
+			self.error(loc, f"parameter '{name}' has the name of a top-level declaration "
+							f"of this file; there is no shadowing")
+		self.scopes[-1][name] = var
+
+	def visible_local(self, name):
+		"""The local of that name that can be used here, if any: a local of
+		this function or a nested function of one around it. Locals of the
+		functions around are not visible (3.8), so their names are free."""
+		for i in range(len(self.scopes) - 1, -1, -1):
+			old = self.scopes[i].get(name)
+			if old is not None and (i >= self.base or old.kind == "func"):
+				return old
+		return None
 
 	def declare_local(self, var, loc):
 		name = var.name
-		for scope in reversed(self.scopes):
-			old = scope.get(name)
-			if old is not None:
-				if old.storage == "param":
-					self.error(loc, f"'{name}' is a parameter; there is no shadowing")
-				else:
-					self.error(loc, f"'{name}' is already declared at line {old.decl.loc.line}; "
-									f"there is no shadowing")
-				break
-		else:
-			if name in self.module.scope:
-				self.error(loc, f"'{name}' is a top-level name of this file; there is no shadowing")
+		old = self.visible_local(name)
+		if old is not None:
+			if old.storage == "param":
+				self.error(loc, f"'{name}' is a parameter; there is no shadowing")
+			else:
+				self.error(loc, f"'{name}' is already declared at line {old.decl.loc.line}; "
+								f"there is no shadowing")
+		elif name in self.module.scope:
+			self.error(loc, f"'{name}' is a top-level name of this file; there is no shadowing")
+		var.owner = self.func.title
 		self.scopes[-1][name] = var
 		self.func.decl.locals.append(var)
+
+	def nested_label(self, last):
+		"""The label of a nested function without the module: the names of
+		the functions around and its own (COMPILER.md)."""
+		return "__".join(self.path + [last])
 
 	def push(self):
 		self.scopes.append({})
 
 	def pop(self):
 		for var in self.scopes.pop().values():
+			if var.kind == "func":
+				if not var.used:
+					self.warning(var.decl.loc, f"'{var.name}' is never used")
+				continue
 			if var.storage != "local":
 				continue
 			if not var.read:
@@ -576,7 +635,7 @@ class Checker:
 	def statements(self, stmts):
 		dead = False
 		for s in stmts:
-			if dead:
+			if dead and not isinstance(s, FuncDecl):    # a declaration doesn't run
 				self.warning(s.loc, "unreachable code")
 				dead = None
 			self.stmt(s)
@@ -618,13 +677,31 @@ class Checker:
 		var = Sym("var", s.name, s, self.module)
 		var.storage, var.mut = "local", s.mut
 		var.type = self.resolve_type(s.type)
+		s.var = var
+		if getattr(s, "func_form", False):
+			# 'let mut f()': declared first, so its body sees 'f' and is told
+			# it can't capture it (3.8)
+			self.declare_local(var, s.loc)
+			self.check_value(s.init, var.type)
+			return
 		if s.init is not None:
 			self.check_value(s.init, var.type)
 			self.uses(s.init)
 		else:
 			var.uninit = True
-		s.var = var
 		self.declare_local(var, s.loc)
+
+	def st_FuncDecl(self, s):
+		"""A function in a function (3.8): visible from here to the end of
+		the block, also in its own body."""
+		sym = Sym("func", s.name, s, self.module)
+		sym.storage = "nested"
+		s.sym = sym
+		ft = self.func_type(sym)
+		self.declare_local(sym, s.loc)
+		sym.local_name = self.nested_label(s.name)
+		self.module.nested.append(s)
+		self.function_body(sym, s, ft, s.name)
 
 	def st_Assign(self, s):
 		tt = self.expr(s.target)
@@ -916,7 +993,7 @@ class Checker:
 		if t is VOID:
 			self.error(e.loc, f"'{show(e)}' has no value: it returns Void")
 			return False
-		if t.kind == "ptr" and target.kind == "ptr" and t.target == target.target:
+		if t.kind == "ptr" and target.kind == "ptr" and (t.target == target.target or target.target is VOID):
 			if t.volatile and not target.volatile:
 				self.error(e.loc, f"'{t}' can't become '{target}' without 'as': it would drop 'volatile'")
 				return False
@@ -943,6 +1020,8 @@ class Checker:
 		hint = ""
 		if t.kind in ("int", "float", "bool", "enum") and target.kind in ("int", "float", "enum"):
 			hint = "; convert it with 'as'"
+		elif t.kind == "ptr" and t.target is VOID and target.kind in ("ptr", "func"):
+			hint = "; '*Void' becomes another type only with 'as'"
 		self.error(e.loc, f"expected '{target}', found '{t}'{hint}")
 		return False
 
@@ -1007,6 +1086,10 @@ class Checker:
 		st, via = ot, None
 		if ot.kind == "ptr":
 			st, via = ot.target, ot
+			if st is VOID:
+				self.error(e.loc, f"'{show(e.obj)}' is '{ot}', which has no fields; "
+								  f"convert it with 'as' first")
+				return ERROR
 			if st.kind == "ptr" and st.target.kind == "struct":
 				self.error(e.loc, f"'.' goes through one pointer only: '{show(e.obj)}' is '{ot}', "
 								  f"write '(*{show(e.obj)}).{e.name}'")
@@ -1037,6 +1120,10 @@ class Checker:
 			e.volatile = getattr(e.obj, "volatile", False)
 			return ot.elem
 		if ot.kind == "ptr":
+			if ot.target is VOID:
+				self.error(e.loc, f"'{show(e.obj)}' is '{ot}' and can't be indexed; "
+								  f"convert it with 'as' first")
+				return ERROR
 			e.volatile = ot.volatile
 			return ot.target
 		self.error(e.loc, f"'{show(e.obj)}' is '{ot}': only arrays and pointers can be indexed")
@@ -1092,6 +1179,10 @@ class Checker:
 				return ERROR
 			if t.kind != "ptr":
 				self.error(e.loc, f"'{show(e.operand)}' is '{t}', not a pointer")
+				return ERROR
+			if t.target is VOID:
+				self.error(e.loc, f"'{show(e.operand)}' is '{t}': nothing can be read or written "
+								  f"through it; convert it with 'as' first")
 				return ERROR
 			e.volatile = t.volatile
 			return t.target
@@ -1191,6 +1282,8 @@ class Checker:
 			return lt
 		if lt.kind == "ptr" and rt.kind == "ptr" and lt.target == rt.target:
 			return lt
+		if lt.kind == "ptr" and rt.kind == "ptr" and VOID in (lt.target, rt.target):
+			return lt if lt.target is VOID else rt
 		self.error(e.loc, f"'{e.op}' needs both operands of one type, found '{lt}' and '{rt}'; "
 						  f"convert one with 'as'")
 		return ERROR
@@ -1317,7 +1410,36 @@ class Checker:
 			return src in (UWORD, WORD)
 		if sk == "func" and to is UWORD:
 			return True
+		# a function and *Void or *mut Void, both ways (4.6)
+		if sk == "func" and tk == "ptr" and to.target is VOID and not to.volatile:
+			return True
+		if sk == "ptr" and src.target is VOID and not src.volatile and tk == "func":
+			return True
 		return False
+
+	def ex_FuncLit(self, e, want):
+		"""(params): R { body } (3.8): a function of its own, nested in the
+		one around it, if any."""
+		if getattr(e, "sym", None) is not None:
+			return e.sym.type
+		sym = Sym("func", "function literal", e, self.module)
+		sym.storage = "nested"
+		e.sym = sym
+		name = getattr(e, "label_name", None)   # the body of 'let mut name()'
+		if name is not None:
+			sym.title = f"'{name}'"
+			last = name if self.path else f"{name}__body"
+		else:
+			sym.title = "the function literal"
+			key = tuple(self.path)
+			self.module.literals[key] = n = self.module.literals.get(key, 0) + 1
+			last = str(n)
+		sym.local_name = self.nested_label(last)
+		sym.type = FuncT(self.param_types(e.params), self.resolve_type(e.result, void_ok=True))
+		sym.state = "done"
+		self.module.nested.append(e)
+		self.function_body(sym, e, sym.type, last)
+		return sym.type
 
 	def ex_StructLit(self, e, want):
 		if want is ERROR:
@@ -1395,12 +1517,29 @@ class Checker:
 			if not count(1 if name == "mfcr" else 2):
 				return ERROR
 			n = self.const_int(args[0], UWORD, f"the register number of '{name}'")
-			if n is not None and not 0 <= n <= 15:
-				self.error(args[0].loc, f"there is no control register {n} (0 to 15)")
+			if n is not None and not 0 <= n <= 17:
+				self.error(args[0].loc, f"there is no control register {n} (0 to 17)")
 			if name == "mfcr":
 				return UWORD
 			self.check_value(args[1], UWORD)
 			return VOID
+		if name in ("clz", "ctz", "popcount", "bswap", "rotl", "rotr"):
+			rotate = name in ("rotl", "rotr")
+			if not count(2 if rotate else 1):
+				return ERROR
+			t = self.expr(args[0], UWORD)
+			if t is UNTYPED:
+				self.coerce(args[0], t, UWORD)
+				t = UWORD
+			elif t is not ERROR and t not in (WORD, UWORD):
+				self.error(args[0].loc, f"'{name}' works only on Word and UWord, not on '{t}'")
+				t = ERROR
+			if rotate:
+				self.check_value(args[1], UWORD)
+			if t is ERROR:
+				return ERROR
+			# counts are UWord, the others keep the type of the value
+			return UWORD if name in ("clz", "ctz", "popcount") else t
 		if name == "tlbi":
 			if count(1, 2):
 				self.check_value(args[0], UWORD)

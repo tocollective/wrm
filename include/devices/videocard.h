@@ -37,6 +37,10 @@
 #define VIDEO_REG_BG 0x68 // RW: pixel value of EXPAND for 0 bits
 #define VIDEO_REG_ADDRESS 0x6C // RW: physical address of the next DMA word
 #define VIDEO_REG_COUNT 0x70 // RW: bytes left to move by DMA
+#define VIDEO_REG_CURSOR_CONTROL 0x80 // RW: bit 0 = shown
+#define VIDEO_REG_CURSOR_BASE 0x84 // RW: VRAM offset of the image, 4-aligned
+#define VIDEO_REG_CURSOR_XY 0x88 // RW: hotspot on screen, signed x | y << 16
+#define VIDEO_REG_CURSOR_HOT 0x8C // RW: hotspot in the image, x | y << 16
 
 #define VIDEO_STATUS_BUSY 0x01 // a DMA command is running
 #define VIDEO_STATUS_DONE 0x02 // the last command has finished
@@ -63,6 +67,12 @@
 #define VIDEO_DEPTH_16 3 // RGB565
 #define VIDEO_DEPTH_32 4 // XRGB8888
 #define VIDEO_DEPTH_COUNT 5
+
+// The hardware cursor: a CURSOR_SIZE square of ARGB8888 pixels in VRAM,
+// blended over the frame when it is scanned out
+#define VIDEO_CURSOR_SIZE 64
+#define VIDEO_CURSOR_SHOWN 0x01 // CURSOR_CONTROL
+#define VIDEO_CURSOR_HOT_MASK 0x003F003F
 
 #define VIDEO_COMMAND_OP_MASK 0xFF
 #define VIDEO_COMMAND_TRANSPARENT 0x100 // EXPAND leaves 0 bits alone
@@ -130,6 +140,12 @@ typedef struct videocard {
 	uint32_t line_bit; // the bit of the first pixel in the buffer
 	uint8_t line_buffer[VIDEO_LINE_BUFFER_SIZE];
 
+	// hardware cursor
+	uint32_t cursor_control;
+	uint32_t cursor_base;
+	uint32_t cursor_xy;
+	uint32_t cursor_hot;
+
 	// Monitor side: the last frame scanned out, XRGB8888. Only kept up to
 	// date while a display is connected.
 	bool connected;
@@ -146,6 +162,9 @@ void videocard_destroy(videocard_t* videocard);
 
 // Stops a running DMA command; VRAM keeps its contents.
 void videocard_reset(videocard_t* videocard);
+// The size of the current mode, in pixels.
+void videocard_mode_size(const videocard_t* videocard, uint32_t* width,
+						 uint32_t* height);
 // Advances the frame and a running DMA command by that many clock ticks.
 void videocard_run(videocard_t* videocard, const uint64_t ticks);
 // Ticks until the next one that ends a frame or moves a DMA word (1 = the

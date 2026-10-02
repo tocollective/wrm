@@ -12,6 +12,7 @@ KEYWORDS = {
 BUILTIN_TYPES = {"Byte", "UByte", "Half", "UHalf", "Word", "UWord", "Bool", "Float", "Void"}
 BUILTIN_FUNCS = {
 	"mfcr", "mtcr", "syscall", "wfi", "hlt", "tlbi", "fence", "breakpoint",
+	"clz", "ctz", "popcount", "bswap", "rotl", "rotr",
 	"atomicLoad", "atomicStore", "atomicSwap", "atomicAdd", "atomicCompareSwap",
 	"sizeof", "alignof", "offsetof",
 }

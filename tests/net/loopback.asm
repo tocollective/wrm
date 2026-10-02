@@ -1,411 +1,407 @@
 ; ============================================================================
-;  Network card with a link, on the host's loopback only: a TCP connection
-;  between two sockets of the machine (LISTEN, CONNECT, SEND, RECEIVE, the
-;  other end closing, a refused connection), UDP datagrams between two
-;  sockets, states and errors, the IRQ line, a DNS lookup of an address
+;  The network behind the Ethernet card, over the host's loopback only. The
+;  guest plays both ends of a TCP connection: its port 1000 connects to
+;  10.0.2.2:47201, the host's 127.0.0.1:47201, which is forwarded back to
+;  its port 80. The handshake, data both ways, closing both ways, a reset
+;  for a segment of no connection, a refused connection; then a UDP
+;  datagram there and back through the forwarded port 7, and DNS queries.
 ; ============================================================================
 ; @args --net-allow 127.0.0.1
+; @args --net-forward 127.0.0.1:47201:80 --net-forward 127.0.0.1:47202:7
 ; The host's loopback is denied by default; the test allows 127.0.0.1.
 
 	.include "../common/harness.asm"
+	.include "../common/eth.asm"
 
-BUF             = 0x1000            ; RECEIVE target, reached as offset(r0)
-UDP_ADDR        = BUF               ; a datagram's header in BUF
-UDP_PORT        = BUF + 4
-UDP_LENGTH      = BUF + 6
-TIMEOUT         = 240000000         ; cycles to wait for the host: 5 s
-SOCKET0         = NET + NET_SOCKET0
-SOCKET1         = SOCKET0 + NET_SOCKET_SIZE
-SOCKET2         = SOCKET1 + NET_SOCKET_SIZE
-SOCKET3         = SOCKET2 + NET_SOCKET_SIZE
+CLIENT          = CONN0             ; the guest's port 1000, connecting
+SERVER          = CONN1             ; its port 80, where the forward leads
+REFUSED         = CONN2
+CLIENT_PORT     = 1000
+SERVER_PORT     = 80
+FORWARD_TCP     = 47201             ; the host's port for SERVER_PORT
+FORWARD_UDP     = 47202             ; ... and for UDP_PORT
+CLOSED_PORT     = 47209             ; nobody listens there
+CLIENT_ISN      = 0x10000000
+SERVER_ISN      = 0x20000000
+UDP_PORT        = 7
+UDP_CLIENT      = 2000
+DNS_PORT        = 3000
 HELLO_SIZE      = 10                ; s_hello
 PING_SIZE       = 5                 ; s_ping
+PONG_SIZE       = 4                 ; s_pong
+QUERY_A_SIZE    = 26                ; dns_query_a
+QUERY_AAAA_SIZE = 29                ; dns_query_aaaa
 
 test_main:
-	li r10, NET
-	li r11, SOCKET0                 ; listens, then is the server's end
-	li r12, SOCKET1                 ; connects
+	call eth_init
 
-	; ---- the link is up, and this host can do everything
+	; ---- the client's SYN; the host connects through the forward, so the
+	;      server gets a SYN too. Which frame comes first is up to the host.
 	li r28, 1
-	lw r4, NET_STATUS(r10)
-	li r3, NET_LINK | NET_CAN_LISTEN | NET_CAN_UDP
-	bne r4, r3, fail
-
-	; ---- LISTEN on any port: LOCAL_PORT shows the one picked
+	li r1, CLIENT
+	li r2, CLIENT_PORT
+	li r3, GATEWAY
+	li r4, FORWARD_TCP
+	li r5, CLIENT_ISN
+	call conn_init
+	li r1, CLIENT
+	li r2, TCP_SYN
+	li r3, 0
+	li r4, 0
+	call tcp_send
 	li r28, 2
-	sw r0, SOCK_LOCAL_PORT(r11)
-	li r1, NET_LISTEN
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_ERROR(r11)
-	bnez r4, fail
-	lw r4, SOCK_STATE(r11)
-	li r3, SOCK_LISTENING
-	bne r4, r3, fail
-	lw r13, SOCK_LOCAL_PORT(r11)    ; r13 = the server's port
-	beqz r13, fail
-	li r28, 3                       ; only a closed socket takes LISTEN
-	li r1, NET_LISTEN
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_ERROR(r11)
-	li r3, NET_ERR_STATE
-	bne r4, r3, fail
-	lw r4, SOCK_STATE(r11)          ; and a failed command changes nothing
-	li r3, SOCK_LISTENING
-	bne r4, r3, fail
-
-	; ---- CONNECT to it
-	li r28, 4
-	li r1, LOCALHOST
-	sw r1, SOCK_PEER_ADDR(r12)
-	sw r13, SOCK_PEER_PORT(r12)
-	li r1, NET_CONNECT
-	sw r1, SOCK_COMMAND(r12)
-	lw r4, SOCK_ERROR(r12)
-	bnez r4, fail
-	lw r4, SOCK_STATE(r12)          ; reported by the card's next poll
-	li r3, SOCK_CONNECTING
-	bne r4, r3, fail
+	li r1, FRAME_A
+	call eth_recv
+	li r1, FRAME_B
+	call eth_recv
+	li r28, 3
+	li r1, FRAME_A + 36             ; to the client's port: the SYN-ACK
+	call get16
+	li r10, FRAME_A                 ; r10 = the client's frame
+	li r11, FRAME_B                 ; r11 = the server's
+	li r3, CLIENT_PORT
+	beq r1, r3, .sorted
+	li r10, FRAME_B
+	li r11, FRAME_A
+.sorted:
+	li r28, 4                       ; the SYN-ACK, with the gateway's MSS
+	mv r1, r10
+	li r2, CLIENT
+	li r3, TCP_SYN | TCP_ACK
+	call tcp_check
+	bnez r1, fail
 	li r28, 5
-	mv r1, r12
-	li r2, SOCK_CONNECTED
-	call wait_state
+	lbu r4, 46(r10)                 ; a 24-byte header
+	li r3, 0x60
+	bne r4, r3, fail
+	lhu r4, 54(r10)                 ; MSS 1460
+	li r3, 0x0402
+	bne r4, r3, fail
+	lhu r4, 56(r10)
+	li r3, 0xB405
+	bne r4, r3, fail
+	li r28, 6                       ; the server's SYN, from a port of the gateway
+	addi r1, r11, 34
+	call get16
+	mv r4, r1
+	beqz r4, fail
+	mv r4, r1
+	li r1, SERVER
+	li r2, SERVER_PORT
+	li r3, GATEWAY
+	li r5, SERVER_ISN
+	call conn_init
+	li r28, 7
 	mv r1, r11
-	call wait_state
-	li r28, 6                       ; both ends say so
-	lw r4, SOCK_EVENTS(r12)
-	li r3, SOCK_EV_CONNECTED
-	bne r4, r3, fail
-	lw r4, SOCK_EVENTS(r11)
-	bne r4, r3, fail
-	li r28, 7                       ; and know each other
-	lw r4, SOCK_PEER_ADDR(r11)
-	li r3, LOCALHOST
-	bne r4, r3, fail
-	lw r4, SOCK_PEER_PORT(r11)
-	lw r3, SOCK_LOCAL_PORT(r12)
-	bne r4, r3, fail
-	beqz r3, fail
-	li r28, 8
-	li r1, SOCK_EV_CONNECTED
-	sw r1, SOCK_EVENTS(r11)         ; writing 1 clears the bit
-	sw r1, SOCK_EVENTS(r12)
-	lw r4, SOCK_EVENTS(r11)
-	bnez r4, fail
+	li r2, SERVER
+	li r3, TCP_SYN
+	call tcp_check
+	bnez r1, fail
 
-	; ---- SEND from ROM, RECEIVE at the other end
+	; ---- both handshakes end: the client acks, the server answers
 	li r28, 10
-	la r1, s_hello
-	sw r1, SOCK_ADDRESS(r12)
-	li r1, HELLO_SIZE
-	sw r1, SOCK_COUNT(r12)
-	li r1, NET_SEND
-	sw r1, SOCK_COMMAND(r12)
-	lw r4, SOCK_ERROR(r12)
-	bnez r4, fail
-	li r28, 11                      ; all of it moved
-	lw r4, SOCK_COUNT(r12)
-	bnez r4, fail
-	lw r4, SOCK_ADDRESS(r12)
-	la r3, s_hello + HELLO_SIZE
+	li r1, CLIENT
+	li r2, TCP_ACK
+	li r3, 0
+	li r4, 0
+	call tcp_send
+	li r1, SERVER
+	li r2, TCP_SYN | TCP_ACK
+	li r3, 0
+	li r4, 0
+	call tcp_send
+	li r28, 11                      ; the gateway acks the server's SYN-ACK
+	li r1, FRAME_A
+	call eth_recv
+	li r1, FRAME_A
+	li r2, SERVER
+	li r3, TCP_ACK
+	call tcp_check
+	bnez r1, fail
+
+	; ---- the client sends, the server receives
+	li r28, 20
+	li r1, CLIENT
+	li r2, TCP_ACK | TCP_PSH
+	la r3, s_hello
+	li r4, HELLO_SIZE
+	call tcp_send
+	li r28, 21                      ; acked at once
+	li r1, FRAME_A
+	call eth_recv
+	li r1, FRAME_A
+	li r2, CLIENT
+	li r3, TCP_ACK
+	call tcp_check
+	bnez r1, fail
+	li r28, 22                      ; through the host to the server
+	li r1, FRAME_A
+	call eth_recv
+	li r1, FRAME_A
+	li r2, SERVER
+	li r3, TCP_ACK | TCP_PSH
+	call tcp_check
+	li r3, HELLO_SIZE
+	mv r4, r1
 	bne r4, r3, fail
-	li r28, 12
-	mv r1, r11
-	li r2, HELLO_SIZE
-	call wait_rx
-	li r28, 13
-	lw r4, SOCK_EVENTS(r11)
-	andi r4, r4, SOCK_EV_RECEIVED
-	beqz r4, fail
-	li r28, 14                      ; the IRQ line follows EVENTS & IRQ_MASK
-	lw r4, NET_PENDING(r10)
-	bnez r4, fail
-	li r1, SOCK_EV_RECEIVED
-	sw r1, SOCK_IRQ_MASK(r11)
-	lw r4, NET_PENDING(r10)
-	li r3, 1 << 0
-	bne r4, r3, fail
-	li r1, PIC
-	lw r4, PIC_PENDING(r1)
-	li r3, 1 << IRQ_NET
-	and r4, r4, r3
-	beqz r4, fail
-	li r1, SOCK_EV_RECEIVED
-	sw r1, SOCK_EVENTS(r11)
-	lw r4, NET_PENDING(r10)
-	bnez r4, fail
-	sw r0, SOCK_IRQ_MASK(r11)
-	li r28, 15                      ; at most COUNT bytes...
-	li r1, BUF
-	sw r1, SOCK_ADDRESS(r11)
-	li r1, 4
-	sw r1, SOCK_COUNT(r11)
-	li r1, NET_RECEIVE
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_ERROR(r11)
-	bnez r4, fail
-	lw r4, SOCK_COUNT(r11)
-	bnez r4, fail
-	lw r4, SOCK_RX_SIZE(r11)
-	li r3, HELLO_SIZE - 4
-	bne r4, r3, fail
-	li r28, 16                      ; ...or what there is
-	li r1, 64
-	sw r1, SOCK_COUNT(r11)
-	li r1, NET_RECEIVE
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_COUNT(r11)
-	li r3, 64 - (HELLO_SIZE - 4)
-	bne r4, r3, fail
-	lw r4, SOCK_ADDRESS(r11)
-	li r3, BUF + HELLO_SIZE
-	bne r4, r3, fail
-	lw r4, SOCK_RX_SIZE(r11)
-	bnez r4, fail
-	li r28, 17                      ; the bytes are the ones sent
-	li r1, BUF
+	li r28, 23
+	mv r1, r2
 	la r2, s_hello
 	li r3, HELLO_SIZE
 	call compare
 
-	; ---- RECEIVE into ROM stops at the first byte
-	li r28, 18
-	la r1, s_hello
-	sw r1, SOCK_ADDRESS(r12)
-	li r1, HELLO_SIZE
-	sw r1, SOCK_COUNT(r12)
-	li r1, NET_SEND
-	sw r1, SOCK_COMMAND(r12)
-	mv r1, r11
-	li r2, HELLO_SIZE
-	call wait_rx
-	li r1, ROM_BASE
-	sw r1, SOCK_ADDRESS(r11)
-	li r1, HELLO_SIZE
-	sw r1, SOCK_COUNT(r11)
-	li r1, NET_RECEIVE
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_ERROR(r11)
-	li r3, NET_ERR_ADDRESS
-	bne r4, r3, fail
-	lw r4, SOCK_ADDRESS(r11)
-	li r3, ROM_BASE
-	bne r4, r3, fail
-	lw r4, SOCK_RX_SIZE(r11)        ; nothing was taken
-	li r3, HELLO_SIZE
-	bne r4, r3, fail
-
-	; ---- the other end closes: peer closed, the bytes stay readable
-	li r28, 20
-	li r1, NET_CLOSE
-	sw r1, SOCK_COMMAND(r12)
-	lw r4, SOCK_STATE(r12)
-	bnez r4, fail
-	lw r4, SOCK_EVENTS(r12)         ; CLOSE clears EVENTS
-	bnez r4, fail
-	li r28, 21
-	mv r1, r11
-	li r2, SOCK_PEER_CLOSED
-	call wait_state
-	lw r4, SOCK_EVENTS(r11)
-	andi r4, r4, SOCK_EV_CLOSED
-	beqz r4, fail
-	li r28, 22                      ; nothing can be sent...
-	li r1, NET_SEND
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_ERROR(r11)
-	li r3, NET_ERR_STATE
-	bne r4, r3, fail
-	li r28, 23                      ; ...but what came is still there
-	lw r4, SOCK_RX_SIZE(r11)
-	li r3, HELLO_SIZE
-	bne r4, r3, fail
-	li r1, BUF
-	sw r1, SOCK_ADDRESS(r11)
-	li r1, HELLO_SIZE
-	sw r1, SOCK_COUNT(r11)
-	li r1, NET_RECEIVE
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_ERROR(r11)
-	bnez r4, fail
-	lw r4, SOCK_COUNT(r11)
-	bnez r4, fail
-	li r28, 24
-	li r1, NET_CLOSE
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_STATE(r11)
-	bnez r4, fail
-
-	; ---- nobody listens on the port now: the connection is refused (at
-	;      once or a little later, depending on the host)
+	; ---- the server acks and answers, the client receives
 	li r28, 30
-	li r1, NET_CONNECT
-	sw r1, SOCK_COMMAND(r12)
+	li r1, SERVER
+	li r2, TCP_ACK | TCP_PSH
+	la r3, s_ping
+	li r4, PING_SIZE
+	call tcp_send
 	li r28, 31
-	mv r1, r12
-	li r2, SOCK_CLOSED
-	call wait_state
-	lw r4, SOCK_ERROR(r12)
-	li r3, NET_ERR_NETWORK
-	bne r4, r3, fail
-	lw r4, SOCK_EVENTS(r12)
-	li r3, SOCK_EV_CLOSED
-	bne r4, r3, fail
-	li r1, NET_CLOSE
-	sw r1, SOCK_COMMAND(r12)
-
-	; ---- UDP: a datagram from socket 3 to socket 2
-	li r11, SOCKET2
-	li r12, SOCKET3
-	li r28, 40
-	sw r0, SOCK_LOCAL_PORT(r11)
-	li r1, NET_UDP
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_ERROR(r11)
-	bnez r4, fail
-	lw r4, SOCK_STATE(r11)
-	li r3, SOCK_UDP
-	bne r4, r3, fail
-	lw r13, SOCK_LOCAL_PORT(r11)
-	beqz r13, fail
-	sw r0, SOCK_LOCAL_PORT(r12)
-	li r1, NET_UDP
-	sw r1, SOCK_COMMAND(r12)
-	lw r4, SOCK_ERROR(r12)
-	bnez r4, fail
-	lw r14, SOCK_LOCAL_PORT(r12)
-	beqz r14, fail
-	li r28, 41                      ; a UDP socket can't CONNECT
-	li r1, NET_CONNECT
-	sw r1, SOCK_COMMAND(r12)
-	lw r4, SOCK_ERROR(r12)
-	li r3, NET_ERR_STATE
-	bne r4, r3, fail
-	li r28, 42                      ; nor send more than 8192 bytes at once
-	li r1, LOCALHOST
-	sw r1, SOCK_PEER_ADDR(r12)
-	sw r13, SOCK_PEER_PORT(r12)
-	la r1, s_ping
-	sw r1, SOCK_ADDRESS(r12)
-	li r1, NET_DATAGRAM_MAX + 1
-	sw r1, SOCK_COUNT(r12)
-	li r1, NET_SEND
-	sw r1, SOCK_COMMAND(r12)
-	lw r4, SOCK_ERROR(r12)
-	li r3, NET_ERR_LENGTH
-	bne r4, r3, fail
-	li r28, 43
-	li r1, PING_SIZE
-	sw r1, SOCK_COUNT(r12)
-	li r1, NET_SEND
-	sw r1, SOCK_COMMAND(r12)
-	lw r4, SOCK_ERROR(r12)
-	bnez r4, fail
-	lw r4, SOCK_COUNT(r12)
-	bnez r4, fail
-	li r28, 44                      ; the datagram comes with its header
-	mv r1, r11
-	li r2, 8 + PING_SIZE
-	call wait_rx
-	li r1, BUF
-	sw r1, SOCK_ADDRESS(r11)
-	li r1, 64
-	sw r1, SOCK_COUNT(r11)
-	li r1, NET_RECEIVE
-	sw r1, SOCK_COMMAND(r11)
-	lw r4, SOCK_ERROR(r11)
-	bnez r4, fail
-	lw r4, SOCK_ADDRESS(r11)
-	li r3, BUF + 8 + PING_SIZE
-	bne r4, r3, fail
-	li r28, 45
-	lw r4, UDP_ADDR(r0)             ; the sender's address
-	li r3, LOCALHOST
-	bne r4, r3, fail
-	lhu r4, UDP_PORT(r0)            ; its port
-	bne r4, r14, fail
-	lhu r4, UDP_LENGTH(r0)          ; the length
+	li r1, FRAME_A
+	call eth_recv
+	li r1, FRAME_A
+	li r2, SERVER
+	li r3, TCP_ACK
+	call tcp_check
+	bnez r1, fail
+	li r28, 32
+	li r1, FRAME_A
+	call eth_recv
+	li r1, FRAME_A
+	li r2, CLIENT
+	li r3, TCP_ACK | TCP_PSH
+	call tcp_check
 	li r3, PING_SIZE
+	mv r4, r1
 	bne r4, r3, fail
-	li r28, 46
-	li r1, BUF + 8
+	li r28, 33
+	mv r1, r2
 	la r2, s_ping
 	li r3, PING_SIZE
 	call compare
-	li r1, NET_CLOSE
-	sw r1, SOCK_COMMAND(r11)
-	sw r1, SOCK_COMMAND(r12)
 
-	; ---- DNS: a dotted address resolves to itself
+	; ---- the client closes: its FIN is acked, and the host closing its
+	;      end of the connection brings the server a FIN
+	li r28, 40
+	li r1, CLIENT
+	li r2, TCP_FIN | TCP_ACK
+	li r3, 0
+	li r4, 0
+	call tcp_send
+	li r28, 41
+	li r1, FRAME_A
+	call eth_recv
+	li r1, FRAME_A
+	li r2, CLIENT
+	li r3, TCP_ACK
+	call tcp_check
+	li r28, 42
+	li r1, FRAME_A
+	call eth_recv
+	li r1, FRAME_A
+	li r2, SERVER
+	li r3, TCP_FIN | TCP_ACK
+	call tcp_check
+	bnez r1, fail
+
+	; ---- the server closes too: the client gets its FIN
+	li r28, 43
+	li r1, SERVER
+	li r2, TCP_FIN | TCP_ACK
+	li r3, 0
+	li r4, 0
+	call tcp_send
+	li r28, 44
+	li r1, FRAME_A
+	call eth_recv
+	li r1, FRAME_A
+	li r2, SERVER
+	li r3, TCP_ACK
+	call tcp_check
+	li r28, 45
+	li r1, FRAME_A
+	call eth_recv
+	li r1, FRAME_A
+	li r2, CLIENT
+	li r3, TCP_FIN | TCP_ACK
+	call tcp_check
+	bnez r1, fail
+	li r28, 46                      ; the last ACK: the connection is gone
+	li r1, CLIENT
+	li r2, TCP_ACK
+	li r3, 0
+	li r4, 0
+	call tcp_send
+
+	; ---- a segment of no connection is answered with a reset
 	li r28, 50
-	la r1, s_address
-	sw r1, NET_DNS_NAME(r10)
-	li r1, NET_DNS_LOOKUP
-	sw r1, NET_DNS_COMMAND(r10)
-	mfcr r16, cycle
-.dns:
-	lw r4, NET_DNS_STATUS(r10)
-	andi r4, r4, NET_DNS_BUSY
-	beqz r4, .dns_done
-	mfcr r17, cycle
-	sub r17, r17, r16
-	li r3, TIMEOUT
-	bltu r17, r3, .dns
-	j fail
-.dns_done:
+	li r1, CLIENT
+	li r2, TCP_ACK | TCP_PSH
+	la r3, s_hello
+	li r4, HELLO_SIZE
+	call tcp_send
 	li r28, 51
-	lw r4, NET_DNS_STATUS(r10)
-	li r3, NET_DNS_DONE
+	li r1, FRAME_A
+	call eth_recv
+	li r1, FRAME_A                  ; numbered with what the segment acked
+	li r2, CLIENT
+	li r3, TCP_RST
+	call tcp_check
+	bnez r1, fail
+
+	; ---- nobody listens on the port: the connection is refused (at once
+	;      or a little later, depending on the host)
+	li r28, 55
+	li r1, REFUSED
+	li r2, CLIENT_PORT + 1
+	li r3, GATEWAY
+	li r4, CLOSED_PORT
+	li r5, CLIENT_ISN
+	call conn_init
+	li r1, REFUSED
+	li r2, TCP_SYN
+	li r3, 0
+	li r4, 0
+	call tcp_send
+	li r28, 56
+	li r1, FRAME_A
+	call eth_recv
+	li r1, FRAME_A
+	li r2, REFUSED
+	li r3, TCP_RST | TCP_ACK
+	call tcp_check
+	bnez r1, fail
+
+	; ---- UDP: from the guest's port 2000 to the host's 47202, which is
+	;      the guest's port 7, from a port of the host...
+	li r28, 60
+	li r1, UDP_CLIENT
+	li r2, GATEWAY
+	li r3, FORWARD_UDP
+	la r4, s_ping
+	li r5, PING_SIZE
+	call udp_send
+	li r28, 61
+	li r1, FRAME_A
+	call eth_recv
+	li r1, FRAME_A
+	li r2, GATEWAY
+	li r3, 0
+	li r4, UDP_PORT
+	call udp_check
+	mv r12, r3                      ; r12 = the host's port of the sender
+	li r3, PING_SIZE
+	mv r4, r1
 	bne r4, r3, fail
-	lw r4, NET_DNS_RESULT(r10)
+	li r28, 62
+	mv r4, r12
+	li r3, FORWARD_UDP
+	beq r4, r3, fail
+	beqz r4, fail
+	mv r1, r2
+	la r2, s_ping
+	li r3, PING_SIZE
+	call compare
+	li r28, 63                      ; ... and back, from the forwarded port
+	li r1, UDP_PORT
+	li r2, GATEWAY
+	mv r3, r12
+	la r4, s_pong
+	li r5, PONG_SIZE
+	call udp_send
+	li r28, 64
+	li r1, FRAME_A
+	call eth_recv
+	li r1, FRAME_A
+	li r2, GATEWAY
+	li r3, FORWARD_UDP
+	li r4, UDP_CLIENT
+	call udp_check
+	li r3, PONG_SIZE
+	mv r4, r1
+	bne r4, r3, fail
+	li r28, 65
+	mv r1, r2
+	la r2, s_pong
+	li r3, PONG_SIZE
+	call compare
+
+	; ---- DNS: a dotted address is its own A record...
+	li r28, 70
+	li r1, DNS_PORT
+	li r2, DNS_SERVER
+	li r3, 53
+	la r4, dns_query_a
+	li r5, QUERY_A_SIZE
+	call udp_send
+	li r28, 71
+	li r1, FRAME_A
+	call eth_recv
+	li r1, FRAME_A
+	li r2, DNS_SERVER
+	li r3, 53
+	li r4, DNS_PORT
+	call udp_check
+	mv r10, r2                      ; r10 = the reply
+	li r3, QUERY_A_SIZE + 16        ; the question again, and one answer
+	mv r4, r1
+	bne r4, r3, fail
+	li r28, 72
+	lhu r4, 0(r10)                  ; ID 0x1234
+	li r3, 0x3412
+	bne r4, r3, fail
+	lhu r4, 2(r10)                  ; a response, recursion desired and available
+	li r3, 0x8081
+	bne r4, r3, fail
+	lhu r4, 6(r10)                  ; one answer
+	li r3, 0x0100
+	bne r4, r3, fail
+	li r28, 73
+	addi r1, r10, QUERY_A_SIZE + 12 ; its address
+	call get32
+	mv r4, r1
 	li r3, 0x0A010203
 	bne r4, r3, fail
+	; ---- ... and an AAAA query has no answer, at once
+	li r28, 74
+	li r1, DNS_PORT
+	li r2, DNS_SERVER
+	li r3, 53
+	la r4, dns_query_aaaa
+	li r5, QUERY_AAAA_SIZE
+	call udp_send
+	li r28, 75
+	li r1, FRAME_A
+	call eth_recv
+	li r1, FRAME_A
+	li r2, DNS_SERVER
+	li r3, 53
+	li r4, DNS_PORT
+	call udp_check
+	mv r10, r2
+	li r3, QUERY_AAAA_SIZE
+	mv r4, r1
+	bne r4, r3, fail
+	li r28, 76
+	lhu r4, 2(r10)                  ; no error...
+	li r3, 0x8081
+	bne r4, r3, fail
+	lhu r4, 6(r10)                  ; ... and no answer
+	bnez r4, fail
 
 	j pass
 
-; wait_state(r1 = socket, r2 = state): returns once the socket is in it;
-; fails after TIMEOUT cycles
-wait_state:
-	mfcr r16, cycle
-.loop:
-	lw r4, SOCK_STATE(r1)
-	beq r4, r2, .done
-	mfcr r17, cycle
-	sub r17, r17, r16
-	li r3, TIMEOUT
-	bltu r17, r3, .loop
-	j fail
-.done:
-	ret
-
-; wait_rx(r1 = socket, r2 = bytes): returns once RX_SIZE has that many;
-; fails after TIMEOUT cycles
-wait_rx:
-	mfcr r16, cycle
-.loop:
-	lw r4, SOCK_RX_SIZE(r1)
-	bgeu r4, r2, .done
-	mfcr r17, cycle
-	sub r17, r17, r16
-	li r3, TIMEOUT
-	bltu r17, r3, .loop
-	j fail
-.done:
-	ret
-
-; compare(r1 = a, r2 = b, r3 = bytes): fails unless they are the same
-compare:
-	beqz r3, .done
-	lbu r4, 0(r1)
-	lbu r5, 0(r2)
-	bne r4, r5, fail
-	addi r1, r1, 1
-	addi r2, r2, 1
-	addi r3, r3, -1
-	j compare
-.done:
-	ret
-
 s_hello:        .ascii "hello, net"
 s_ping:         .ascii "ping!"
-s_address:      .asciz "10.1.2.3"
+s_pong:         .ascii "pong"
+
+; a query for the A record of "10.1.2.3", ID 0x1234, recursion desired
+dns_query_a:
+	.db 0x12, 0x34, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+	.db 2, "10", 1, "1", 1, "2", 1, "3", 0, 0x00, 0x01, 0x00, 0x01
+; ... and for the AAAA record of "example.com"
+dns_query_aaaa:
+	.db 0x12, 0x35, 0x01, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+	.db 7, "example", 3, "com", 0, 0x00, 0x1C, 0x00, 0x01
+	.align 4

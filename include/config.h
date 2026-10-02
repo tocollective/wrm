@@ -26,7 +26,7 @@ typedef struct config {
 	bool step_mode;
 	bool headless; // no window: runs until the machine powers off or halts
 	const char* trace_path; // retired instructions, NULL = off, "-" = stderr
-	bool net; // the network card is connected to the host's network
+	bool net; // the Ethernet card is connected to the host's network
 	// where the guest may connect and send to, which ports are forwarded
 	net_policy_t net_policy;
 	bool unthrottled; // run as fast as the host can, not at the clock rate

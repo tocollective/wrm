@@ -24,6 +24,12 @@ void display_render(display_t* display, const videocard_t* videocard);
 // Gives the host pointer to the machine (hidden, relative motion) or
 // back to the host; the title says how to get it back.
 void display_capture_mouse(display_t* display, const bool capture);
+// The pixel of a width x height frame under the point (x, y) of the window,
+// as the frame is shown; a point beside the frame gives its nearest edge.
+void display_frame_point(const display_t* display, const float x,
+						 const float y, const uint32_t width,
+						 const uint32_t height, uint32_t* frame_x,
+						 uint32_t* frame_y);
 // Text the title shows after the machine's name, "" for none.
 void display_set_status(display_t* display, const char* status);
 

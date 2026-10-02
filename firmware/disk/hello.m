@@ -30,5 +30,19 @@ let main(argc: UWord, argv: *UByte[]): Word {
         printHex(table[i].id & 0xFF, 2)
         putc('\n')
     }
+
+
+    let mut func(): Void {
+        puts("foo")
+    }
+    let bar(): Void {
+        puts("bar")
+    }
+    func()
+    func = bar
+    func()
+    bar()
+
+    puts("\n")
     return 0
 }

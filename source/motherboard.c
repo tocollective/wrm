@@ -100,6 +100,16 @@ static void motherboard_store(uint8_t* p, const uint8_t size,
 	p[3] = value >> 24;
 }
 
+// Host memory of an access to the VRAM window, NULL if it isn't one.
+static uint8_t* motherboard_vram(motherboard_t* mb, const uint32_t address,
+								 const uint8_t size) {
+	if (address < MB_VRAM_BASE) return NULL;
+	const uint32_t offset = address - MB_VRAM_BASE;
+	if (offset >= VIDEO_VRAM_SIZE || VIDEO_VRAM_SIZE - offset < size)
+		return NULL;
+	return mb->videocard->vram + offset;
+}
+
 // ---- clocked devices --------------------------------------------------------
 
 static void motherboard_timed_run(motherboard_t* mb, const int device,
@@ -123,6 +133,9 @@ static void motherboard_timed_run(motherboard_t* mb, const int device,
 		case MB_TIMED_RTC:
 			rtc_run(mb->rtc, ticks);
 			return;
+		case MB_TIMED_WATCHDOG:
+			watchdog_run(mb->watchdog, ticks);
+			return;
 	}
 	disk_run(mb->disk[device - MB_TIMED_DISK0], ticks);
 }
@@ -143,6 +156,8 @@ static uint64_t motherboard_timed_next(const motherboard_t* mb,
 			return audiocard_next_event(mb->audiocard);
 		case MB_TIMED_RTC:
 			return rtc_next_event(mb->rtc);
+		case MB_TIMED_WATCHDOG:
+			return watchdog_next_event(mb->watchdog);
 	}
 	return disk_next_event(mb->disk[device - MB_TIMED_DISK0]);
 }
@@ -204,6 +219,8 @@ static int motherboard_timed_device(const uint32_t page) {
 			return MB_TIMED_AUDIO;
 		case MB_RTC_BASE:
 			return MB_TIMED_RTC;
+		case MB_WATCHDOG_BASE:
+			return MB_TIMED_WATCHDOG;
 	}
 	const uint32_t index = (page - MB_DISK0_BASE) / MB_IO_PAGE_SIZE;
 	if (page >= MB_DISK0_BASE && index < DISK_COUNT)
@@ -243,11 +260,12 @@ static bool motherboard_device_id(const uint32_t page, uint32_t* id) {
 		{ MB_FLOPPY_BASE, MB_DEVICE_FLOPPY, MB_IRQ_FLOPPY },
 		{ MB_BEEPER_BASE, MB_DEVICE_BEEPER, MB_NO_IRQ },
 		{ MB_MOUSE_BASE, MB_DEVICE_MOUSE, MB_IRQ_MOUSE },
-		{ MB_NET_BASE, MB_DEVICE_NET, MB_IRQ_NET },
+		{ MB_ETH_BASE, MB_DEVICE_ETH, MB_IRQ_ETH },
 		{ MB_AUDIO_BASE, MB_DEVICE_AUDIO, MB_IRQ_AUDIO },
 		{ MB_RTC_BASE, MB_DEVICE_RTC, MB_IRQ_RTC },
 		{ MB_RNG_BASE, MB_DEVICE_RNG, MB_NO_IRQ },
 		{ MB_SHARE_BASE, MB_DEVICE_SHARE, MB_NO_IRQ },
+		{ MB_WATCHDOG_BASE, MB_DEVICE_WATCHDOG, MB_IRQ_WATCHDOG },
 	};
 	uint32_t type = 0, irq = 0;
 	for (size_t i = 0; i < sizeof(devices) / sizeof(devices[0]); i++) {
@@ -314,8 +332,8 @@ static bool motherboard_io_read(motherboard_t* mb, const uint32_t address,
 		case MB_MOUSE_BASE:
 			fail = mouse_read(mb->mouse, offset, size, value);
 			break;
-		case MB_NET_BASE:
-			fail = netcard_read(mb->netcard, offset, size, value);
+		case MB_ETH_BASE:
+			fail = ethcard_read(mb->ethcard, offset, size, value);
 			break;
 		case MB_AUDIO_BASE:
 			fail = audiocard_read(mb->audiocard, offset, size, value);
@@ -328,6 +346,9 @@ static bool motherboard_io_read(motherboard_t* mb, const uint32_t address,
 			break;
 		case MB_SHARE_BASE:
 			fail = share_read(mb->share, offset, size, value);
+			break;
+		case MB_WATCHDOG_BASE:
+			fail = watchdog_read(mb->watchdog, offset, size, value);
 			break;
 	}
 	if (timed >= 0) motherboard_schedule(mb, timed);
@@ -361,8 +382,8 @@ static bool motherboard_io_write_device(motherboard_t* mb, const uint32_t page,
 			return beeper_write(mb->beeper, offset, size, value);
 		case MB_MOUSE_BASE:
 			return mouse_write(mb->mouse, offset, size, value);
-		case MB_NET_BASE:
-			return netcard_write(mb->netcard, offset, size, value);
+		case MB_ETH_BASE:
+			return ethcard_write(mb->ethcard, offset, size, value);
 		case MB_AUDIO_BASE:
 			return audiocard_write(mb->audiocard, offset, size, value);
 		case MB_RTC_BASE:
@@ -371,6 +392,8 @@ static bool motherboard_io_write_device(motherboard_t* mb, const uint32_t page,
 			return rng_write(mb->rng, offset, size, value);
 		case MB_SHARE_BASE:
 			return share_write(mb->share, offset, size, value);
+		case MB_WATCHDOG_BASE:
+			return watchdog_write(mb->watchdog, offset, size, value);
 	}
 	return true;
 }
@@ -415,6 +438,14 @@ static bool motherboard_bus_read(void* ctx, const uint32_t address,
 	if (address >= MB_IO_BASE)
 		return motherboard_io_read(mb, address, size, value);
 
+	// VRAM changes only at the video card's events (a DMA word, an engine
+	// command), which have all run by now: it needs no catching up
+	const uint8_t* vram = motherboard_vram(mb, address, size);
+	if (vram) {
+		*value = motherboard_load(vram, size);
+		return false;
+	}
+
 	// unaligned, across two chunks
 	size_t offset = 0;
 	ram_t* ram = motherboard_find_ram(mb, address, &offset);
@@ -435,12 +466,12 @@ static bool motherboard_bus_read(void* ctx, const uint32_t address,
 
 // Instruction fetches and page table walks: like a read, but the I/O
 // region is a bus error, so a fetch down a mispredicted path never has a
-// device's side effects (e.g. popping the UART FIFO).
+// device's side effects (e.g. popping the UART FIFO). Neither runs from
+// the VRAM window: code and page tables are in RAM and ROM.
 // returns true on bus error
 static bool motherboard_bus_fetch(void* ctx, const uint32_t address,
 								  const uint8_t size, uint32_t* value) {
-	if (address >= MB_IO_BASE && address - MB_IO_BASE < MB_IO_SIZE)
-		return true;
+	if (address >= MB_VRAM_BASE && address < MB_ROM_BASE) return true;
 	return motherboard_bus_read(ctx, address, size, value);
 }
 
@@ -464,6 +495,13 @@ static bool motherboard_bus_write(void* ctx, const uint32_t address,
 		return failed;
 	}
 
+	uint8_t* vram = motherboard_vram(mb, address, size);
+	if (vram) {
+		motherboard_store(vram, size, value);
+		cpu_invalidate_reservation(mb->cpu, address, size);
+		return false;
+	}
+
 	// unaligned, across two chunks
 	size_t offset = 0;
 	ram_t* ram = motherboard_find_ram(mb, address, &offset);
@@ -485,7 +523,8 @@ static bool motherboard_bus_write(void* ctx, const uint32_t address,
 	return true;
 }
 
-// DMA from devices: RAM only, ROM and the I/O region are bus errors.
+// DMA of the disks: RAM and the VRAM window; ROM and the I/O region are
+// bus errors.
 // returns true on bus error
 static bool motherboard_dma_read(void* ctx, const uint32_t address,
 								 const uint8_t size, uint32_t* value) {
@@ -500,9 +539,9 @@ static bool motherboard_dma_write(void* ctx, const uint32_t address,
 	return motherboard_bus_write(ctx, address, size, value);
 }
 
-// DMA of the video, network and audio cards: reads RAM or ROM (e.g. the
-// firmware's font, a request or a sample in the firmware), writes RAM
-// only; the I/O region is a bus error.
+// DMA of the video, network and audio cards: reads RAM, the VRAM window
+// or ROM (e.g. the firmware's font, a request or a sample in the
+// firmware), writes RAM or the VRAM window; the I/O region is a bus error.
 // returns true on bus error
 static bool motherboard_video_dma_read(void* ctx, const uint32_t address,
 									   const uint8_t size, uint32_t* value) {
@@ -568,13 +607,14 @@ motherboard_t* motherboard_create(void) {
 			mb->pic, MB_IRQ_VIDEO, video_dma, (uint32_t)mb->clock->rate);
 	mb->beeper = beeper_create((uint32_t)mb->clock->rate);
 	mb->mouse = mouse_create(mb->pic, MB_IRQ_MOUSE);
-	mb->netcard = netcard_create(
-			mb->pic, MB_IRQ_NET, video_dma, cfg->net, &cfg->net_policy);
+	mb->ethcard = ethcard_create(
+			mb->pic, MB_IRQ_ETH, video_dma, cfg->net, &cfg->net_policy);
 	mb->audiocard = audiocard_create(
 			mb->pic, MB_IRQ_AUDIO, video_dma, (uint32_t)mb->clock->rate);
 	mb->rtc = rtc_create(mb->pic, MB_IRQ_RTC, (uint32_t)mb->clock->rate);
 	mb->rng = rng_create();
 	mb->share = share_create(video_dma, cfg->share_path, cfg->share_readonly);
+	mb->watchdog = watchdog_create(mb->pic, MB_IRQ_WATCHDOG);
 
 	for (int i = 0; i < RAM_SLOT_COUNT; i++) {
 		mb->ram_slot[i].ram = NULL;
@@ -598,6 +638,11 @@ motherboard_t* motherboard_create(void) {
 
 void motherboard_destroy(motherboard_t* mb) {
 	if (!mb) return;
+	if (mb->watchdog) {
+		watchdog_destroy(mb->watchdog);
+		mb->watchdog = NULL;
+	}
+
 	if (mb->share) {
 		share_destroy(mb->share);
 		mb->share = NULL;
@@ -618,9 +663,9 @@ void motherboard_destroy(motherboard_t* mb) {
 		mb->audiocard = NULL;
 	}
 
-	if (mb->netcard) {
-		netcard_destroy(mb->netcard);
-		mb->netcard = NULL;
+	if (mb->ethcard) {
+		ethcard_destroy(mb->ethcard);
+		mb->ethcard = NULL;
 	}
 
 	if (mb->mouse) {
@@ -715,10 +760,11 @@ void motherboard_reset(motherboard_t* mb, const power_reset_cause_t cause) {
 	disk_reset(mb->floppy);
 	beeper_reset(mb->beeper);
 	mouse_reset(mb->mouse);
-	netcard_reset(mb->netcard);
+	ethcard_reset(mb->ethcard);
 	audiocard_reset(mb->audiocard);
 	rtc_reset(mb->rtc);
 	share_reset(mb->share);
+	watchdog_reset(mb->watchdog);
 	pic_reset(mb->pic);
 	motherboard_schedule_all(mb);
 }
@@ -756,9 +802,12 @@ uint64_t motherboard_run(motherboard_t* mb, const uint64_t ticks) {
 		cpu_set_irq(cpu, pic_irq(mb->pic));
 		cpu_update(cpu);
 
-		// requested by a store the CPU has just made
+		// requested by a store the CPU has just made, or the watchdog bit
+		// at the start of the tick
 		if (mb->power->request == POWER_REQUEST_RESET)
 			motherboard_reset(mb, POWER_RESET_CAUSE_SOFTWARE);
+		else if (mb->watchdog->bitten)
+			motherboard_reset(mb, POWER_RESET_CAUSE_WATCHDOG);
 	}
 	motherboard_sync_all(mb);
 	return mb->tick - start;

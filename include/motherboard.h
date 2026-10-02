@@ -8,9 +8,9 @@
 #include "devices/audiocard.h"
 #include "devices/beeper.h"
 #include "devices/disk.h"
+#include "devices/ethcard.h"
 #include "devices/keyboard.h"
 #include "devices/mouse.h"
-#include "devices/netcard.h"
 #include "devices/pic.h"
 #include "devices/pit.h"
 #include "devices/power.h"
@@ -19,6 +19,7 @@
 #include "devices/share.h"
 #include "devices/uart.h"
 #include "devices/videocard.h"
+#include "devices/watchdog.h"
 #include "ram.h"
 #include "rom.h"
 
@@ -27,6 +28,7 @@
 
 // Memory map (see docs/SPECIFICATION.md)
 #define MB_RAM_BASE 0x00000000 // installed slots are mapped back to back
+#define MB_VRAM_BASE 0xFC000000 // the video card's VRAM, VIDEO_VRAM_SIZE bytes
 #define MB_IO_BASE 0xFD000000 // memory-mapped devices, one page each
 #define MB_IO_SIZE 0x01000000
 #define MB_IO_PAGE_SIZE 0x1000
@@ -40,11 +42,12 @@
 #define MB_FLOPPY_BASE 0xFD008000
 #define MB_BEEPER_BASE 0xFD009000
 #define MB_MOUSE_BASE 0xFD00A000
-#define MB_NET_BASE 0xFD00B000
+#define MB_ETH_BASE 0xFD00B000
 #define MB_AUDIO_BASE 0xFD00C000
 #define MB_RTC_BASE 0xFD00D000
 #define MB_RNG_BASE 0xFD00E000
 #define MB_SHARE_BASE 0xFD00F000
+#define MB_WATCHDOG_BASE 0xFD010000
 #define MB_ROM_BASE 0xFE000000 // ROM_MAX_SIZE bytes up to 0xFFFFFFFF
 
 // IRQ lines (see docs/SPECIFICATION.md)
@@ -55,10 +58,11 @@
 #define MB_IRQ_VIDEO 5 // after the disks
 #define MB_IRQ_FLOPPY 6
 #define MB_IRQ_MOUSE 7
-#define MB_IRQ_NET 8
+#define MB_IRQ_ETH 8
 #define MB_IRQ_AUDIO 9
 #define MB_IRQ_RTC 10
 #define MB_IRQ_POWER 11
+#define MB_IRQ_WATCHDOG 12
 
 // Every device's page has an ID register at MB_IO_ID: the type in bits
 // 31:16, the version in 15:8 and the IRQ line in 7:0 (MB_NO_IRQ for none)
@@ -78,11 +82,12 @@ typedef enum mb_device_type {
 	MB_DEVICE_FLOPPY = 8,
 	MB_DEVICE_BEEPER = 9,
 	MB_DEVICE_MOUSE = 10,
-	MB_DEVICE_NET = 11,
+	MB_DEVICE_ETH = 11, // Ethernet card
 	MB_DEVICE_AUDIO = 12,
 	MB_DEVICE_RTC = 13,
 	MB_DEVICE_RNG = 14, // random number generator
 	MB_DEVICE_SHARE = 15, // shared folder
+	MB_DEVICE_WATCHDOG = 16,
 } mb_device_type_t;
 
 typedef struct ram_slot {
@@ -109,6 +114,7 @@ typedef enum mb_timed {
 	MB_TIMED_BEEPER,
 	MB_TIMED_AUDIO,
 	MB_TIMED_RTC,
+	MB_TIMED_WATCHDOG,
 	MB_TIMED_COUNT,
 } mb_timed_t;
 
@@ -128,11 +134,12 @@ typedef struct motherboard {
 	disk_t* floppy; // the same controller with a removable disk
 	beeper_t* beeper;
 	mouse_t* mouse;
-	netcard_t* netcard;
+	ethcard_t* ethcard;
 	audiocard_t* audiocard;
 	rtc_t* rtc;
 	rng_t* rng;
 	share_t* share;
+	watchdog_t* watchdog;
 
 	uint64_t tick; // clock ticks since power-on, the one running included
 	uint64_t synced[MB_TIMED_COUNT]; // the tick each device has run up to

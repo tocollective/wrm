@@ -489,25 +489,39 @@ static void monitor_info(monitor_t* monitor) {
 	monitor_print_disk(monitor, "floppy", mb->floppy);
 	const videocard_t* video = mb->videocard;
 	monitor_printf(monitor,
-				   "video   mode %X control %X start %08X frame %u%s%s\n",
+				   "video   mode %X control %X start %08X frame %u%s%s%s\n",
 				   (unsigned)video->mode,
 				   (unsigned)video->control,
 				   (unsigned)video->start,
 				   (unsigned)video->frame,
 				   video->busy ? " busy" : "",
-				   video->vblank ? " vblank" : "");
+				   video->vblank ? " vblank" : "",
+				   video->cursor_control ? " cursor" : "");
 	monitor_printf(monitor,
 				   "uart    rx %u bytes\n",
 				   (unsigned)mb->uart->rx_count);
 	monitor_printf(monitor,
-				   "keys    %u events, mouse %s, %u events\n",
+				   "keys    %u events, mouse %s%s, %u events\n",
 				   (unsigned)mb->keyboard->count,
 				   mb->mouse->enabled ? "on" : "off",
+				   mb->mouse->absolute ? " (absolute)" : "",
 				   (unsigned)mb->mouse->count);
-	monitor_printf(monitor, "net     %s, sockets", mb->netcard->link ? "link" : "no link");
-	for (int i = 0; i < NET_SOCKET_COUNT; i++)
-		monitor_printf(monitor, " %u", (unsigned)mb->netcard->socket[i].state);
-	monitor_printf(monitor, "\n");
+	const ethcard_t* eth = mb->ethcard;
+	monitor_printf(monitor,
+				   "eth     %s, control %X pending %X rx %u/%u tx %u/%u\n",
+				   eth->link ? "link" : "no link",
+				   (unsigned)eth->control,
+				   (unsigned)eth->pending,
+				   (unsigned)eth->rx_next,
+				   (unsigned)eth->rx_size,
+				   (unsigned)eth->tx_next,
+				   (unsigned)eth->tx_size);
+	monitor_printf(monitor,
+				   "wdog    control %X value %u%s%s\n",
+				   (unsigned)mb->watchdog->control,
+				   (unsigned)mb->watchdog->value,
+				   mb->watchdog->barked ? " grace" : "",
+				   mb->watchdog->bark ? " bark" : "");
 	monitor_printf(monitor,
 				   "rtc     control %X alarm %llu%s\n",
 				   (unsigned)mb->rtc->control,

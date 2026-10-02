@@ -138,6 +138,13 @@ class CodeGen:
 					self.diag.error(e.loc, e.msg)
 			elif isinstance(d, VarDecl) and not d.extern:
 				self.global_var(d.sym)
+		# functions in functions and function literals (3.8): each is a
+		# function of its own, with a local symbol
+		for d in m.nested:
+			try:
+				self.program.code.append(FuncGen(self, d).gen())
+			except CompileError as e:
+				self.diag.error(e.loc, e.msg)
 		path = os.path.splitext(m.path)[0] + ".asm"
 		asm_defined = set()
 		if os.path.isfile(path):
@@ -168,6 +175,7 @@ class CodeGen:
 				n += 1
 				stem = f"{base}{n}"
 			stems.add(stem)
+			labels = set()
 			for sym in m.scope.values():
 				if sym.kind not in ("var", "func"):
 					continue
@@ -177,10 +185,22 @@ class CodeGen:
 					sym.label = sym.export_names[0]
 				else:
 					sym.label = f"{stem}__{sym.name}"
+				labels.update([sym.label] + sym.export_names)
 				for name in dict.fromkeys([sym.label] + sym.export_names):
 					if name in ASM_RESERVED:
 						self.diag.error(sym.decl.loc, f"'{name}' can't be a symbol: the assembler "
 													  f"reads it as a register")
+			# nested functions: stem__main__twice, and _2, _3 for the same
+			# name again (in another block of the same function)
+			for d in getattr(m, "nested", []):
+				sym = d.sym
+				base = label = f"{stem}__{sym.local_name}"
+				n = 1
+				while label in labels:
+					n += 1
+					label = f"{base}_{n}"
+				labels.add(label)
+				sym.label = label
 
 	def string(self, data):
 		if data not in self.strings:
@@ -216,6 +236,8 @@ class CodeGen:
 			self.reloc(image, off, (self.string(e.value), 0))
 		elif isinstance(e, NullLit):
 			pass
+		elif isinstance(e, FuncLit):
+			self.reloc(image, off, (e.sym.label, 0))
 		elif isinstance(e, Name):
 			if e.sym.kind == "func":
 				self.reloc(image, off, (e.sym.label, 0))
@@ -421,7 +443,8 @@ class FuncGen:
 		nsaved = min(self.max_depth, NREGS)
 		frame = align_up(self.max_locals + 4 * nsaved + self.outgoing, 8)
 		label = self.sym.label
-		out = [f"\n; {d.name} ({self.decl.loc.path}:{d.loc.line})", f"{label}:"]
+		name = d.name if isinstance(d, FuncDecl) else self.sym.title.strip("'")
+		out = [f"\n; {name} ({self.decl.loc.path}:{d.loc.line})", f"{label}:"]
 		self.lines = out
 		self.emit("addi sp, sp, -8")
 		self.emit("sw ra, 4(sp)")
@@ -459,6 +482,9 @@ class FuncGen:
 
 	def st_Block(self, s):
 		self.block(s)
+
+	def st_FuncDecl(self, s):
+		pass    # a function in a function is made on its own (CodeGen.run)
 
 	def st_VarDecl(self, s):
 		var, t = s.var, s.var.type
@@ -876,6 +902,11 @@ class FuncGen:
 		self.emit(f"la {r}, {self.cg.string(e.value)}")
 		return r
 
+	def ex_FuncLit(self, e):
+		r = self.push()
+		self.emit(f"la {r}, {e.sym.label}")
+		return r
+
 	def ex_NullLit(self, e):
 		r = self.push()
 		self.emit(f"li {r}, 0")
@@ -1187,6 +1218,16 @@ class FuncGen:
 		if name == "mtcr":
 			r = self.expr(args[1])
 			self.emit(f"mtcr {args[0].const}, {r}")
+			return r
+		if name in ("clz", "ctz", "popcount", "bswap"):
+			r = self.expr(args[0])
+			self.emit(f"{'popcnt' if name == 'popcount' else name} {r}, {r}")
+			return r
+		if name in ("rotl", "rotr"):
+			r = self.expr(args[0])
+			n = self.expr(args[1])
+			self.emit(f"{'rol' if name == 'rotl' else 'ror'} {r}, {r}, {n}")
+			self.pop()
 			return r
 		if name == "tlbi":
 			r = self.expr(args[0])

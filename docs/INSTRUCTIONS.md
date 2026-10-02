@@ -7,7 +7,7 @@ The opcode is always the lowest byte.
 
 - `r0`–`r31` — 32-bit general purpose registers, `r0` always reads as zero.
 - `pc` — program counter, reset value `0xFE000000` (start of ROM).
-- `cr0`–`cr15` — control registers, see [Control registers](#control-registers).
+- `cr0`–`cr17` — control registers, see [Control registers](#control-registers).
 
 ## Privilege modes
 
@@ -18,7 +18,8 @@ User mode can't:
 
 - execute `HLT`, `WFI`, `IRET`, `MFCR`, `MTCR` and `TLBI` — they raise a
   privileged instruction fault; `MFCR` of the
-  [counters](#counters) is the exception,
+  [counters](#counters) and `MFCR` and `MTCR` of
+  [`FCSR`](#floating-point-environment) are the exceptions,
 - access pages without the `U` bit while the MMU is on (page fault).
 
 User code enters the supervisor only through the handler: with `SYSCALL`,
@@ -44,13 +45,14 @@ Field positions: `opcode` [7:0], `rd` [12:8], `rs1` [17:13], `rs2` [22:18],
 Reserved fields must be zero; an instruction with a reserved bit set is an
 illegal instruction. They are bits [31:8] of the N-type, bits [31:23] of
 the R-type, and the fields the tables below mark as reserved: `rs2` of
-`LL` and of the [floating-point](#floating-point) instructions with one
-source, `rs1` of `MFCR`, `rd` of `MTCR`, `rd` of `TLBI` and its `rs1` in
-mode 2. A `TLBI` mode other than 0–2 in `imm14` is an illegal instruction
+`LL` and of the [floating-point](#floating-point) and
+[bit manipulation](#bit-manipulation) instructions with one source,
+`rs1` of `MFCR`, `rd` of `MTCR`, `rd` of `TLBI` and its `rs1` in mode 2. A `TLBI` mode other than 0–2 in `imm14` is an illegal instruction
 too. This keeps them free for future extensions.
 
-`imm14` is sign-extended, except for `ANDI`, `ORI`, `XORI`, `SHLI`, `SHRI`
-and `SARI`, where it is zero-extended. Shift amounts use the low 5 bits.
+`imm14` is sign-extended, except for `ANDI`, `ORI`, `XORI`, `SHLI`, `SHRI`,
+`SARI` and `RORI`, where it is zero-extended. Shift and rotate amounts use
+the low 5 bits.
 
 ## Opcodes
 
@@ -119,6 +121,31 @@ The low nibble matches the register form.
 | `0x27` | `SARI rd, rs1, imm`    | `rd = rs1 >> imm` (arithmetic) |
 | `0x28` | `SLTI rd, rs1, imm`    | `rd = rs1 < imm` (signed)      |
 | `0x29` | `SLTIU rd, rs1, imm`   | `rd = rs1 < imm` (unsigned)    |
+
+### Bit manipulation
+
+All are R-type except `RORI`, which is I-type like `SHLI`. The ones with
+a single source have `rs2` reserved.
+
+| Opcode | Mnemonic              | Operation                                        |
+|--------|-----------------------|--------------------------------------------------|
+| `0x90` | `CLZ rd, rs1`         | `rd` = zero bits above the highest 1 bit of `rs1`, 32 for 0 |
+| `0x91` | `CTZ rd, rs1`         | `rd` = zero bits below the lowest 1 bit of `rs1`, 32 for 0 |
+| `0x92` | `POPCNT rd, rs1`      | `rd` = number of 1 bits in `rs1`                 |
+| `0x93` | `BSWAP rd, rs1`       | the bytes of `rs1` in reverse order              |
+| `0x94` | `SEXT.B rd, rs1`      | `rs1` bits 7:0, sign-extended                    |
+| `0x95` | `SEXT.H rd, rs1`      | `rs1` bits 15:0, sign-extended                   |
+| `0x96` | `ROL rd, rs1, rs2`    | `rs1` rotated left by `rs2`                      |
+| `0x97` | `ROR rd, rs1, rs2`    | `rs1` rotated right by `rs2`                     |
+| `0x98` | `RORI rd, rs1, imm`   | `rs1` rotated right by `imm`                     |
+| `0x99` | `MIN rd, rs1, rs2`    | the smaller of the two (signed)                  |
+| `0x9A` | `MAX rd, rs1, rs2`    | the larger of the two (signed)                   |
+| `0x9B` | `MINU rd, rs1, rs2`   | the smaller of the two (unsigned)                |
+| `0x9C` | `MAXU rd, rs1, rs2`   | the larger of the two (unsigned)                 |
+
+A rotate left by `n` is a rotate right by `32 - n`, so there is no `ROLI`.
+Zero-extending a byte is `ANDI rd, rs1, 0xFF`; a half-word takes `SHLI`
+and `SHRI` by 16.
 
 ### Upper immediate
 
@@ -235,11 +262,14 @@ instructions are R-type and take one cycle in EX, like the integer ALU.
 `FMADD` and `FMSUB` read `rd` as their third source, like stores and
 branches do.
 
-Results are rounded to nearest, ties to even, except `FTOI`/`FTOU`, which
-round toward zero like a C cast. Subnormal numbers are supported. There
-are no other rounding modes, no exception flags and no floating-point
-traps: an invalid operation gives NaN, an overflow gives ±infinity,
-division by zero gives ±infinity (or NaN for `0 / 0`).
+Results are rounded in the rounding mode of
+[`FCSR`](#floating-point-environment), to nearest with ties to even after
+reset, except `FTOI`/`FTOU`, which always round toward zero like a C
+cast. Subnormal numbers are supported. There are no floating-point traps:
+an invalid operation gives NaN, an overflow gives ±infinity or the
+largest finite number (depending on the rounding mode), division by zero
+gives ±infinity (or NaN for `0 / 0`), and each of them sets its flag in
+`FCSR`.
 
 - **NaN.** Every instruction that computes a NaN (`FADD` to `FMSUB`)
   returns the canonical NaN `0x7FC00000`; the payload and sign of NaN
@@ -268,6 +298,58 @@ The assembler has pseudo-instructions for the common sign operations:
 `FLT`/`FLE` with the operands swapped. `fli rd, 1.5` loads the bits of a
 float constant, and `.float` emits them as data.
 
+### Floating-point environment
+
+`FCSR` (control register 17) holds the IEEE 754 exception flags and the
+rounding mode. Unlike the other control registers, user mode can read
+and write it with `MFCR` and `MTCR`, so `<fenv.h>` needs no system call.
+
+| Bits | Field    | Description                                        |
+|------|----------|----------------------------------------------------|
+| 0    | `NX`     | inexact: the result was rounded                    |
+| 1    | `UF`     | underflow: an inexact result below the smallest normal number |
+| 2    | `OF`     | overflow: the rounded result is too large          |
+| 3    | `DZ`     | division by zero: `FDIV` of a finite nonzero number by zero |
+| 4    | `NV`     | invalid operation                                  |
+| 7:5  | `FRM`    | rounding mode, see below                           |
+
+| `FRM` | Rounding                                            |
+|-------|-----------------------------------------------------|
+| `0`   | `RNE`: to nearest, ties to even (the value after reset) |
+| `1`   | `RTZ`: toward zero                                  |
+| `2`   | `RDN`: toward −infinity                             |
+| `3`   | `RUP`: toward +infinity                             |
+| `4`   | `RMM`: to nearest, ties away from zero              |
+
+Other bits read as zero. `FRM` values 5–7 are reserved: a write of one
+leaves `FRM` as it was and still writes the flags.
+
+The flags are sticky: an instruction only sets them, software clears
+them by writing `FCSR`. They are set when the instruction retires, so an
+instruction squashed in the pipeline sets none, and `MFCR` of `FCSR`
+sees the flags of every instruction before it. `MTCR FCSR` refetches the
+instructions after it, like `MTCR STATUS`, so they round in the new mode.
+
+What sets which flag:
+
+- **`NV`:** a signaling NaN operand of any arithmetic instruction, of
+  `FMIN`/`FMAX` and of `FEQ`; any NaN operand of `FLT`/`FLE`; ∞ − ∞
+  (also within `FMADD`/`FMSUB`), 0 × ∞ (even with a NaN addend), 0 / 0,
+  ∞ / ∞, the square root of a number below zero (but −0); `FTOI`/`FTOU`
+  of NaN, ±infinity or a value out of range, including `FTOU` of −1 and
+  below. Such results are the canonical NaN, or the saturated integer.
+- **`DZ`:** `FDIV` of a finite nonzero number by ±0.
+- **`OF`:** the result rounded with an unbounded exponent is too large;
+  `NX` is set with it.
+- **`UF`:** the result is nonzero, below the smallest normal number
+  (2<sup>−126</sup>) before rounding, and inexact. Tininess is detected
+  before rounding.
+- **`NX`:** the result differs from the exact one: rounded, overflowed,
+  or a fraction cut off by `FTOI`/`FTOU`.
+
+`FSGNJ`, `FSGNJN`, `FSGNJX` and `FCLASS` set no flags. An exact
+result that cancels to zero is +0 except in `RDN`, where it is −0.
+
 ## Interrupts
 
 ### Control registers
@@ -290,6 +372,8 @@ float constant, and `.float` emits them as data.
 | `13`   | `TCTRL0`  | `0`   | trigger 0: what it matches                    |
 | `14`   | `TADDR1`  | `0`   | trigger 1: address                            |
 | `15`   | `TCTRL1`  | `0`   | trigger 1: what it matches                    |
+| `16`   | `HARTID`  | `0`   | the number of this core, always 0 (read-only), see [Cores](#cores) |
+| `17`   | `FCSR`    | `0`   | FP exception flags and rounding mode, also in user mode, see [Floating-point environment](#floating-point-environment) |
 
 ### Taking an interrupt
 
@@ -331,15 +415,15 @@ it completes: an interrupt can arrive right after `MTCR STATUS` sets `IE`
 `EXL`).
 
 A mode change takes effect for the next instruction: `IRET` jumps to `EPC`
-only when it completes, and `MTCR STATUS` refetches the instructions after
-it. Writing `UM` with `MTCR` switches to user mode directly, continuing
+only when it completes, and `MTCR STATUS` (and `MTCR FCSR`) refetches the
+instructions after it. Writing `UM` with `MTCR` switches to user mode directly, continuing
 after the `MTCR`.
 
 ### Counters
 
 `CYCLE`/`CYCLEH` and `INSTRET`/`INSTRETH` are two 64-bit counters split
-into halves. They are read-only and, unlike the other control registers,
-can be read with `MFCR` in user mode too.
+into halves. They are read-only and, unlike the other control registers
+but `FCSR`, can be read with `MFCR` in user mode too.
 
 - `CYCLE` counts clock cycles, including the ones spent in `WFI`. It
   stops while the CPU is halted.
@@ -377,9 +461,29 @@ control registers, supervisor only; an OS passes on what user code needs.
 | 3   | `MULH`, `MULHU` and `MULHSU`                               |
 | 4   | `TLBI` modes 1 and 2, see [TLB](#tlb)                      |
 | 5   | [debugging](#debugging): `STATUS.SS` and the triggers      |
+| 6   | [bit manipulation](#bit-manipulation): `CLZ` to `MAXU`     |
+| 7   | [`FCSR`](#floating-point-environment): FP flags and rounding modes |
 
 Other bits read as zero. This CPU implements all of them: `CPUID` reads
-`0x0100003F`.
+`0x010000FF`.
+
+### Cores
+
+The machine has one core, and the instruction set is described for one.
+`HARTID` (control register 16) is the number of the core that reads it,
+always 0 here; it is read-only and supervisor only, like `CPUID`. A
+kernel that keeps its per-CPU data (the current thread, its stack, run
+queues) in a table indexed by `HARTID` rather than in plain globals is
+ready for more cores without a rewrite.
+
+Should a machine with several cores come, the rest is meant to work like
+this: every core resets with its own `HARTID`, core 0 runs the firmware
+and the others wait for an interprocessor interrupt; `LL`/`SC` reserve a
+physical word against writes from every core and DMA; `FENCE` orders
+this core's memory operations as the others see them; a TLB caches
+translations for its own core only, so changing a mapping that other
+cores may have cached takes an interrupt to each of them to run `TLBI`
+(a TLB shootdown).
 
 ## Exceptions
 

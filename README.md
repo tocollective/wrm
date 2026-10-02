@@ -43,10 +43,10 @@ bin/wrm081632 [--rom PATH] [--ram SIZE[,...]] [--clock HZ]
 | `--floppy PATH`    | disk image in the floppy drive; a file dropped on the window replaces it while the machine runs |
 | `--share PATH[:ro]` | share a host folder with the guest (see [Shared folder](#shared-folder)); read-only with `:ro` |
 | `--mute`           | no sound from the beeper and the audio card               |
-| `--no-net`         | cut the network card off the host's network (see [Network](#network)) |
+| `--no-net`         | cut the Ethernet card off the host's network (see [Network](#network)) |
 | `--net-allow RULE` | let the guest connect and send to `RULE`, `ADDR[/BITS][:PORT[-PORT]]` (e.g. `127.0.0.1:8000-8099`); see [Network](#network) |
 | `--net-deny RULE`  | keep the guest from `RULE`; of all the rules, the last that matches wins |
-| `--net-forward [ADDR:]HOST_PORT:GUEST_PORT` | a guest listening on `GUEST_PORT` listens on `ADDR:HOST_PORT` of the host (`ADDR` is `127.0.0.1` if left out) |
+| `--net-forward [ADDR:]HOST_PORT:GUEST_PORT` | connections and datagrams to `ADDR:HOST_PORT` of the host go to the guest's TCP and UDP port `GUEST_PORT` (`ADDR` is `127.0.0.1` if left out) |
 | `--headless`       | no window and no sound (the video card, the beeper and the audio card still run, but nothing is shown or heard); the UART console still uses stdin and stdout |
 | `--unthrottled`    | run as fast as the host can, not at the clock rate (see [Speed and determinism](#speed-and-determinism)) |
 | `--deterministic`  | the same ROM, disks and input give the same run: `--unthrottled`, a virtual RTC, a seeded random number generator, the network polled at fixed ticks |
@@ -102,24 +102,36 @@ bin/wrm081632 --share ./exchange          # the guest sees ./exchange as /
 The mouse is relative, like a PS/2 one. Once software has enabled it, a
 click in the window hands it the pointer (the click itself isn't passed
 on); Ctrl+Alt or switching to another window takes the pointer back.
-The title bar says when the machine has it. See
+The title bar says when the machine has it. Software can make it
+absolute instead, like a USB tablet: the machine then follows the
+host's pointer over the window, in pixels of its video mode, and nothing
+is captured; the video card's hardware cursor can draw the pointer. See
 [docs/SPECIFICATION.md](docs/SPECIFICATION.md#mouse).
 
 ## Network
 
-The network card has TCP/IP in hardware, like the WIZnet W5500: software
-opens up to 8 TCP or UDP sockets and looks up host names, and the
-emulator maps them to sockets of the host. It is connected unless the
-emulator runs with `--no-net`, which keeps a guest off the network.
-See [docs/SPECIFICATION.md](docs/SPECIFICATION.md#network-card).
+The machine has an Ethernet card: software sends and receives frames
+and brings its own TCP/IP stack, and the emulator plays the network
+behind the card, as QEMU's user networking does. The guest gets
+`10.0.2.15` by DHCP, with the gateway `10.0.2.2` (which is also the host
+itself) and the DNS server `10.0.2.3`; its TCP, UDP and ping go out
+through the host's sockets, so nothing needs setting up and no
+privileges. Ping leaves the machine only where the host allows
+unprivileged ICMP sockets (macOS; Linux with
+`net.ipv4.ping_group_range`); the gateway always answers it. The card is
+connected unless the emulator runs with `--no-net`, which keeps a guest
+off the network. The firmware's network demo shows the way (DHCP, ARP,
+ping and DNS in `firmware/net.m`). See
+[docs/SPECIFICATION.md](docs/SPECIFICATION.md#ethernet-card).
 
 The guest reaches the internet, but not the host itself or the networks
-around it: connections and datagrams to `127.0.0.0/8`, the private
-networks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), link-local
-and other non-public addresses are refused with error 8, so a guest
-can't get at services that trust the host. Rules open or close more,
-each an address with an optional prefix length and port range; the last
-rule that matches decides:
+around it: connections to `127.0.0.0/8` (and so to `10.0.2.2`), the
+private networks (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`),
+link-local and other non-public addresses are refused with a reset, and
+datagrams and pings to them are dropped, so a guest can't get at
+services that trust the host. Rules open or close more, each an address
+with an optional prefix length and port range; the last rule that
+matches decides:
 
 ```sh
 bin/wrm081632 --net-allow 127.0.0.1:8000           # a server on the host
@@ -127,9 +139,10 @@ bin/wrm081632 --net-allow 192.168.1.0/24           # the local network
 bin/wrm081632 --net-deny 0.0.0.0/0 --net-allow 93.184.215.14:443  # one site
 ```
 
-Sockets the guest listens on are opened on `127.0.0.1` and the same
-port, so only programs on the host can connect. `--net-forward` opens a
-guest's port somewhere else, e.g. `--net-forward 0.0.0.0:8080:80` lets
+`--net-forward` lets the host reach the guest: connections and datagrams
+to a port of the host go to a port of the guest while the card is on,
+from `10.0.2.2`. By default the host's port is on `127.0.0.1`, so only
+programs on the host can connect; `--net-forward 0.0.0.0:8080:80` lets
 the whole network reach a server on the guest's port 80 through the
 host's port 8080.
 
@@ -156,7 +169,8 @@ and connects only to public addresses:
 | `--allow CIDR`  | also connect to a loopback, private or other non-public network, e.g. `127.0.0.1/32` |
 | `--listen ADDR`, `--port N` | where it listens, `127.0.0.1:8080` by default |
 
-Listening and UDP are not available in a browser.
+In a browser only TCP and DNS go out, through the proxy: UDP, ping and
+forwarded ports are not available.
 
 ## Speed and determinism
 
@@ -188,7 +202,8 @@ ticks after the event before. `#` starts a comment.
 1000      key 4 down        # a key by its USB HID usage ID (4 = A)
 +500      key 4 up
 32000000  uart hello\n      # bytes for the UART, with \n \r \t \\ \xNN
-+0        mouse 5 -3        # motion
++0        mouse 5 -3        # motion (a relative mouse)
++0        point 320 240     # where the pointer is (an absolute mouse)
 +0        button left down  # left, right or middle; down or up
 +0        wheel -1
 64000000  power             # the power button: asks the guest to power off
@@ -383,7 +398,7 @@ runs every ROM through it as a test of its own.
 | `sound`    | the beeper's registers and `DURATION` timing; the audio card's voices, loops, signals and DMA faults |
 | `mouse`    | the mouse's registers (headless, so without events)         |
 | `input`    | an input script in deterministic mode, the UART from stdin  |
-| `net`      | the network card without a link (`--no-net`), and with one over the host's loopback: TCP, UDP, DNS; the rules and a forwarded port |
+| `net`      | the Ethernet card and its rings, ARP, ping and DHCP; TCP both ways through a forwarded port, UDP, DNS; the rules; no link (`--no-net`) |
 | `rtc`      | the real-time clock: the host's time and its latch, the alarm and its IRQ line; the virtual time |
 | `rng`      | the random number generator: the host's bits, and the ChaCha20 stream of a seed |
 | `share`    | the shared folder: paths and their limits, files, directories, handles; read-only, and no folder |
@@ -431,6 +446,15 @@ The firmware is packed into the build from `bin/firmware.rom`
 (override with `-DWRM081632_WEB_FIRMWARE=path`). The UART console has
 no input in the browser; its output goes to the page and the JS console.
 For the network, run `tools/netproxy.py` alongside (see [Network](#network)).
+
+The page (`web/shell.html`) keeps disk images in the browser: *Load
+image* puts one in as disk 0 and restarts the machine with it, *Insert*
+puts one in the floppy drive while the machine runs (so does dropping a
+file on the screen, but that one isn't kept). They are saved in the
+browser's IndexedDB for the page's address, so the next visit starts
+with them; the guest's writes are saved when it flushes the disk and
+every few seconds. *Download* gives the disk image back as a file,
+*Forget saved disks* deletes them.
 
 # Useful links
 

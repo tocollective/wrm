@@ -21,7 +21,7 @@
 //   lib.m            UART output and helpers (puts, show, sort, ...)
 //   video.m          video card setup, text, the screen console
 //   mouse.m          enabling the mouse, decoding its events
-//   net.m            the network card's commands, waiting for them
+//   net.m            the Ethernet card's driver, ARP, ping, UDP, DHCP, DNS
 //   audio.m          playing samples on the audio card's voices
 //   font.m           the 8x16 font, loaded into VRAM by videoInit
 //   trap.m, .asm     the trap entry and the dispatch of interrupts

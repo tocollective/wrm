@@ -30,18 +30,24 @@ static void mouse_flush(mouse_t* mouse) {
 void mouse_reset(mouse_t* mouse) {
 	if (!mouse) return;
 	mouse->enabled = false;
+	mouse->absolute = false;
 	mouse->buttons = 0;
+	mouse->position = 0;
+	mouse->popped_position = 0;
 	mouse_flush(mouse);
 }
 
+// dx and dy are 0 in absolute mode
 static uint32_t mouse_event(const mouse_t* mouse, const int32_t dx,
 							const int32_t dy, const int32_t wheel) {
 	return MOUSE_EVENT_VALID | mouse->buttons << MOUSE_EVENT_BUTTON_SHIFT
+		   | (mouse->absolute ? MOUSE_EVENT_ABSOLUTE : 0)
 		   | ((uint32_t)wheel & 0xFF) << MOUSE_EVENT_WHEEL_SHIFT
 		   | ((uint32_t)dy & 0xFF) << MOUSE_EVENT_DY_SHIFT
 		   | ((uint32_t)dx & 0xFF);
 }
 
+// The event goes in with the pointer's position now.
 static void mouse_push(mouse_t* mouse, const uint32_t event,
 					   const bool motion) {
 	if (mouse->count == MOUSE_FIFO_SIZE) {
@@ -50,6 +56,7 @@ static void mouse_push(mouse_t* mouse, const uint32_t event,
 	}
 	const uint8_t tail = (mouse->head + mouse->count) % MOUSE_FIFO_SIZE;
 	mouse->fifo[tail] = event;
+	mouse->fifo_position[tail] = mouse->position;
 	mouse->count++;
 	mouse->tail_motion = motion;
 	mouse_update_irq(mouse);
@@ -83,7 +90,7 @@ static bool mouse_merge(mouse_t* mouse, const int32_t dx, const int32_t dy) {
 }
 
 void mouse_move(mouse_t* mouse, const int32_t dx, const int32_t dy) {
-	if (!mouse || !mouse->enabled) return;
+	if (!mouse || !mouse->enabled || mouse->absolute) return;
 	int32_t x = dx;
 	int32_t y = dy;
 	while (x || y) {
@@ -94,6 +101,25 @@ void mouse_move(mouse_t* mouse, const int32_t dx, const int32_t dy) {
 		x -= step_x;
 		y -= step_y;
 	}
+}
+
+void mouse_point(mouse_t* mouse, const uint32_t x, const uint32_t y) {
+	if (!mouse || !mouse->enabled || !mouse->absolute) return;
+	const uint32_t position = (x & 0xFFFF) | (y & 0xFFFF) << 16;
+	if (position == mouse->position) return;
+	mouse->position = position;
+	// a move after a move: the newer position replaces the older one, as
+	// long as the buttons are the same
+	if (mouse->count > 0 && mouse->tail_motion) {
+		const uint8_t tail =
+			(mouse->head + mouse->count - 1) % MOUSE_FIFO_SIZE;
+		if ((mouse->fifo[tail] >> MOUSE_EVENT_BUTTON_SHIFT & MOUSE_BUTTON_MASK)
+			== mouse->buttons) {
+			mouse->fifo_position[tail] = position;
+			return;
+		}
+	}
+	mouse_push(mouse, mouse_event(mouse, 0, 0, 0), true);
 }
 
 void mouse_button(mouse_t* mouse, const uint32_t button, const bool pressed) {
@@ -127,6 +153,7 @@ void mouse_release_buttons(mouse_t* mouse) {
 static uint32_t mouse_pop(mouse_t* mouse) {
 	if (mouse->count == 0) return 0;
 	const uint32_t event = mouse->fifo[mouse->head];
+	mouse->popped_position = mouse->fifo_position[mouse->head];
 	mouse->head = (mouse->head + 1) % MOUSE_FIFO_SIZE;
 	mouse->count--;
 	if (mouse->count == 0) mouse->tail_motion = false;
@@ -150,7 +177,11 @@ bool mouse_read(mouse_t* mouse, const uint32_t offset, const uint8_t size,
 			*value = mouse_pop(mouse);
 			return false;
 		case MOUSE_REG_CONTROL:
-			*value = mouse->enabled ? MOUSE_CONTROL_ENABLE : 0;
+			*value = (mouse->enabled ? MOUSE_CONTROL_ENABLE : 0)
+				   | (mouse->absolute ? MOUSE_CONTROL_ABSOLUTE : 0);
+			return false;
+		case MOUSE_REG_POSITION:
+			*value = mouse->popped_position;
 			return false;
 	}
 	return true;
@@ -162,13 +193,19 @@ bool mouse_write(mouse_t* mouse, const uint32_t offset, const uint8_t size,
 	switch (offset) {
 		case MOUSE_REG_STATUS:
 		case MOUSE_REG_DATA:
+		case MOUSE_REG_POSITION:
 			return false; // read-only, writes are ignored
-		case MOUSE_REG_CONTROL:
+		case MOUSE_REG_CONTROL: {
 			if (value & MOUSE_CONTROL_FLUSH) mouse_flush(mouse);
+			const bool absolute = value & MOUSE_CONTROL_ABSOLUTE;
+			// motion of one mode doesn't merge into an event of the other
+			if (absolute != mouse->absolute) mouse->tail_motion = false;
+			mouse->absolute = absolute;
 			mouse->enabled = value & MOUSE_CONTROL_ENABLE;
 			// the host gives its pointer back, with the buttons up
 			if (!mouse->enabled) mouse->buttons = 0;
 			return false;
+		}
 	}
 	return true;
 }
