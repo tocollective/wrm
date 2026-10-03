@@ -10,3 +10,6 @@
 [submodule "laix"]
 	path = laix
 	url = https://github.com/tocollective/laix.git
+[submodule "wfw"]
+	path = wfw
+	url = https://github.com/tocollective/wfw.git
