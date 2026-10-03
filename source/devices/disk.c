@@ -117,6 +117,16 @@ static bool disk_open(disk_t* disk, const char* path) {
 				(int)(size % DISK_SECTOR_SIZE));
 
 	const uint64_t sectors = (uint64_t)size / DISK_SECTOR_SIZE;
+	if (disk->removable && sectors > DISK_FLOPPY_MAX_SECTORS) {
+		warning("Disk image %s is too big for the floppy drive (%u sectors "
+				"at most)",
+				path,
+				DISK_FLOPPY_MAX_SECTORS);
+		fclose(disk->file);
+		disk->file = NULL;
+		disk->readonly = false;
+		return false;
+	}
 	disk->sectors = sectors > UINT32_MAX ? UINT32_MAX : (uint32_t)sectors;
 	const size_t length = strlen(path) + 1;
 	disk->path = malloc(length);

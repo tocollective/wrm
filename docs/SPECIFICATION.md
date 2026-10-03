@@ -225,9 +225,11 @@ and waits for the end.
 Writing `COMMAND` clears `DONE` and `ERROR` and checks the other
 registers. A command that can't run finishes at once: `DONE` is set,
 `ERROR` holds the reason, and nothing is transferred. Otherwise `BUSY` is
-set and the transfer runs on its own. A hard disk moves one word per
-clock tick starting with the next tick, so a sector takes 128 ticks; the
-floppy is slower (see [Floppy drive](#floppy-drive)). `ADDRESS` goes up
+set and the transfer runs on its own. A hard disk moves data at 4000000
+bytes per second, whatever the clock rate: one word every W = clock rate
+× 4 / 4000000 ticks, rounded down (32 ticks at 32 MHz, so a sector takes
+4096 ticks); the first word moves W ticks after the store to `COMMAND`.
+The floppy is slower (see [Floppy drive](#floppy-drive)). `ADDRESS` goes up
 by 4 with every word. After every whole sector, `SECTOR` goes up by one
 and `COUNT` down by one. When `COUNT` reaches 0, `BUSY` is cleared and
 `DONE` set. `COUNT` = 0 finishes at once without an error.
@@ -356,7 +358,8 @@ image takes about a second.
 
 The floppy drive's disk is removable: the host can eject it or put in
 another one while the machine runs (a file dropped on the emulator's
-window goes in the drive). The disk can be of any size; `SECTORS` and
+window goes in the drive). The disk can be of any size up to 1.44MB (2880 sectors); a bigger image
+isn't put in the drive. `SECTORS` and
 the read-only bit follow the disk in the drive. Ejecting it during a
 transfer stops the transfer with error 2, as if the command had found
 no disk; the sectors already written stay written.
@@ -1183,8 +1186,8 @@ most 507 devices.
 ## Clock
 
 The system clock runs at 32 MHz by default (`clock_rate` in the config).
-On every tick the timer advances first, then the hard disks move a word
-each, then the video card moves a DMA word and counts the tick towards
+On every tick the timer advances first, then the hard disks count the
+tick towards their next word, then the video card moves a DMA word and counts the tick towards
 the end of the frame, then the floppy counts the tick towards its next
 word, then the beeper
 advances its wave and `DURATION`, then the audio card counts the tick

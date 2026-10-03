@@ -894,7 +894,8 @@ FLUSH и IDENTIFY — отдельные команды. COMMAND очищает 
 COUNT=0 для READ/WRITE заканчивается без error. При BUSY запись transfer
 registers и COMMAND игнорируется; отдельной cancel command нет.
 
-HDD DMA перемещает 4 bytes/tick начиная со следующего tick, 128 ticks/sector.
+HDD DMA: 4000000 bytes/s, слово раз в `floor(clock_rate*4/4000000)` ticks
+(32 при 32 MHz), 4096 ticks/sector; первое слово через W ticks после COMMAND.
 ADDRESS растёт на word, SECTOR/COUNT меняются после целого sector.
 DONE level IRQ W1C либо очищается следующей COMMAND; ERROR остаётся до
 следующей команды. Проверять bounds SECTOR+COUNT без integer wrap,
@@ -940,7 +941,8 @@ Insertion/ejection ставит CHANGED; CHANGED и DONE держат общий
 каждый flag требует ack. После reset CHANGED clear даже с inserted disk.
 Eject при BUSY останавливает transfer с no-disk error 2; whole sectors,
 уже записанные на image, остаются.
-Размер не обязан быть 1.44 MiB: читать SECTORS заново при смене media.
+Размер не обязан быть 1.44 MB, но не больше: максимум 2880 секторов, больший
+образ не вставляется. Читать SECTORS заново при смене media.
 
 - [ ] CHANGED инвалидирует cached sectors, geometry и filesystem state.
 - [ ] Обработаны оба IRQ source и removal во время DMA.

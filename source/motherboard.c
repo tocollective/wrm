@@ -580,12 +580,20 @@ motherboard_t* motherboard_create(void) {
 		.write = motherboard_dma_write,
 	};
 	// a deterministic run doesn't depend on where the images are
+	// the disks are slow in real time whatever the clock rate
+	const uint64_t hdd_ticks =
+		mb->clock->rate * 4 / DISK_HDD_BYTES_PER_SECOND;
 	for (int i = 0; i < DISK_COUNT; i++) {
-		mb->disk[i] = disk_create(
-				mb->pic, MB_IRQ_DISK0 + i, dma, false, 1, cfg->hdd_path[i]);
+		mb->disk[i] = disk_create(mb->pic,
+								  MB_IRQ_DISK0 + i,
+								  dma,
+								  false,
+								  hdd_ticks > UINT32_MAX ? UINT32_MAX
+														 : (uint32_t)hdd_ticks,
+								  cfg->hdd_path[i]);
 		disk_set_serial(mb->disk[i], cfg->hdd_serial[i], cfg->deterministic);
 	}
-	// the floppy is slow in real time whatever the clock rate
+	// the floppy is slower still
 	const uint64_t floppy_ticks =
 		mb->clock->rate * 4 / DISK_FLOPPY_BYTES_PER_SECOND;
 	mb->floppy = disk_create(mb->pic,

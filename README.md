@@ -40,7 +40,7 @@ bin/wrm081632 [--rom PATH] [--ram SIZE[,...]] [--clock HZ]
 | `--clock HZ`       | clock rate, with an optional `k`, `M` or `G` suffix; `32M` by default |
 | `--hdd PATH`       | disk image for disk 0; a second `--hdd` attaches disk 1 (see [Booting from disk](#booting-from-disk)) |
 | `--hdd-serial N=SERIAL` | the serial number disk `N` reports to `IDENTIFY`, up to 31 printable characters; by default it is made from the image's path |
-| `--floppy PATH`    | disk image in the floppy drive; a file dropped on the window replaces it while the machine runs |
+| `--floppy PATH`    | disk image in the floppy drive; a file dropped on the window replaces it while the machine runs; at most 1.44MB (2880 sectors) |
 | `--share PATH[:ro]` | share a host folder with the guest (see [Shared folder](#shared-folder)); read-only with `:ro` |
 | `--mute`           | no sound from the beeper and the audio card               |
 | `--no-net`         | cut the Ethernet card off the host's network (see [Network](#network)) |

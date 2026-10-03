@@ -8,9 +8,13 @@
 #include "devices/pic.h"
 
 #define DISK_SECTOR_SIZE 512
-// Transfer rate of the floppy drive, that of a 1.44MB drive (500 kbit/s);
-// the hard disks move a word every clock tick
+// Transfer rate of the hard disks, a mid-1990s rate
+#define DISK_HDD_BYTES_PER_SECOND 4000000
+// Transfer rate of the floppy drive, that of a 1.44MB drive (500 kbit/s)
 #define DISK_FLOPPY_BYTES_PER_SECOND 62500
+// The largest floppy disk image: 1.44MB (2880 sectors); a bigger image
+// isn't attached
+#define DISK_FLOPPY_MAX_SECTORS 2880
 
 // Registers (offsets from the device base, see docs/SPECIFICATION.md)
 #define DISK_REG_STATUS 0x00 // R, W: 1 to DONE clears it

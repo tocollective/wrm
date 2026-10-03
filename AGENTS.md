@@ -9,3 +9,5 @@ mc/ - programming language
 # Rules
 
 * Do not verify code by building it.
+* Write any documentation (and comments) in English. Except if I ask you.
+

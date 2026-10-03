@@ -267,6 +267,7 @@ are trusted and must not overlap user frames or MMU metadata. See the
 |---|---|---|---|
 | 0 | `debugPutChar(code)` | `r1`: unsigned byte value, 0…255 | 0 on UART write; -22 (`-EINVAL`) for any other value, with no write |
 | 1 | `exit(code)` | `r1`: signed 32-bit task exit code | Does not return; retains the full code in the task record |
+| 2 | `yield()` | none | 0 when this task resumes; rotates the Ready queue |
 | any other | unsupported | ignored | -38 (`-ENOSYS`) |
 
 On a returning LA/IX syscall only `r1` changes: `r2`–`r31` (including
@@ -275,19 +276,27 @@ are preserved. Saved `EPC` advances by exactly 4, including unsupported
 calls and invalid arguments. The saved exit context also records `EPC + 4`,
 but that context is never resumed. A user fault retains the faulting EPC.
 
-Before the first user entry LA/IX prepares an independent supervisor
-context with a trusted continuation and kernel stack, zeroed GPRs/FCSR,
-and IRQs and single-step disabled. Exit or a fatal user exception records
-the terminal user context, restores the kernel page directory and stack
-entry words, and replaces the return frame with that supervisor context.
-IRET leaves user mode; cleanup releases the task's address space only
-after leaving its kernel stack. The sole task then remains stopped while
-the kernel halts in its trusted continuation. Supervisor faults still panic.
+The cooperative scheduler has eight task slots, one thread per task and one
+CPU. Yield saves the complete frame, advances EPC once, appends the current
+task to the Ready queue and restores the next Ready task. A task yielding
+alone resumes immediately. PTBR contains the task directory and its ASID;
+every activation uses FENCE → TLBI.ALL → MTCR PTBR before restoring registers.
+The kernel stack entry words and current TCB change while IRQs remain disabled.
+
+Exit or a fatal user exception records a Dead context and selects the next
+Ready task. An empty queue selects an independent supervisor context with
+zeroed GPRs/FCSR, the boot kernel stack and IRQs/single-step disabled. The
+assembly epilogue first moves onto the selected kernel stack, then releases
+the Dead task's inactive directory, user frames, kernel stack and guard.
+It restores registers from the selected TCB frame after cleanup; the terminal
+TCB stays available for diagnostics and is never queued again. An empty queue
+halts in the trusted supervisor continuation. Supervisor faults still panic.
+Timer preemption and interrupt-driven idle wakeup are not implemented yet.
 
 M user wrappers are in `laix/user/syscalls.m` and use the builtin
 `syscall()`. The boot runtime is not a user crt0. The temporary first-task
-entry uses `r1` = user data base, `r2` = data size, an empty 8-aligned user
-stack, and all other GPRs/FCSR zero; it has no TLS or process-start block.
+entry uses `r1` = user data base, `r2` = data size, `r3` = task ID, an empty
+8-aligned user stack, and all remaining GPRs/FCSR zero; it has no TLS or process-start block.
 
 ### Entering the kernel
 
