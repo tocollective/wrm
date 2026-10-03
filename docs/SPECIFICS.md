@@ -1,99 +1,99 @@
-# Особенности WRM.081632 для ядра, runtime и драйверов
+# WRM.081632 considerations for the kernel, runtime and drivers
 
-Этот документ объясняет, какие свойства WRM нужно учитывать при разработке
-LA/IX и программ на M: что делает CPU, что обязан делать программный код и
-какие ошибки приводят к потере контекста, нарушению изоляции или остановке
-машины. Он охватывает ISA, ABI, загрузку, память, все устройства и средства
-эмулятора. Полные таблицы опкодов и регистров остаются в исходных спецификациях.
+This document explains which WRM properties matter when developing
+LA/IX and programs in M: what the CPU does, what software must do and
+which mistakes cause context loss, isolation failures or a machine halt.
+It covers the ISA, ABI, boot, memory, every device and emulator facilities.
+The full opcode and register tables remain in the original specifications.
 
-Источники: [ISA](INSTRUCTIONS.md), [машина и устройства](SPECIFICATION.md),
-[ABI](ABI.md), [эмулятор](../README.md). Особенности текущей реализации
-сверены с [CPU](../source/cpu.c), [MMU](../source/mmu.c),
-[шиной](../source/motherboard.c) и [драйверами устройств эмулятора](../source/devices/).
-Расхождения спецификаций с реализацией исправляются в самих спецификациях;
-границы текущей реализации и решения LA/IX собраны в
-[разделе 13](#clarifications).
+Sources: [ISA](INSTRUCTIONS.md), [machine and devices](SPECIFICATION.md),
+[ABI](ABI.md), [emulator](../README.md). Current implementation details
+have been checked against the [CPU](../source/cpu.c), [MMU](../source/mmu.c),
+[bus](../source/motherboard.c) and [emulator device drivers](../source/devices/).
+Discrepancies between specifications and implementation are corrected in the
+specifications themselves; current implementation limits and LA/IX choices
+are collected in [section 13](#clarifications).
 
-Чек-листы ниже — требования для разработки и проверки, а не отчёт о том,
-что LA/IX уже всё реализовал. Статус этапов находится в
-[плане микроядра](../laix/docs/KERNEL.md).
+The checklists below are development and verification requirements, rather
+than a report that LA/IX has already implemented everything. Stage status is
+in the [microkernel plan](../laix/docs/KERNEL.md).
 
-## Содержание
+## Contents
 
-- [1. Архитектура, инструкции и адреса](#architecture)
-- [2. ABI, стек, M и исполняемые файлы](#abi)
-- [3. Reset, firmware и вход в ядро](#boot)
-- [4. Trap, IRQ, EPC и возврат](#traps)
-- [5. Низкие слова входа и TrapFrame](#entry)
-- [6. MMU, права, ASID и TLB](#mmu)
-- [7. Атомики, порядок памяти и изменение кода](#ordering)
-- [8. Floating point и FCSR](#floating-point)
-- [9. MMIO и DMA: общие правила](#io-dma)
-- [10. Особенности каждого устройства](#devices)
-- [11. Время, pipeline и производительность](#timing)
-- [12. Диагностика, debugging и snapshots](#diagnostics)
-- [13. Границы текущей реализации и решения LA/IX](#clarifications)
-- [14. Сквозная проверка LA/IX](#acceptance)
+- [1. Architecture, instructions and addresses](#architecture)
+- [2. ABI, stack, M and executables](#abi)
+- [3. Reset, firmware and kernel entry](#boot)
+- [4. Traps, IRQs, EPC and return](#traps)
+- [5. Low entry words and TrapFrame](#entry)
+- [6. MMU, permissions, ASIDs and TLB](#mmu)
+- [7. Atomics, memory ordering and code modification](#ordering)
+- [8. Floating point and FCSR](#floating-point)
+- [9. MMIO and DMA: general rules](#io-dma)
+- [10. Device-specific considerations](#devices)
+- [11. Time, pipeline and performance](#timing)
+- [12. Diagnostics, debugging and snapshots](#diagnostics)
+- [13. Current implementation limits and LA/IX choices](#clarifications)
+- [14. End-to-end LA/IX verification](#acceptance)
 
 <a id="architecture"></a>
 
-## 1. Архитектура, инструкции и адреса
+## 1. Architecture, instructions and addresses
 
-### Размеры и режимы
+### Sizes and modes
 
-WRM — 32-битная little-endian машина. Указатель и слово занимают 4 байта.
-CPU имеет 32 целочисленных регистра, `pc` и control registers. Только `r0`
-аппаратно закреплён за нулём; роли остальных регистров задаёт ABI.
-Запись результата в `r0` не сохраняет его, но сама инструкция всё равно
-выполняется: load в `r0` может вызвать fault или прочитать MMIO с побочным эффектом.
+WRM is a 32-bit little-endian machine. A pointer and a word occupy 4 bytes.
+The CPU has 32 integer registers, `pc` and control registers. Only `r0`
+is hardwired to zero; the ABI assigns the other registers' roles.
+Writing a result to `r0` discards it, but the instruction still executes:
+a load into `r0` can fault or read MMIO with a side effect.
 
-Все инструкции занимают 4 байта и должны быть выровнены на 4. Переменной
-длины инструкций и delay slots нет. Адреса данных для `LH/SH` выравниваются
-на 2, для `LW/SW/LL/SC` — на 4. Неравненные обращения вызывают исключение;
-для packed-структур нужны байтовые обращения или явная сборка значения.
+Every instruction occupies 4 bytes and must be 4-byte aligned. There are
+no variable-length instructions or delay slots. Data addresses for `LH/SH`
+are aligned to 2 bytes, and those for `LW/SW/LL/SC` to 4. Misaligned accesses
+raise exceptions; packed structures require byte accesses or explicit value assembly.
 
-`STATUS.UM` выбирает user/supervisor mode. `HLT`, `WFI`, `IRET`, `TLBI` и
-обычный доступ к control registers требуют supervisor. Пользователь может
-читать `CYCLE/CYCLEH/INSTRET/INSTRETH`, читать и писать `FCSR`.
-При выключенной MMU user mode **не ограничивает доступ к физической памяти**:
-для изоляции одновременно нужны `UM=1`, `PTBR.EN=1` и корректные таблицы.
+`STATUS.UM` selects user/supervisor mode. `HLT`, `WFI`, `IRET`, `TLBI` and
+ordinary control register access require supervisor mode. Users may
+read `CYCLE/CYCLEH/INSTRET/INSTRETH`, and read and write `FCSR`.
+With the MMU disabled, user mode **does not restrict physical memory access**:
+isolation requires `UM=1`, `PTBR.EN=1` and correct tables together.
 
-`CPUID` сейчас равен `0x010000FF`: версия ISA 1 в битах 31–24, расширения
-MMU, binary32, LL/SC, high multiply, дополнительные режимы TLBI, debug,
-bit operations и FCSR — в битах 0–7. Ядро читает его в supervisor mode.
-`HARTID=0`: текущая машина однопроцессорная. Обсуждение нескольких ядер в
-ISA описывает будущую модель, а не действующий SMP.
+`CPUID` is currently `0x010000FF`: ISA version 1 in bits 31–24, and the
+MMU, binary32, LL/SC, high multiply, additional TLBI modes, debug,
+bit operations and FCSR extensions in bits 0–7. The kernel reads it in supervisor mode.
+`HARTID=0`: the current machine has one CPU. The ISA's discussion of multiple
+cores describes a future model, rather than operational SMP.
 
-### Кодирование и целочисленные операции
+### Encoding and integer operations
 
-Опкод занимает младшие 8 бит. Форматы R/I/U/N различаются расположением
-регистров и immediate. Зарезервированные поля инструкции должны быть
-нулевыми; неправильное кодирование, неизвестный control register и запись
-в read-only control register дают illegal instruction.
-Правило относится и к неиспользуемым полям: например, `rs1` у `MFCR`,
-`rd` у `MTCR/TLBI`, `rs2` у одновходовых R-инструкций.
+The opcode occupies the low 8 bits. R/I/U/N formats differ in the placement
+of registers and immediates. Reserved instruction fields must be
+zero; invalid encoding, an unknown control register or a write to a
+read-only control register causes an illegal instruction exception.
+This rule also applies to unused fields: for example, `rs1` in `MFCR`,
+`rd` in `MTCR/TLBI`, and `rs2` in single-input R instructions.
 
-Большинство `imm14` знаковые: диапазон −8192…8191. У `ANDI/ORI/XORI` и
-immediate shift/rotate поле беззнаковое. Сдвиги и вращения используют только
-младшие 5 бит счётчика: сдвиг на 32 действует как сдвиг на 0.
-`SHR` логический, `SAR` арифметический. `LB/LH` расширяют знак,
-`LBU/LHU` дополняют нулями. В `SW` поле `rd` обозначает источник записи.
+Most `imm14` values are signed: range −8192…8191. In `ANDI/ORI/XORI` and
+immediate shifts/rotates, the field is unsigned. Shifts and rotates use only
+the low 5 bits of the count: a shift by 32 acts as a shift by 0.
+`SHR` is logical, `SAR` arithmetic. `LB/LH` sign-extend,
+`LBU/LHU` zero-extend. In `SW`, the `rd` field identifies the store source.
 
-Сложение, вычитание и умножение работают modulo 2³², без overflow trap.
-`MULH/MULHU/MULHSU` различают знаковость при вычислении старшего слова.
-`DIV/REM` знаковые, `DIVU/REMU` беззнаковые. При делении на ноль CPU
-возвращает `0xFFFFFFFF`, остаток равен делимому; исключения нет.
-Для `INT_MIN / -1` результат `INT_MIN`, остаток 0. Если язык требует
-ошибку деления, её должен проверять compiler/runtime.
+Addition, subtraction and multiplication operate modulo 2³², without overflow traps.
+`MULH/MULHU/MULHSU` distinguish signedness when computing the high word.
+`DIV/REM` are signed, `DIVU/REMU` unsigned. On division by zero, the CPU
+returns `0xFFFFFFFF` and the remainder equals the dividend; there is no exception.
+For `INT_MIN / -1`, the result is `INT_MIN`, remainder 0. If the language
+requires a division error, the compiler/runtime must check for it.
 
-Есть `CLZ/CTZ/POPCNT`, `BSWAP`, sign extension, `ROL/ROR/RORI`, signed и
-unsigned min/max. `CLZ(0)` и `CTZ(0)` равны 32. Отдельной `ROLI` нет:
-для вращения влево на n используется вращение вправо на `(32-n) & 31`.
-Полный перечень и точные имена — в [опкодах](INSTRUCTIONS.md#opcodes).
+There are `CLZ/CTZ/POPCNT`, `BSWAP`, sign extension, `ROL/ROR/RORI`, and signed
+and unsigned min/max. `CLZ(0)` and `CTZ(0)` equal 32. There is no separate `ROLI`:
+to rotate left by n, rotate right by `(32-n) & 31`.
+The full list and exact names are in [opcodes](INSTRUCTIONS.md#opcodes).
 
-### Формирование адресов и переходы
+### Address construction and branches
 
-`LUI` сдвигает immediate на **13**, а не на 12 или 16 бит:
+`LUI` shifts the immediate by **13**, rather than 12 or 16 bits:
 
 ```text
 hi(x) = x >> 13
@@ -101,1288 +101,1288 @@ lo(x) = x & 0x1FFF
 x = (hi(x) << 13) | lo(x)
 ```
 
-Низкая часть неотрицательна и помещается в знаковый `imm14`, поэтому
-`LUI` + `ORI` и `LUI` + `ADDI` не требуют коррекции high part.
-`AUIPC` прибавляет к адресу самой инструкции. В `%pcrel_hi/%pcrel_lo`
-вторая инструкция должна непосредственно следовать за `AUIPC` и быть
-`ADDI`, load или store. `ORI` для этой пары неверен: в результате `AUIPC`
-уже присутствуют низкие биты адреса `pc`.
+The low part is nonnegative and fits a signed `imm14`, so
+`LUI` + `ORI` and `LUI` + `ADDI` need no correction to the high part.
+`AUIPC` adds to the address of the instruction itself. In `%pcrel_hi/%pcrel_lo`,
+the second instruction must immediately follow `AUIPC` and be
+`ADDI`, a load or a store. `ORI` is incorrect for this pair: the `AUIPC`
+result already contains the low bits of the `pc` address.
 
-Условный переход считает смещение от своего адреса: `imm14 << 2`,
-диапазон около ±32 KiB. `JAL` имеет `imm19 << 2`, около ±1 MiB;
-return address равен `pc+4`. `JALR` вычисляет `(rs1 + imm14) & ~3`:
-младшие два бита отбрасываются, а не вызывают alignment fault.
-Такой переход может скрыть ошибку испорченного function pointer.
+A conditional branch computes its offset from its own address: `imm14 << 2`,
+range about ±32 KiB. `JAL` has `imm19 << 2`, about ±1 MiB;
+the return address is `pc+4`. `JALR` computes `(rs1 + imm14) & ~3`:
+it discards the low two bits instead of causing an alignment fault.
+Such a jump can conceal a corrupted function pointer.
 
-Чек-лист:
+Checklist:
 
-- [ ] Проверять alignment инструкций, стека и данных в assembly/runtime.
-- [ ] Не переносить на WRM разбиение констант и смещений другой ISA.
-- [ ] Различать signed/unsigned load, compare, divide и high multiply.
-- [ ] Явно проверять деление на ноль, если этого требует семантика языка.
-- [ ] Запускать недоверенный код только с включённой MMU и user permissions.
+- [ ] Check instruction, stack and data alignment in assembly/runtime code.
+- [ ] Do not apply another ISA's constant and offset splitting rules to WRM.
+- [ ] Distinguish signed/unsigned loads, comparisons, division and high multiply.
+- [ ] Explicitly check for division by zero if the language semantics require it.
+- [ ] Run untrusted code only with the MMU enabled and user permissions.
 
 <a id="abi"></a>
 
-## 2. ABI, стек, M и исполняемые файлы
+## 2. ABI, stack, M and executables
 
-По [ABI](ABI.md) используется ILP32: `int`, `long`, pointer — 4 байта;
-`long long`, `double`, `long double` — 8 байт и alignment 8. `float` —
-binary32 в GPR, `double` — binary64 в software runtime. Поля структуры
-имеют собственное выравнивание; размер структуры дополняется до кратности
-максимальному alignment. C bit-fields заполняются от младшего бита вверх.
+The [ABI](ABI.md) uses ILP32: `int`, `long` and pointers are 4 bytes;
+`long long`, `double` and `long double` are 8 bytes with alignment 8. `float` is
+binary32 in GPRs, `double` binary64 in the software runtime. Structure fields
+have their own alignment; structure size is padded to a multiple of
+its maximum alignment. C bit-fields fill from the low bit upwards.
 
-| Регистры | Соглашение ABI |
+| Registers | ABI convention |
 | --- | --- |
-| `r1–r8` | Аргументы; `r1–r2` также результат |
-| `r9` | Scratch, номер syscall, временный регистр linker veneer |
+| `r1–r8` | Arguments; `r1–r2` also hold the result |
+| `r9` | Scratch, syscall number, linker veneer temporary register |
 | `r10–r27` | Callee-saved |
-| `r28/tp` | Thread pointer; обычная функция его не меняет |
-| `r29/fp` | Frame pointer либо callee-saved |
+| `r28/tp` | Thread pointer; an ordinary function does not change it |
+| `r29/fp` | Frame pointer or callee-saved |
 | `r30/sp` | Stack pointer |
 | `r31/ra` | Return address, caller-saved |
 
-64-битный аргумент занимает два последовательных регистра, low word первым;
-пара не обязана начинаться с чётного номера. Если аргумент целиком не
-помещается в оставшиеся регистры, он и последующие аргументы идут на стек.
-Struct/union до 8 байт передаются как одно/два слова, более крупные — через
-указатель на копию. Для большого результата первым аргументом передаётся
-скрытый указатель на result buffer.
+A 64-bit argument occupies two consecutive registers, low word first;
+the pair need not start at an even number. If an entire argument does not
+fit in the remaining registers, it and all subsequent arguments go on the stack.
+Structs/unions up to 8 bytes are passed as one/two words; larger ones through
+a pointer to a copy. For a large result, a hidden pointer to the result
+buffer is passed as the first argument.
 
-Стек растёт вниз, на каждом вызове `sp` кратен 8. **Red zone нет**:
-память ниже `sp` может занять interrupt handler. `ra` не сохраняется
-аппаратно при обычном вызове. При наличии frame pointer `fp` равен входному
-`sp`, сохранённые `ra` и `fp` находятся по `fp-4` и `fp-8`.
-Без frame pointers проход по цепочке стековых кадров не гарантирован.
-Для frame больше диапазона `imm14` нужен дополнительный адресный расчёт.
+The stack grows downwards; `sp` is a multiple of 8 at every call. **There is no red zone**:
+an interrupt handler may use memory below `sp`. `ra` is not saved
+by hardware on an ordinary call. With a frame pointer, `fp` equals the entry
+`sp`, and saved `ra` and `fp` are at `fp-4` and `fp-8`.
+Without frame pointers, walking the stack frame chain is not guaranteed.
+A frame larger than the `imm14` range requires additional address calculation.
 
-`r9` нельзя использовать для скрытого аргумента функции или ожидать, что
-он доживёт до её первой инструкции: дальний `JAL` linker может направить
-через veneer, который загружает target в `r9` и делает `JALR`.
-Дальние условные ветвления linker не исправляет; compiler разворачивает
-условие и использует jump. Global pointer register отсутствует.
+`r9` cannot be used for a hidden function argument or expected to survive
+until the function's first instruction: the linker may route a far `JAL`
+through a veneer that loads the target into `r9` and executes `JALR`.
+The linker does not fix far conditional branches; the compiler inverts
+the condition and uses a jump. There is no global pointer register.
 
-### Два разных variadic ABI
+### Two different variadic ABIs
 
-C `...` всегда передаёт дополнительные аргументы на стеке с C promotions:
-`char/short → int`, `float → double`. M `args: ...` передаёт borrowed pack
-`{data: pointer, count: UWord}` размером 8 байт, alignment 4, как малый
-aggregate после фиксированных аргументов. На стеке pack занимает
-8-aligned slot и никогда не разделяется между регистрами и стеком.
+C `...` always passes additional arguments on the stack with C promotions:
+`char/short → int`, `float → double`. M `args: ...` passes a borrowed pack
+`{data: pointer, count: UWord}`, size 8 bytes, alignment 4, as a small
+aggregate after the fixed arguments. On the stack, the pack occupies
+an 8-aligned slot and is never split between registers and the stack.
 
-В M каждый trailing scalar занимает одно 4-байтовое слово;
-`Float` сохраняет binary32, `Bool` нормализуется к 0/1. Aggregates в
-trailing arguments запрещены. Пустой pack — `{0, 0}`.
-`vaArg(args, i, T)` не проверяет границы и тип и не преобразует число:
-callee обязан знать формат и соблюдать `i < vaCount(args)`.
-Pack можно переслать, но он заимствует память исходного caller и не может
-пережить его вызов. M variadic-функция не совместима напрямую с C `...`.
-Это особенно важно для `panic/debugPrint` и format string.
+In M, each trailing scalar occupies one 4-byte word;
+`Float` retains binary32, `Bool` is normalized to 0/1. Aggregates in
+trailing arguments are prohibited. An empty pack is `{0, 0}`.
+`vaArg(args, i, T)` checks neither bounds nor type and does not convert the number:
+the callee must know the format and ensure `i < vaCount(args)`.
+A pack can be forwarded, but it borrows the original caller's memory and cannot
+outlive that call. An M variadic function is not directly compatible with C `...`.
+This is particularly important for `panic/debugPrint` and format strings.
 
-### TLS, ELF и старт процесса
+### TLS, ELF and process startup
 
-Определён только local-exec TLS: `.tdata`, затем `.tbss`, отдельная копия
-на поток, `tp` указывает на начало копии. Ядро сохраняет пользовательский
-`tp` при trap; код ядра не должен считать его своим TLS автоматически.
+Only local-exec TLS is defined: `.tdata`, then `.tbss`, a separate copy
+per thread, with `tp` pointing to its start. The kernel saves the user's
+`tp` on a trap; kernel code must not automatically treat it as its own TLS.
 
-Формат object/executable — ELF32 little-endian, private `EM_WRM=0x0816`,
-`e_flags=0`; relocations в `SHT_RELA`, addend хранится явно. `%hi/%lo`,
-`%pcrel*`, `%tprel*`, branch и JAL имеют собственные WRM relocation types.
-Обычные ELF-инструменты могут читать заголовки, но поддержка чужой ISA
-не означает поддержку WRM disassembly или relocation.
+The object/executable format is ELF32 little-endian, private `EM_WRM=0x0816`,
+`e_flags=0`; relocations are in `SHT_RELA`, with explicit addends. `%hi/%lo`,
+`%pcrel*`, `%tprel*`, branches and JAL have their own WRM relocation types.
+Ordinary ELF tools can read the headers, but support for another ISA
+does not imply support for WRM disassembly or relocation.
 
-ELF loader использует `PT_LOAD`, сохраняет `p_vaddr ≡ p_offset mod 4096`,
-применяет `PF_R/PF_W/PF_X` и обнуляет `p_memsz-p_filesz`.
-`PT_TLS` описывает TLS. Разные права секций требуют отдельных страниц.
-Flat boot image не является ELF и не несёт автоматического zero-fill BSS.
-Dynamic linking, PIE, другие модели TLS и формат debug information пока
-не определены ABI.
+The ELF loader uses `PT_LOAD`, preserves `p_vaddr ≡ p_offset mod 4096`,
+applies `PF_R/PF_W/PF_X` and zeroes `p_memsz-p_filesz`.
+`PT_TLS` describes TLS. Sections with different permissions require separate pages.
+A flat boot image is not ELF and does not provide automatic BSS zero-fill.
+Dynamic linking, PIE, other TLS models and the debug information format
+are not yet defined by the ABI.
 
-При старте user process ОС создаёт 8-aligned стек с `argc`, `argv`,
-нулевым terminator, `envp`, terminator и auxv (type/value, конец type 0).
-`ra/fp` и остальные GPR, включая `tp`, исходно 0. `crt0` создаёт TLS,
-обнуляет BSS, если loader этого не сделал, вызывает `main` и `exit`.
-Boot entry firmware имеет другой контракт, описанный далее.
+At user process startup, the OS creates an 8-aligned stack with `argc`, `argv`,
+a null terminator, `envp`, a terminator and auxv (type/value, ending with type 0).
+`ra/fp` and all other GPRs, including `tp`, initially contain 0. `crt0` creates TLS,
+zeroes BSS if the loader has not done so, and calls `main` and `exit`.
+Firmware boot entry has a different contract, described below.
 
-Compiler может генерировать вызовы `memcpy/memmove/memset/memcmp`, функций
-64-битной арифметики и software double даже в freestanding-коде.
-Ядру нужны соответствующие runtime symbols и корректный ABI этих функций.
+The compiler may generate calls to `memcpy/memmove/memset/memcmp`,
+64-bit arithmetic functions and software double even in freestanding code.
+The kernel needs the corresponding runtime symbols and correct ABI for these functions.
 
-Чек-лист:
+Checklist:
 
-- [ ] Assembly↔M соблюдает register roles, hidden result и alignment 8.
-- [ ] Trap сохраняет больше, чем callee-saved: весь прерванный контекст.
-- [ ] Variadic printing использует pack ABI M и проверяет число аргументов.
-- [ ] Pack и указатели на caller frame не остаются после возврата.
-- [ ] Loader проверяет размеры, переполнение диапазонов, entry и права ELF.
-- [ ] TLS и необходимые compiler runtime functions подготовлены до user start.
+- [ ] Assembly↔M follows register roles, hidden result and alignment 8.
+- [ ] A trap saves more than callee-saved registers: the entire interrupted context.
+- [ ] Variadic printing uses M's pack ABI and checks the argument count.
+- [ ] Packs and pointers into the caller's frame do not remain after return.
+- [ ] The loader checks sizes, range overflow, entry and ELF permissions.
+- [ ] TLS and required compiler runtime functions are prepared before user startup.
 
 <a id="boot"></a>
 
-## 3. Reset, firmware и вход в ядро
+## 3. Reset, firmware and kernel entry
 
-Аппаратный reset начинает исполнение с `pc=0xFE000000`, supervisor,
-`STATUS=0x10` (`EXL=1`), MMU выключена, TLB и counters очищены.
-Остальные регистры CPU исходно 0. Пока не установлен `IVEC` и не очищен
-`EXL`, любой fault останавливает CPU: ранний старт должен быть безошибочным.
+Hardware reset starts execution at `pc=0xFE000000`, in supervisor mode,
+with `STATUS=0x10` (`EXL=1`), the MMU disabled, and TLB and counters cleared.
+The remaining CPU registers initially contain 0. Until `IVEC` is set and
+`EXL` cleared, any fault halts the CPU: early startup must be fault-free.
 
-Reset сохраняет **RAM, VRAM и содержимое дисков**. Он останавливает DMA,
-очищает FIFOs/IRQ masks, выключает таймер, звук, watchdog, сеть и display;
-сбрасывает палитру и cursor, закрывает shared-folder handles. Время RTC
-и последовательность RNG продолжаются. На power-on VRAM нулевая, однако
-для BSS и свободной RAM нельзя рассчитывать на нули.
+Reset preserves **RAM, VRAM and disk contents**. It stops DMA,
+clears FIFOs/IRQ masks, and disables the timer, sound, watchdog, network and display;
+it resets the palette and cursor and closes shared-folder handles. RTC time
+and the RNG sequence continue. VRAM is zero at power-on, but
+BSS and free RAM cannot be assumed to contain zeros.
 
-Firmware ищет boot image сначала на floppy, затем disk 0. Disk 1 не
-является следующим кандидатом boot в текущей firmware. Без пригодного
-образа открывается экранное меню; сообщения firmware не идут в UART.
+Firmware looks for a boot image on the floppy first, then disk 0. Disk 1 is
+not the next boot candidate in the current firmware. Without a usable
+image, an on-screen menu opens; firmware messages do not go to UART.
 
-Заголовок flat image: `MAGIC=0x424D5257` (`WRMB`), количество 512-байтовых
-секторов, `ENTRY` — 4-aligned offset внутрь образа, `FLAGS=0`.
-Firmware загружает весь образ вместе с заголовком в physical `0x10000`.
-Нельзя адресовать его код так, будто header был удалён loader.
+The flat image header contains `MAGIC=0x424D5257` (`WRMB`), the number of 512-byte
+sectors, `ENTRY` as a 4-aligned offset within the image, and `FLAGS=0`.
+Firmware loads the entire image, including its header, at physical `0x10000`.
+Its code must not be addressed as though the loader had removed the header.
 
-| При входе в boot image | Значение/свойство |
+| At boot image entry | Value/property |
 | --- | --- |
 | `pc` | `0x10000 + ENTRY` |
-| `r1` | Boot info по `0x1000` |
-| `sp` | `0x10000`, пустой стек вниз |
-| `r2`, `ra` | 0; прочие GPR не определены |
+| `r1` | Boot info at `0x1000` |
+| `sp` | `0x10000`, empty downward-growing stack |
+| `r2`, `ra` | 0; other GPRs are unspecified |
 | `STATUS`, `IVEC`, `PTBR` | `0x10`, 0, 0 |
 | PIC `ENABLE` | 0 |
 | Boot disk | Idle, `DONE` clear |
 | Video | Firmware console 640×480×8 bpp, display on, IRQ off |
 
-Boot info содержит `INFO` magic `0x4F464E49`, `SIZE` (сейчас 40),
+Boot info contains the `INFO` magic `0x4F464E49`, `SIZE` (currently 40),
 `RAM_SIZE`, boot controller, disk size, image address/size, clock frequency,
-число и physical address device entries. Проверять `SIZE` до доступа к
-полям; device table — пары `{ADDRESS, ID}` по 8 байт, заканчивается ниже
-`0x2000`. Другие control registers на boot entry не определены.
+and the count and physical address of device entries. Check `SIZE` before
+accessing fields; the device table consists of 8-byte `{ADDRESS, ID}` pairs
+and ends below `0x2000`. Other control registers are unspecified at boot entry.
 
-Низкая память: `0…0xFFF` unspecified; `0x1000…0x1FFF` boot info/table;
-`0x2000…0xFFFF` свободна, но там firmware stack. Ядро копирует нужные boot
-данные, переходит на собственный стек, обнуляет свою BSS и резервирует
-образ, BSS, stack, таблицы MMU и entry state до раздачи страниц.
-Свободной страницей не является любая RAM-страница вне file image:
-неинициализированные секции и стек тоже занимают RAM.
+Low memory: `0…0xFFF` is unspecified; `0x1000…0x1FFF` holds boot info/table;
+`0x2000…0xFFFF` is free, but contains the firmware stack. The kernel copies the
+boot data it needs, switches to its own stack, zeroes its BSS and reserves
+the image, BSS, stack, MMU tables and entry state before distributing pages.
+A RAM page outside the file image is not necessarily free:
+uninitialized sections and the stack also occupy RAM.
 
-Firmware font расположен в VRAM по offset `0x3FF000`: 256 glyphs 8×16,
-16 байт на glyph, bit 7 слева. Codes `0x20–0xFF` — Windows-1252,
-низкие codes — symbols/box drawing. Это не UTF-8/Unicode font.
-Переключение mode не очищает VRAM; собственная консоль должна явно
-инициализировать экран, font/palette и состояние engine.
+The firmware font is in VRAM at offset `0x3FF000`: 256 glyphs of 8×16,
+16 bytes per glyph, bit 7 on the left. Codes `0x20–0xFF` are Windows-1252,
+low codes are symbols/box drawing. This is not a UTF-8/Unicode font.
+Changing modes does not clear VRAM; a custom console must explicitly
+initialize the screen, font/palette and engine state.
 
-Чек-лист:
+Checklist:
 
-- [ ] Сохранить входной `r1` до вызовов, проверить boot info и диапазоны.
-- [ ] Обнулить BSS даже после warm reset с грязной RAM.
-- [ ] Установить собственный `sp`, entry state и `IVEC` до clear `EXL`.
-- [ ] Зарезервировать все занятые physical pages, включая низкую память.
-- [ ] Не включать IRQ до готовности handlers и device acknowledgement.
+- [ ] Save entry `r1` before calls; validate boot info and ranges.
+- [ ] Zero BSS even after a warm reset with dirty RAM.
+- [ ] Set up your own `sp`, entry state and `IVEC` before clearing `EXL`.
+- [ ] Reserve all occupied physical pages, including low memory.
+- [ ] Do not enable IRQs until handlers and device acknowledgement are ready.
 
 <a id="traps"></a>
 
-## 4. Trap, IRQ, EPC и возврат
+## 4. Traps, IRQs, EPC and return
 
-### Control registers и STATUS
+### Control registers and STATUS
 
-| CR | Имя | Назначение |
+| CR | Name | Purpose |
 | --- | --- | --- |
-| 0 | STATUS | Mode, IRQ, exception level и step flags |
-| 1, 2, 3 | EPC, IVEC, SCRATCH | Return PC, единый vector и software temporary |
-| 4, 5, 6 | CAUSE, BADADDR, PTBR | Причина trap, дополнительные данные и MMU context |
-| 7, 8 | CYCLE, CYCLEH | Low/high word счётчика cycles, read-only |
+| 0 | STATUS | Mode, IRQ, exception level and step flags |
+| 1, 2, 3 | EPC, IVEC, SCRATCH | Return PC, common vector and software temporary |
+| 4, 5, 6 | CAUSE, BADADDR, PTBR | Trap cause, additional data and MMU context |
+| 7, 8 | CYCLE, CYCLEH | Low/high word of the cycle counter, read-only |
 | 9, 10 | INSTRET, INSTRETH | Low/high retired count, read-only |
 | 11 | CPUID | ISA version/extensions, read-only |
-| 12, 13, 14, 15 | TADDR0, TCTRL0, TADDR1, TCTRL1 | Два debug triggers |
-| 16 | HARTID | Номер core, сейчас 0, read-only |
+| 12, 13, 14, 15 | TADDR0, TCTRL0, TADDR1, TCTRL1 | Two debug triggers |
+| 16 | HARTID | Core number, currently 0, read-only |
 | 17 | FCSR | FP flags/rounding mode |
 
-Номера bits STATUS: `IE=0`, `PIE=1`, `UM=2`, `PUM=3`, `EXL=4`, `SS=5`,
-`PSS=6`; остальные bits read-as-zero. Не путать bit number и mask:
-например, `EXL` mask равна `1<<4`, то есть `0x10`.
-`MFCR/MTCR/IRET` ждут завершения старых instructions; control write
-вступает в силу для следующих instructions. Номера CR и TLBI mode
-кодируются непосредственно в instruction; в M `mfcr/mtcr` требуют
-constant expression, а не runtime index.
+STATUS bit numbers: `IE=0`, `PIE=1`, `UM=2`, `PUM=3`, `EXL=4`, `SS=5`,
+`PSS=6`; all other bits read as zero. Do not confuse a bit number with a mask:
+for example, the `EXL` mask is `1<<4`, or `0x10`.
+`MFCR/MTCR/IRET` wait for older instructions to complete; a control write
+takes effect for subsequent instructions. CR numbers and TLBI modes
+are encoded directly in the instruction; in M, `mfcr/mtcr` require
+a constant expression, rather than a runtime index.
 
-### Что CPU сохраняет, а что оставляет программе
+### What the CPU saves and what it leaves to software
 
-При trap CPU записывает control state, но **не сохраняет GPR, не меняет
-`sp`, не переключает `PTBR` и не создаёт аппаратный stack frame**.
-Один `IVEC` обслуживает все причины. Вход:
+On a trap, the CPU records control state, but **does not save GPRs, change
+`sp`, switch `PTBR` or create a hardware stack frame**.
+One `IVEC` handles every cause. Entry:
 
 ```text
 PIE = IE;   IE = 0
 PUM = UM;   UM = 0
 PSS = SS;   SS = 0
 EXL = 1
-CAUSE = причина
-EPC = адрес согласно типу события
+CAUSE = cause
+EPC = address according to the event type
 pc = IVEC
 ```
 
-`PUM` сообщает происхождение trap; текущий `UM` на входе уже 0.
-`PIE/PSS` — сохранённые значения, а не действующие IRQ/step flags.
-`SCRATCH` — программный control register для временного сохранения,
-а не автоматически заполненный указатель или swap-инструкция.
+`PUM` identifies the trap's origin; current `UM` is already 0 at entry.
+`PIE/PSS` are saved values, rather than active IRQ/step flags.
+`SCRATCH` is a software control register for temporary storage,
+rather than an automatically populated pointer or a swap instruction.
 
-### Точное правило EPC
+### Exact EPC rules
 
-| CAUSE | Событие | EPC при входе | BADADDR | Действие перед возвратом |
+| CAUSE | Event | EPC at entry | BADADDR | Action before return |
 | --- | --- | --- | --- | --- |
-| 0 | IRQ | Следующая ещё не выполненная инструкция | Не изменяется | Оставить EPC |
-| 1 | Illegal instruction | Ошибочная инструкция | Instruction word | Исправить/эмулировать либо завершить задачу |
-| 2 | Misaligned fetch | Ошибочный PC | PC | Исправить target либо завершить задачу |
-| 3, 4 | Misaligned load/store | Ошибочная инструкция | Data address | Эмулировать либо завершить задачу |
-| 5, 6, 7 | Fetch/load/store bus error | Ошибочная инструкция | Fetch/data address | Разобрать неисправный physical доступ |
-| 8, 9, 10 | Fetch/load/store page fault | Ошибочная инструкция | Virtual address | После исправления mapping повторить с тем же EPC |
-| 11 | Privileged instruction из UM | Ошибочная инструкция | Instruction word | Обычно завершить задачу |
-| 12 | SYSCALL | Сама SYSCALL | 0 | Для обычного завершённого syscall прибавить 4 |
-| 13 | BREAK | Сама BREAK | 0 | При продолжении после breakpoint прибавить 4 |
-| 14 | Single-step | Следующая инструкция | PC предыдущей | Оставить EPC |
-| 15 | Debug trigger | Совпавшая инструкция | Match address | Убрать причину совпадения, затем повторить |
+| 0 | IRQ | Next instruction not yet executed | Unchanged | Leave EPC unchanged |
+| 1 | Illegal instruction | Faulting instruction | Instruction word | Fix/emulate or terminate the task |
+| 2 | Misaligned fetch | Faulting PC | PC | Fix the target or terminate the task |
+| 3, 4 | Misaligned load/store | Faulting instruction | Data address | Emulate or terminate the task |
+| 5, 6, 7 | Fetch/load/store bus error | Faulting instruction | Fetch/data address | Investigate the failed physical access |
+| 8, 9, 10 | Fetch/load/store page fault | Faulting instruction | Virtual address | Retry at the same EPC after fixing the mapping |
+| 11 | Privileged instruction in UM | Faulting instruction | Instruction word | Usually terminate the task |
+| 12 | SYSCALL | SYSCALL itself | 0 | Add 4 for an ordinary completed syscall |
+| 13 | BREAK | BREAK itself | 0 | Add 4 when continuing past the breakpoint |
+| 14 | Single-step | Next instruction | Previous PC | Leave EPC unchanged |
+| 15 | Debug trigger | Matching instruction | Match address | Remove the cause of the match, then retry |
 
-Для fault результат самой ошибочной инструкции не завершён; все более
-старые инструкции завершены, более молодые не имеют архитектурных эффектов.
-После исправления page fault `EPC += 4` пропустит требуемый load/store.
-После IRQ такой же сдвиг потеряет следующую инструкцию. При `SYSCALL/BREAK`
-без сдвига произойдёт повторный trap на той же инструкции.
-`BADADDR` при IRQ может содержать значение от старого fault: его нельзя
-печатать как адрес причины IRQ. При illegal/privileged это instruction word,
-а не pointer, который можно разыменовать.
+For a fault, the faulting instruction's own result has not completed; all
+older instructions have completed, and younger ones have no architectural effects.
+After fixing a page fault, `EPC += 4` would skip the required load/store.
+After an IRQ, the same adjustment would lose the next instruction. With `SYSCALL/BREAK`,
+leaving EPC unchanged causes another trap at the same instruction.
+On an IRQ, `BADADDR` may contain a value from an earlier fault: it must not
+be printed as the address that caused the IRQ. For illegal/privileged instructions,
+it is an instruction word, rather than a pointer that can be dereferenced.
 
-ABI syscall: номер в `r9`, не более 6 слов аргументов в `r1–r6`,
-без stack arguments; результат `r1` либо `r1/r2`, ошибки `-4095…-1`.
-Все остальные GPR должны сохраниться. Номера и смысл syscall выбирает ОС.
-Блокирующий syscall должен возобновляться по согласованному kernel protocol,
-а не случайно повторяться из-за несохранённого EPC.
+Syscall ABI: number in `r9`, at most 6 argument words in `r1–r6`,
+no stack arguments; result in `r1` or `r1/r2`, errors `-4095…-1`.
+All other GPRs must be preserved. The OS chooses syscall numbers and meanings.
+A blocking syscall must resume according to an agreed kernel protocol,
+rather than accidentally repeat because EPC was not saved.
 
-### IE, EXL, nested faults и IRET
+### IE, EXL, nested faults and IRET
 
-`IE` маскирует только IRQ. Исключения возможны при `IE=0` в обоих modes.
-`EXL=1` блокирует IRQ и обработку нового fault: второй fault **останавливает
-CPU**, без второго входа в `IVEC`. Это не отдельный exception vector,
-не аппаратный emergency stack и не автоматический reset.
-Первый сохранённый `EPC/CAUSE/BADADDR` остаётся состоянием первого trap;
-вторую неисправную инструкцию надо искать в dump/pipeline эмулятора.
+`IE` masks only IRQs. Exceptions are possible with `IE=0` in either mode.
+`EXL=1` blocks IRQs and handling of a new fault: a second fault **halts
+the CPU**, without a second entry into `IVEC`. This is not a separate exception vector,
+a hardware emergency stack or an automatic reset.
+The first saved `EPC/CAUSE/BADADDR` remains the first trap's state;
+look for the second faulting instruction in the emulator dump/pipeline.
 
-Если ядро хочет обрабатывать fault при `copy_from_user`, сначала нужны
-полный frame, валидный kernel stack, сохранённые `EPC/STATUS/CAUSE/BADADDR`
-и fault-fixup protocol, затем clear `EXL`. Оставить `IE=0` при этом можно.
-Если требуются nested IRQ, после сохранения контекста дополнительно ставится
-`IE=1`. Вложенность требует отдельных frames; общий temporary slot опасен.
+If the kernel wants to handle faults during `copy_from_user`, it first needs
+a complete frame, a valid kernel stack, saved `EPC/STATUS/CAUSE/BADADDR`
+and a fault-fixup protocol, then it can clear `EXL`. `IE=0` may remain in effect.
+If nested IRQs are required, additionally set `IE=1` after saving the context.
+Nesting requires separate frames; a shared temporary slot is dangerous.
 
-`IRET` выполняет `pc=EPC`, `IE=PIE`, `UM=PUM`, `SS=PSS`, `EXL=0`.
-Перед восстановлением EPC надо снова обеспечить `IE=0, EXL=1`;
-пользовательские `UM` и `sp` не должны стать действующими посреди restore.
-Запись `MTCR STATUS` с `UM=1` переключает mode уже для следующей инструкции;
-для контролируемого входа в user mode обычно используется `IRET`.
-IRQ может быть принят сразу после разрешающего `MTCR STATUS`.
+`IRET` performs `pc=EPC`, `IE=PIE`, `UM=PUM`, `SS=PSS`, `EXL=0`.
+Before restoring EPC, ensure `IE=0, EXL=1` again;
+user `UM` and `sp` must not become active midway through restoration.
+Writing `MTCR STATUS` with `UM=1` changes the mode for the very next instruction;
+`IRET` is normally used for controlled entry into user mode.
+An IRQ may be accepted immediately after an enabling `MTCR STATUS`.
 
-### WFI и HLT
+### WFI and HLT
 
-`WFI` ждёт **asserted CPU IRQ line**, даже если `IE=0` или `EXL=1`.
-При `IE=1, EXL=0` CPU входит в handler с EPC после `WFI`;
-иначе просто продолжает следующую инструкцию. PIC всё равно должен
-разрешать хотя бы соответствующую линию: pending при `ENABLE=0` не будит.
-Постоянно asserted IRQ может превратить idle в busy loop.
+`WFI` waits for an **asserted CPU IRQ line**, even with `IE=0` or `EXL=1`.
+With `IE=1, EXL=0`, the CPU enters the handler with EPC after `WFI`;
+otherwise, it simply continues with the next instruction. The PIC must still
+enable at least the corresponding line: pending with `ENABLE=0` does not wake it.
+A continuously asserted IRQ can turn idle into a busy loop.
 
-`HLT` останавливает машину до reset; это не idle instruction. После HLT
-не идут ticks устройств, не работает watchdog и не завершается DMA.
+`HLT` stops the machine until reset; it is not an idle instruction. After HLT,
+devices no longer tick, the watchdog does not run and DMA does not complete.
 
-Чек-лист:
+Checklist:
 
-- [ ] Выбирать retry/skip/next по CAUSE, не применять общий `EPC += 4`.
-- [ ] Определять user origin по `PUM`, сохранять исходный `sp` и GPR.
-- [ ] Не делать потенциально faulting access до готовности frame/nesting.
-- [ ] Restore выполняется при `IE=0, UM=0, EXL=1`, затем единственный `IRET`.
-- [ ] Idle использует `WFI`, panic stop — отдельную политику HLT/power off.
+- [ ] Select retry/skip/next according to CAUSE; do not apply a blanket `EPC += 4`.
+- [ ] Determine user origin from `PUM`; save the original `sp` and GPRs.
+- [ ] Do not perform potentially faulting accesses until the frame/nesting is ready.
+- [ ] Restore with `IE=0, UM=0, EXL=1`, followed by a single `IRET`.
+- [ ] Idle uses `WFI`; panic stop has a separate HLT/power-off policy.
 
 <a id="entry"></a>
 
-## 5. Низкие слова входа и TrapFrame
+## 5. Low entry words and TrapFrame
 
-### Зачем слова ниже 8 KiB
+### Why words below 8 KiB are needed
 
-На первой инструкции trap нет свободного GPR: каждый содержит прерванное
-значение. Пользовательскому `sp` доверять нельзя. Адрес `offset(r0)` в
-диапазоне signed `imm14` позволяет обратиться к заранее известному слову
-без загрузки адреса в temporary register. [ABI рекомендует](ABI.md#entering-the-kernel)
-хранить текущий kernel stack pointer в таком низком слове.
+At the first trap instruction, no GPR is free: each holds an interrupted
+value. The user's `sp` cannot be trusted. An `offset(r0)` address within
+the signed `imm14` range allows access to a known word without loading
+its address into a temporary register. The [ABI recommends](ABI.md#entering-the-kernel)
+storing the current kernel stack pointer in such a low word.
 
-В текущем LA/IX [defs.inc](../laix/src/arch/wrm081632/defs.inc) выделяет:
+In current LA/IX, [defs.inc](../laix/src/arch/wrm081632/defs.inc) allocates:
 
-| Virtual address | Назначение LA/IX |
+| Virtual address | LA/IX purpose |
 | --- | --- |
-| `0x00001FF0` | `KERNEL_SP`: kernel stack текущей задачи |
+| `0x00001FF0` | `KERNEL_SP`: current task's kernel stack |
 | `0x00001FF4` | `KERNEL_STACK_BOTTOM` |
 | `0x00001FF8` | `KERNEL_STACK_TOP` |
-| `0x00001FFC` | `TRAP_SAVED_R1`: временное сохранение `r1` |
+| `0x00001FFC` | `TRAP_SAVED_R1`: temporary storage for `r1` |
 
-**Эти адреса выбирает LA/IX, аппаратно они не зарезервированы.**
-Слова лежат в конце страницы boot info, поэтому boot info и таблица
-устройств обязаны заканчиваться ниже `0x1FF0`; ядро это проверяет.
-ОС обязана зарезервировать physical storage и установить mapping сама. Для каждой пользовательской
-page directory низкие виртуальные слова должны вести к нужной kernel
-странице с `U=0`; mapping должен существовать уже при входе в trap.
-CPU не переключит directory за ядро.
+**LA/IX chooses these addresses; hardware does not reserve them.**
+The words lie at the end of the boot info page, so boot info and the device
+table must end below `0x1FF0`; the kernel checks this.
+The OS must reserve physical storage and establish the mapping itself. For each user
+page directory, the low virtual words must point to the appropriate kernel
+page with `U=0`; this mapping must already exist at trap entry.
+The CPU will not switch the directory for the kernel.
 
-Не стоит размещать эти слова в page zero. `U=0` закрыл бы её только для
-пользователя: в ядре **разыменование NULL не дало бы fault**, а читало бы
-или портило entry state. Вызов по NULL исполнил бы слово `0x00000000`, то
-есть `HLT`, и headless-эмулятор вышел бы с кодом 0, как при успехе.
-Поэтому LA/IX не отображает page zero ни в одном каталоге: NULL load, store
-и call со смещением меньше 4 KiB дают page fault. До включения MMU эта
-защита не действует. Запрещены пользовательские aliases physical page
-со словами входа: иначе задача перезапишет stack pointer/границы через другой VA.
-Supervisor-доступ тоже требует `R/W` по виду операции.
-Следует защищать весь physical frame, а не только четыре адреса.
+These words should not be placed in page zero. `U=0` would exclude only
+users: in the kernel, **dereferencing NULL would not fault**, but would read
+or corrupt entry state. A call through NULL would execute the word `0x00000000`,
+which is `HLT`, and the headless emulator would exit with code 0, as on success.
+LA/IX therefore leaves page zero unmapped in every directory: NULL loads, stores
+and calls with offsets below 4 KiB cause page faults. This protection does not
+apply before the MMU is enabled. User aliases of the physical page holding
+entry words are prohibited: otherwise, a task could overwrite the stack pointer/bounds through another VA.
+Supervisor access also requires `R/W` according to the operation.
+Protect the entire physical frame, rather than just four addresses.
 
-Entry path, stack, frame, handler code, необходимые tables и аварийный
-output должны быть доступны в **каждом активном address space**. Для смены
-`PTBR` новые таблицы заранее включают отображения текущего кода/стека;
-частично готовый каталог даст fault при EXL и остановку CPU.
+The entry path, stack, frame, handler code, required tables and emergency
+output must be accessible in **every active address space**. When changing
+`PTBR`, the new tables must already map the current code/stack;
+a partially prepared directory will fault under EXL and halt the CPU.
 
-### Frame и пределы текущего entry
+### Frame and current entry limits
 
-`TrapFrame` — программная структура ОС, не формат CPU. Текущий
-[layout LA/IX](../laix/src/trap/trap_layout.inc): 32 GPR (128 байт),
-`EPC/STATUS/CAUSE/BADADDR/FCSR/PTBR` (24 байта), два reserved words;
-итого **160 байт**, кратно 8. `r30` в frame — прерванный stack pointer,
-а не адрес frame. `r0` сохраняется явно как 0 для диагностики.
+`TrapFrame` is an OS software structure, rather than a CPU format. The current
+[LA/IX layout](../laix/src/trap/trap_layout.inc) has 32 GPRs (128 bytes),
+`EPC/STATUS/CAUSE/BADADDR/FCSR/PTBR` (24 bytes) and two reserved words;
+a total of **160 bytes**, a multiple of 8. `r30` in the frame is the interrupted
+stack pointer, rather than the frame address. `r0` is explicitly saved as 0 for diagnostics.
 
-[trap.asm](../laix/src/trap/trap.asm) сначала сохраняет `sp` в `SCRATCH`,
-проверяет `PUM`, выбирает trusted kernel stack для user origin либо
-прерванный stack для supervisor. Он сохраняет `r1` через низкое слово,
-проверяет alignment и границы с запасом под frame, bottom canary и
-512 байт dispatcher headroom, затем сохраняет остальные значения.
-Этот запас — политика LA/IX, а не аппаратная гарантия максимальной
-глубины вызовов M. Canary дополняет, но не заменяет MMU guard page.
+[trap.asm](../laix/src/trap/trap.asm) first saves `sp` in `SCRATCH`,
+checks `PUM`, and selects a trusted kernel stack for user origin or
+the interrupted stack for supervisor origin. It saves `r1` through a low word,
+checks alignment and bounds with room for the frame, a bottom canary and
+512 bytes of dispatcher headroom, then saves the remaining values.
+This reserve is LA/IX policy, rather than a hardware guarantee of maximum
+M call depth. A canary supplements, but does not replace, an MMU guard page.
 
-Один `TRAP_SAVED_R1` подходит для нынешней однопроцессорной невложенной
-начальной части входа с `EXL=1`. При расширении nesting он не должен быть
-живым во время следующего входа; для будущего SMP нужны per-core entry state
-и stacks. Наличие user ветки в assembly ещё не доказывает user-mode return:
-нужна проверка реального входа со злонамеренным пользовательским `sp`.
+A single `TRAP_SAVED_R1` suits the current single-CPU, non-nested
+initial entry phase with `EXL=1`. If nesting is extended, it must not be
+live during the next entry; future SMP needs per-core entry state
+and stacks. A user branch in assembly does not yet prove user-mode return:
+a real entry with a malicious user `sp` must be tested.
 
-`PTBR` в frame полезен для диагностики, но сохранение поля не является
-автоматическим переключением address space. Планировщик обязан выбрать
-каталог возвращаемой задачи, сохранить доступ к frame и восстановить
-остальное thread state. `FCSR` требует отдельного restore.
+`PTBR` in the frame is useful for diagnostics, but saving the field does not
+automatically switch address spaces. The scheduler must select the
+returning task's directory, retain access to the frame and restore
+the rest of the thread state. `FCSR` requires separate restoration.
 
-Чек-лист:
+Checklist:
 
-- [ ] Низкие слова и все их physical aliases недоступны пользователю.
-- [ ] Каждый address space отображает entry code/state, stack и panic path.
-- [ ] M/assembly совпадают по offsets, размеру и alignment TrapFrame.
-- [ ] Проверены все GPR, исходный `sp`, `tp`, `ra`, EPC, STATUS и FCSR.
-- [ ] Смена задачи обновляет `KERNEL_SP`, stack bounds и выбранный PTBR.
-- [ ] User trap со `sp=0`, невыравненным или kernel-like `sp` берёт kernel stack.
-- [ ] Overflow stack имеет проверенный аварийный путь без обращения к плохому стеку.
+- [ ] Low words and all their physical aliases are inaccessible to users.
+- [ ] Every address space maps entry code/state, the stack and the panic path.
+- [ ] M/assembly agree on TrapFrame offsets, size and alignment.
+- [ ] All GPRs, original `sp`, `tp`, `ra`, EPC, STATUS and FCSR are checked.
+- [ ] A task switch updates `KERNEL_SP`, stack bounds and selected PTBR.
+- [ ] A user trap with `sp=0`, misaligned or kernel-like `sp` uses the kernel stack.
+- [ ] Stack overflow has a verified emergency path that does not access the bad stack.
 
 <a id="mmu"></a>
 
-## 6. MMU, права, ASID и TLB
+## 6. MMU, permissions, ASIDs and TLB
 
-### Таблицы и permissions
+### Tables and permissions
 
-WRM использует двухуровневые таблицы: 4 KiB directory, 1024 entries по
-4 байта; следующий уровень такого же размера. VA разбивается на
-`dir[31:22]`, `table[21:12]`, `offset[11:0]`. Базовый page size 4 KiB,
-superpage 4 MiB. `PTBR` содержит physical directory base в битах 31–12,
-8-битный ASID в 11–4, `EN` в бите 0; биты 3–1 reserved/read-as-zero.
+WRM uses two-level tables: a 4 KiB directory with 1024 entries of
+4 bytes each; the next level has the same size. A VA is split into
+`dir[31:22]`, `table[21:12]`, `offset[11:0]`. Base page size is 4 KiB,
+superpage size 4 MiB. `PTBR` contains the physical directory base in bits 31–12,
+an 8-bit ASID in 11–4 and `EN` in bit 0; bits 3–1 are reserved/read-as-zero.
 
-Номера bits PTE: `V=0`, `R=1`, `W=2`, `X=3`, `U=4`, `A=5`, `D=6`, `G=7`,
-bits 11–8 reserved, physical base — 31–12. В non-leaf PDE `V=1`,
-`R/W/X=0`, base ведёт на table. Если PDE имеет любой `R/W/X`, это leaf
-superpage; physical bits 21–12 обязаны быть 0. PTE без `V` или без
-какого-либо `R/W/X` не отображает страницу.
+PTE bit numbers: `V=0`, `R=1`, `W=2`, `X=3`, `U=4`, `A=5`, `D=6`, `G=7`,
+bits 11–8 reserved, physical base in 31–12. A non-leaf PDE has `V=1`,
+`R/W/X=0`, with its base pointing to a table. If a PDE has any `R/W/X`, it is a leaf
+superpage; physical bits 21–12 must be 0. A PTE without `V` or without
+any `R/W/X` does not map a page.
 
-Fetch требует `X`, load — `R`, store — `W`, независимо друг от друга.
-`W` не подразумевает `R`. User mode дополнительно требует `U` в leaf;
-`U` non-leaf PDE не задаёт права children. Supervisor обходит только
-проверку `U`, но не `R/W/X`. Нет автоматического запрета supervisor на
-user pages: проверки пользовательских указателей остаются задачей ОС.
+Fetch requires `X`, load `R`, store `W`, independently of each other.
+`W` does not imply `R`. User mode additionally requires `U` in the leaf;
+`U` in a non-leaf PDE does not set child permissions. Supervisor bypasses only
+the `U` check, rather than `R/W/X`. There is no automatic supervisor prohibition
+on user pages: checking user pointers remains the OS's responsibility.
 
-`IVEC/EPC` и адресные значения `BADADDR` виртуальны при MMU on.
-Directory/table storage адресуется физически. Walk читает RAM/ROM,
-не MMIO/VRAM; недоступная entry даёт page fault, не побочный эффект device.
-После успешной translation hardware выставляет `A`, при записи — `D`,
-в **leaf** entry; для superpage это PDE. Writeback failure тоже page fault.
-Таблицы обычно должны быть в RAM; read-only ROM возможен только если
-необходимые A/D заранее выставлены.
+`IVEC/EPC` and address values in `BADADDR` are virtual with the MMU on.
+Directory/table storage is addressed physically. Walks read RAM/ROM,
+rather than MMIO/VRAM; an inaccessible entry causes a page fault, without device side effects.
+After successful translation, hardware sets `A`, and on writes `D`,
+in the **leaf** entry; for a superpage, this is the PDE. Writeback failure is also a page fault.
+Tables should normally be in RAM; read-only ROM is possible only if
+the required A/D bits are already set.
 
-`A` может установиться от speculative fetch, даже если инструкция не
-исполнялась. Очистить A/D в памяти без TLB invalidate недостаточно:
-cached entry может помнить старые flags. Неуспешный `SC` не устанавливает D.
-PTE permissions не отменяют physical bus rules: `X` у MMIO/VRAM всё равно
-не позволяет fetch, `W` у ROM всё равно приводит к store bus error.
+`A` may be set by speculative fetch even if the instruction never
+executes. Clearing A/D in memory without TLB invalidation is insufficient:
+a cached entry may retain old flags. A failed `SC` does not set D.
+PTE permissions do not override physical bus rules: `X` on MMIO/VRAM still
+does not permit fetch, and `W` on ROM still causes a store bus error.
 
-### ASID и invalidation
+### ASIDs and invalidation
 
-| Операция | Что инвалидируется |
+| Operation | What is invalidated |
 | --- | --- |
-| `TLBI rs1, 0` | Одна 4 KiB VA page текущего ASID и совпавшая global translation |
-| `TLBI rs1, 1` | Все non-global translations ASID из `rs1 & 255` |
-| `TLBI r0, 2` / `TLBI.ALL` | Весь TLB, включая global; `rs1` должен быть 0 |
-| `MTCR PTBR` с тем же ASID | Non-global entries этого ASID |
-| `MTCR PTBR` с другим ASID | Старые contexts сохраняются; global entries сохраняются |
+| `TLBI rs1, 0` | One 4 KiB VA page of the current ASID and a matching global translation |
+| `TLBI rs1, 1` | All non-global translations for the ASID in `rs1 & 255` |
+| `TLBI r0, 2` / `TLBI.ALL` | The entire TLB, including global entries; `rs1` must be 0 |
+| `MTCR PTBR` with the same ASID | Non-global entries for that ASID |
+| `MTCR PTBR` with a different ASID | Old contexts are retained; global entries are retained |
 
-ASID — tag, а не permission или номер CPU. Перед выдачей ранее
-использованного ASID другому address space нужны invalidate этого ASID
-или full flush. Разные каталоги с одним ASID требуют согласованной политики
-refresh; одной смены physical directory base недостаточно для global entries.
+An ASID is a tag, rather than a permission or CPU number. Before assigning a
+previously used ASID to another address space, invalidate that ASID
+or perform a full flush. Different directories with one ASID require a consistent
+refresh policy; changing the physical directory base alone is insufficient for global entries.
 
-`G` у leaf делает translation общей для ASID; `G` у non-leaf PDE —
-**все** pages этой table global. Ошибочный `G` у user directory entry
-позволяет TLB использовать перевод другой задачи. Global mappings должны
-иметь одинаковые адреса, backing и права во всех contexts.
+`G` on a leaf makes the translation shared across ASIDs; `G` on a non-leaf PDE makes
+**all** pages in that table global. An incorrect `G` in a user directory entry
+allows the TLB to use another task's translation. Global mappings must
+have identical addresses, backing and permissions in every context.
 
-Superpage кэшируется отдельными 4 KiB fragments. Один page TLBI не
-удаляет остальные cached fragments 4 MiB region. После изменения
-superpage нужны все соответствующие page invalidations либо более широкий
-flush; для global superpage безопасный простой вариант — `TLBI.ALL`.
+A superpage is cached as separate 4 KiB fragments. One page TLBI does not
+remove the remaining cached fragments of a 4 MiB region. After changing a
+superpage, all corresponding page invalidations or a broader flush are
+required; for a global superpage, `TLBI.ALL` is a simple safe option.
 
-`V=0` не кэшируется, поэтому превращение заведомо invalid entry в valid
-не требует удаления negative translation. Это не отменяет необходимость
-полностью подготовить table до публикации PDE и проверить, что старого
-valid mapping в TLB нет.
+`V=0` is not cached, so turning a known invalid entry into a valid one
+does not require removing a negative translation. This does not remove the need
+to fully prepare the table before publishing the PDE and check that no old
+valid mapping remains in the TLB.
 
-Valid entry попадает в TLB при walk **до проверки прав**. Поэтому TLBI
-нужен при любой смене `R/W/X/U`, в том числе при **расширении** прав:
-если после store page fault добавить `W` в PTE и вернуться без TLBI,
-повторный store снова получит page fault из старой cached entry, и задача
-зациклится. Это касается COW, demand write и выдачи `U`/`X`.
-Для valid→invalid, смены frame или сужения прав устаревшие translations
-обязательно удаляются **до переиспользования frame**.
+A valid entry enters the TLB during a walk **before permission checks**. TLBI
+is therefore required for any change to `R/W/X/U`, including **expanding** permissions:
+if a store page fault is followed by adding `W` to the PTE and returning without TLBI,
+the retried store will page-fault again on the old cached entry, and the task
+will loop. This applies to COW, demand write and granting `U`/`X`.
+For valid→invalid, a frame change or permission restriction, stale translations
+must be removed **before reusing the frame**.
 
-Guard page должна отсутствовать вместе со всеми обходными mappings к
-её physical storage. Большая identity superpage не оставляет дырку 4 KiB:
-для guard нужно разбить соответствующий регион на обычные pages.
-То же относится к RX code, R-only constants, RW data и W^X policy.
+A guard page must be absent along with all alternative mappings to
+its physical storage. A large identity superpage does not leave a 4 KiB hole:
+the corresponding region must be split into ordinary pages for a guard.
+The same applies to RX code, R-only constants, RW data and W^X policy.
 
-Чек-лист:
+Checklist:
 
-- [ ] Таблицы 4 KiB aligned и зарезервированы в physical allocator.
-- [ ] Tail RAM не отображает отсутствующие frames через большую superpage.
-- [ ] User/kernel права проверены fetch/load/store, включая supervisor R/W/X.
-- [ ] Unmap/revoke удаляет translations до освобождения physical frame.
-- [ ] Fault handler, расширяющий права (COW, demand write), делает TLBI до retry.
-- [ ] ASID reuse, global mappings и superpage fragments имеют явную TLBI policy.
-- [ ] Guard, read-only sections и низкие entry frames не имеют permissive aliases.
-- [ ] Сбор A/D учитывает speculative fetch и cached flags.
+- [ ] Tables are 4 KiB aligned and reserved in the physical allocator.
+- [ ] A large superpage does not map nonexistent frames beyond the end of RAM.
+- [ ] User/kernel permissions are checked for fetch/load/store, including supervisor R/W/X.
+- [ ] Unmap/revoke removes translations before freeing the physical frame.
+- [ ] A fault handler expanding permissions (COW, demand write) performs TLBI before retry.
+- [ ] ASID reuse, global mappings and superpage fragments have an explicit TLBI policy.
+- [ ] Guards, read-only sections and low entry frames have no permissive aliases.
+- [ ] A/D collection accounts for speculative fetch and cached flags.
 
 <a id="ordering"></a>
 
-## 7. Атомики, порядок памяти и изменение кода
+## 7. Atomics, memory ordering and code modification
 
-`LL` читает word и резервирует **physical**, 4-aligned word. `SC` пишет
-только при сохранившейся reservation: результат **0 — успех, 1 — отказ**.
-Каждый `SC` очищает reservation. Даже неуспешный SC проверяет alignment
-и write permissions; нельзя использовать его как безопасный probe pointer.
-Он может дать fault, но при обычном отказе не отмечает page dirty.
+`LL` reads a word and reserves the **physical**, 4-aligned word. `SC` writes
+only if the reservation remains: result **0 means success, 1 means failure**.
+Every `SC` clears the reservation. Even a failed SC checks alignment
+and write permissions; it cannot be used as a safe pointer probe.
+It can fault, but an ordinary failure does not mark the page dirty.
 
-Reservation снимают overlapping CPU/DMA write, trap, `MTCR PTBR`,
-`TLBI`, reset. Два VA aliases одного physical word связаны одной
-reservation. IRQ между `LL/SC` способен вызвать отказ без конкурирующего
-потока, поэтому update всегда делается retry loop, с корректной политикой
-ожидания для lock. При успехе SC атомарен относительно CPU и DMA.
+Overlapping CPU/DMA writes, traps, `MTCR PTBR`, `TLBI` and reset clear
+the reservation. Two VA aliases of one physical word share one
+reservation. An IRQ between `LL/SC` can cause failure without a competing
+thread, so updates always use a retry loop, with an appropriate waiting
+policy for locks. On success, SC is atomic with respect to the CPU and DMA.
 
-Для MMIO `LL/SC` не является обычной lock primitive: чтение уже может
-извлечь FIFO item, а попытка записи — иметь device-specific последствия.
-На VRAM LL/SC работает, но **прямые записи drawing engine не снимают
-reservation**; CPU и DMA записи снимают. Следовательно, SC не гарантирует
-отсутствие intervening engine draw в том же pixel storage.
+For MMIO, `LL/SC` is not an ordinary lock primitive: a read may already
+remove a FIFO item, and a write attempt may have device-specific consequences.
+LL/SC works on VRAM, but **direct drawing engine writes do not clear
+the reservation**; CPU and DMA writes do. SC therefore does not guarantee
+the absence of an intervening engine draw in the same pixel storage.
 
-`FENCE` упорядочивает data memory operations. Текущий single-core CPU
-выполняет их по порядку, но compiler тоже обязан сохранять нужный порядок
-MMIO, descriptor publication и `OWN`. В M для MMIO используются
-`*volatile T` / `*volatile mut T`: accesses выполняются по одному, своей
-ширины, в исходном порядке относительно других volatile accesses.
-Обычная память может переставляться относительно volatile; `fence()`
-упорядочивает их. `mtcr`, `tlbi`, atomics и `asm` тоже имеют compiler
-ordering contract. Подробнее — [hardware API M](../mc/docs/spec/07-hardware.md).
-`atomicCompareSwap` в M возвращает старое значение, а не код SC.
-`asm` не имеет operands и не разрешает менять stack/callee-saved registers
-или передавать управление за пределы вставки: полноценный trap entry
-пишется отдельной assembly function.
+`FENCE` orders data memory operations. The current single-core CPU
+executes them in order, but the compiler must also preserve the required ordering
+of MMIO, descriptor publication and `OWN`. M uses
+`*volatile T` / `*volatile mut T` for MMIO: accesses occur individually, at their
+own width, in source order relative to other volatile accesses.
+Ordinary memory may be reordered relative to volatile; `fence()`
+orders them. `mtcr`, `tlbi`, atomics and `asm` also have a compiler
+ordering contract. See the [M hardware API](../mc/docs/spec/07-hardware.md).
+M's `atomicCompareSwap` returns the old value, rather than the SC code.
+`asm` has no operands and does not permit changing the stack/callee-saved registers
+or transferring control outside the insertion: a complete trap entry
+is written as a separate assembly function.
 
-Frontend заранее fetch-ит инструкции. После patch code store нужен
-переход, сбрасывающий prefetched instructions: taken branch, `JAL/JALR`,
-`IRET`, `MTCR STATUS/PTBR` или `TLBI`. При fallthrough в изменённый код
-может исполниться старая или новая инструкция. **FENCE не синхронизирует
-instruction fetch.** Для DMA-generated code сначала ждать completion,
-затем выполнить такой control transfer и обеспечить `X` mapping.
+The frontend fetches instructions ahead of time. After a code patch store,
+a control transfer that discards prefetched instructions is required: a taken branch, `JAL/JALR`,
+`IRET`, `MTCR STATUS/PTBR` or `TLBI`. Falling through into modified code
+may execute either the old or new instruction. **FENCE does not synchronize
+instruction fetch.** For DMA-generated code, first wait for completion,
+then perform such a control transfer and ensure an `X` mapping.
 
-Чек-лист:
+Checklist:
 
-- [ ] SC success сравнивается с 0; failures повторяются без потери update.
-- [ ] Interrupt/nesting path не рассчитывает сохранить reservation.
-- [ ] Atomics не применяются к FIFO/MMIO с побочными эффектами.
-- [ ] Descriptor data публикуются до OWN/start doorbell.
-- [ ] Изменённый CPU/DMA код запускается после completion и refetch transition.
+- [ ] SC success is compared with 0; failures are retried without losing updates.
+- [ ] Interrupt/nesting paths do not expect to preserve a reservation.
+- [ ] Atomics are not used on FIFO/MMIO with side effects.
+- [ ] Descriptor data is published before OWN/start doorbell.
+- [ ] CPU/DMA-modified code is started after completion and a refetch transition.
 
 <a id="floating-point"></a>
 
-## 8. Floating point и FCSR
+## 8. Floating point and FCSR
 
-Аппаратный float — IEEE binary32 в тех же GPR. Отдельного FPU register file
-и lazy FPU trap нет; float load/store используют обычные words.
-`FMADD/FMSUB` используют **старое значение rd** как addend и округляют
-один раз: FMSUB вычисляет `old_rd - rs1*rs2`.
-Поддерживаются subnormals; floating-point exceptions не вызывают trap,
-а устанавливают sticky flags в `FCSR`.
+Hardware float is IEEE binary32 in the same GPRs. There is no separate FPU register
+file or lazy FPU trap; float loads/stores use ordinary words.
+`FMADD/FMSUB` use the **old rd value** as the addend and round
+once: FMSUB computes `old_rd - rs1*rs2`.
+Subnormals are supported; floating-point exceptions do not trap,
+but set sticky flags in `FCSR`.
 
-| FCSR | Значение |
+| FCSR | Meaning |
 | --- | --- |
 | bits 0–4 | `NX` inexact, `UF` underflow, `OF` overflow, `DZ` division by zero, `NV` invalid |
 | bits 7–5 | `FRM`: 0 nearest ties-even, 1 toward zero, 2 down, 3 up, 4 nearest ties-away |
-| FRM 5–7 | Reserved: запись сохраняет прежний mode, но обновляет flags |
+| FRM 5–7 | Reserved: a write retains the previous mode but updates flags |
 
-Reset FCSR=0: nearest ties-even, flags clear. Запись flags заменяет их,
-а не выполняет W1C, как многие device status registers.
-Flags устанавливаются на retirement, squashed instruction их не оставляет.
-`MFCR` видит эффекты старых операций; `MTCR FCSR` refetch-ит молодые
-инструкции с новым rounding mode. Mode ABI сохраняется через обычные
-вызовы, exception flags — нет. Оба принадлежат **потоку** и должны
-сохраняться ядром; software double использует тот же FCSR environment.
+Reset sets FCSR=0: nearest ties-even, flags clear. Writing flags replaces them,
+rather than performing W1C as many device status registers do.
+Flags are set at retirement; squashed instructions do not leave them behind.
+`MFCR` sees older operations' effects; `MTCR FCSR` refetches younger
+instructions with the new rounding mode. The ABI preserves the mode across ordinary
+calls, but not exception flags. Both belong to the **thread** and must
+be saved by the kernel; software double uses the same FCSR environment.
 
-Для trap ядро сохраняет FCSR до собственной FP работы и может установить
-свой mode/flags; при возврате восстанавливает состояние задачи. Одного
-сохранения GPR недостаточно. Текущий LA/IX делает это в trap entry/exit.
+On a trap, the kernel saves FCSR before doing its own FP work and may set
+its own mode/flags; on return, it restores the task's state. Saving GPRs
+alone is insufficient. Current LA/IX does this in trap entry/exit.
 
-Граничная семантика:
+Edge-case semantics:
 
-- Arithmetic NaN канонизируется в `0x7FC00000`, без сохранения payload/sign.
-  `FSGNJ/FSGNJN/FSGNJX` меняют только sign и сохраняют payload.
-- `FEQ/FLT/FLE` при NaN дают false; `+0` и `-0` равны.
-  `FMIN/FMAX` выбирают не-NaN operand, если NaN только один; оба NaN дают
-  canonical NaN. Для min/max `-0 < +0`.
-- `FTOI/FTOU` **всегда truncate toward zero**, независимо от FRM, с
-  saturation к пределу integer range; NaN даёт максимальное integer value.
-- `NV` возникает при invalid arithmetic, out-of-range conversion,
-  signaling NaN; для `FLT/FLE` — при любом NaN. `DZ` — finite nonzero / 0;
-  `0/0` даёт NV. Overflow также даёт NX. Underflow использует tininess
-  **до округления** и требует inexact result.
-- `FCLASS` возвращает один bit для класса: −∞, negative normal/subnormal,
+- Arithmetic NaNs are canonicalized to `0x7FC00000`, without preserving payload/sign.
+  `FSGNJ/FSGNJN/FSGNJX` change only the sign and preserve the payload.
+- `FEQ/FLT/FLE` return false for NaN; `+0` and `-0` are equal.
+  `FMIN/FMAX` choose the non-NaN operand when only one is NaN; two NaNs produce
+  canonical NaN. For min/max, `-0 < +0`.
+- `FTOI/FTOU` **always truncate toward zero**, regardless of FRM, with
+  saturation to the integer range limits; NaN produces the maximum integer value.
+- `NV` occurs for invalid arithmetic, out-of-range conversion,
+  signaling NaN; for `FLT/FLE`, any NaN. `DZ` is finite nonzero / 0;
+  `0/0` produces NV. Overflow also produces NX. Underflow uses tininess
+  **before rounding** and requires an inexact result.
+- `FCLASS` returns one bit for the class: −∞, negative normal/subnormal,
   −0, +0, positive subnormal/normal, +∞, signaling/quiet NaN (bits 0–9).
-  Sign operations и FCLASS не выставляют flags. Exact cancellation даёт
-  +0, кроме rounding down, где получается −0.
+  Sign operations and FCLASS do not set flags. Exact cancellation produces
+  +0, except under rounding down, which produces −0.
 
-Чек-лист:
+Checklist:
 
-- [ ] FCSR сохраняется при syscall, IRQ и context switch, включая sticky flags.
-- [ ] FP в kernel не меняет environment прерванной задачи.
-- [ ] Проверены NaN, signed zero, subnormals, saturation и rounding modes.
-- [ ] Software double/runtime соблюдают тот же FCSR contract.
+- [ ] FCSR is saved on syscall, IRQ and context switch, including sticky flags.
+- [ ] Kernel FP does not change the interrupted task's environment.
+- [ ] NaNs, signed zero, subnormals, saturation and rounding modes are checked.
+- [ ] Software double/runtime follow the same FCSR contract.
 
 <a id="io-dma"></a>
 
-## 9. MMIO и DMA: общие правила
+## 9. MMIO and DMA: general rules
 
-### Physical map и доступ к регистрам
+### Physical map and register access
 
-| Physical range | Назначение |
+| Physical range | Purpose |
 | --- | --- |
-| `0x00000000…RAM_SIZE-1` | RAM; установленные slots подряд без дырок |
+| `0x00000000…RAM_SIZE-1` | RAM; installed slots are contiguous without gaps |
 | `0xFC000000…0xFC3FFFFF` | 4 MiB VRAM window |
-| `0xFD000000…0xFDFFFFFF` | I/O region, отдельная 4 KiB page на устройство |
+| `0xFD000000…0xFDFFFFFF` | I/O region, a separate 4 KiB page per device |
 | `0xFE000000…0xFFFFFFFF` | 32 MiB read-only ROM |
 
-Остальные адреса не существуют на physical bus. Эмулятор поддерживает
-четыре RAM slots: по 1/2/4/8/16/32 MiB, default 4 MiB суммарно в одном
-slot, максимум 128 MiB. Пустой slot не расходует адресное пространство.
-ОС получает фактический размер из boot info, а не из default config.
+Other addresses do not exist on the physical bus. The emulator supports
+four RAM slots: 1/2/4/8/16/32 MiB each, default 4 MiB total in one
+slot, maximum 128 MiB. An empty slot consumes no address space.
+The OS obtains the actual size from boot info, rather than the default config.
 
-MMIO registers — 32-битные, **адрес каждого access кратен 4 даже для
-byte/half-word операции**. `LBU UART+0` читает low byte, а `LBU UART+1`
-даёт bus error; это не byte-addressable массив частей register.
-Narrow read сохраняет полный побочный эффект чтения register:
-например, RNG расходует word, FIFO извлекает event. Narrow write — запись
-low value, а не универсальная операция слияния одного byte со старым word.
-Пользоваться шириной, указанной register interface, обычно `UWord`.
+MMIO registers are 32-bit; **every access address must be a multiple of 4, even
+for a byte/half-word operation**. `LBU UART+0` reads the low byte, while `LBU UART+1`
+causes a bus error; this is not a byte-addressable array of register parts.
+A narrow read retains the register read's full side effect:
+for example, RNG consumes a word and a FIFO removes an event. A narrow write writes
+the low value, rather than universally merging one byte into the old word.
+Use the width specified by the register interface, usually `UWord`.
 
-Запись в существующий read-only device register игнорируется. Доступ к
-неописанному offset или отсутствующей device page даёт bus error.
-У каждой device page по `+0xFFC` read-only `ID`:
-`TYPE[31:16]`, `VERSION[15:8]` (сейчас 1), `IRQ[7:0]` (`0xFF` — без IRQ).
-Проверять тип/версию и пользоваться firmware device table предпочтительнее,
-чем без handler пробовать все addresses. Такой probe может вызвать fault.
+Writes to existing read-only device registers are ignored. Accessing an
+undefined offset or an absent device page causes a bus error.
+Each device page has a read-only `ID` at `+0xFFC`:
+`TYPE[31:16]`, `VERSION[15:8]` (currently 1), `IRQ[7:0]` (`0xFF` means no IRQ).
+Checking type/version and using the firmware device table is preferable
+to probing every address without a handler. Such a probe may fault.
 
-В device status часто используется **W1C**: запись единицы очищает
-конкретный flag. `status = status | mask` может нечаянно подтвердить другие
-события, прочитанные в status. Записывать только известную ack mask.
-Другие status bits clear-on-read — чтение диагностическим кодом тоже
-изменяет устройство. Snapshot структуры MMIO целиком опасен для DATA/FIFO.
+Device status often uses **W1C**: writing a one clears
+the corresponding flag. `status = status | mask` may accidentally acknowledge
+other events read in status. Write only the known acknowledgement mask.
+Other status bits are clear-on-read: a diagnostic read also
+changes the device. Snapshotting an entire MMIO structure is dangerous for DATA/FIFO.
 
-### DMA обходит MMU
+### DMA bypasses the MMU
 
-DMA register/descriptor содержит **physical address**. Device не читает
-`PTBR`, не проверяет `U/R/W/X` PTE и не генерирует CPU page fault:
-неправильный bus access отражается в device error/fault state.
-Virtual buffer по VA `0x40000000` не становится таким же DMA address;
-нужны physical frames, contiguous buffer либо scatter-gather, если device
-его поддерживает. Непрерывный VA range может состоять из разрозненных frames.
+A DMA register/descriptor contains a **physical address**. The device does not read
+`PTBR`, check PTE `U/R/W/X` or generate a CPU page fault:
+an invalid bus access is reflected in device error/fault state.
+A virtual buffer at VA `0x40000000` does not acquire the same DMA address;
+physical frames, a contiguous buffer or scatter-gather are required if the device
+supports it. A contiguous VA range may consist of scattered frames.
 
-Доступность в текущем эмуляторе по [DMA bus callbacks](../source/motherboard.c):
+Accessibility in the current emulator, according to [DMA bus callbacks](../source/motherboard.c):
 
 | Device family | DMA read | DMA write |
 | --- | --- | --- |
-| HDD/floppy | RAM и VRAM window | RAM и VRAM window |
-| Video/Ethernet/audio/shared folder | RAM, VRAM window, ROM | RAM и VRAM window |
-| Все | MMIO и unmapped запрещены | MMIO, ROM и unmapped запрещены |
+| HDD/floppy | RAM and VRAM window | RAM and VRAM window |
+| Video/Ethernet/audio/shared folder | RAM, VRAM window, ROM | RAM and VRAM window |
+| All | MMIO and unmapped addresses prohibited | MMIO, ROM and unmapped addresses prohibited |
 
-Alignment, lengths и descriptor constraints добавляются самим device.
-ROM read не означает допустимость ROM descriptor, который device должен
-обновлять. Для Ethernet OWN возвращается через запись descriptor;
-размещать rings следует в writable RAM.
+The device itself adds alignment, length and descriptor constraints.
+ROM readability does not make ROM suitable for a descriptor that the device must
+update. Ethernet returns OWN through a descriptor write;
+rings should be placed in writable RAM.
 
-У WRM нет реализованного IOMMU или hardware whitelist DMA frames.
-Драйвер с raw MMIO командой может указать physical address ядра, entry
-state или другой задачи. **Вынос такого драйвера в user mode сам по себе
-не даёт изоляции от его DMA**. Capability на MMIO page ограничивает доступ
-к контроллеру, но не destinations, которые он запрограммирует.
+WRM has no implemented IOMMU or hardware DMA frame whitelist.
+A driver issuing raw MMIO commands can specify a physical address belonging to the
+kernel, entry state or another task. **Moving such a driver into user mode does
+not by itself isolate its DMA**. A capability for an MMIO page restricts access
+to the controller, but not the destinations it can program.
 
-Рабочие варианты для микроядра:
+Viable microkernel options:
 
-1. Ядро/доверенный broker принимает запрос, проверяет physical ranges,
-   формирует descriptors и единолично пишет raw DMA command registers.
-2. Драйвер получает raw DMA/MMIO и считается доверенным компонентом с
-   соответствующими полномочиями; это явная граница доверия.
-3. Для полной изоляции raw DMA driver меняется сама модель оборудования:
-   добавляется IOMMU/проверка допустимых ranges. В текущей WRM её нет.
+1. The kernel/trusted broker accepts requests, checks physical ranges,
+   builds descriptors and has exclusive access to raw DMA command registers.
+2. The driver receives raw DMA/MMIO access and is considered a trusted component
+   with the corresponding authority; this is an explicit trust boundary.
+3. Full isolation of a raw DMA driver requires changing the hardware model itself:
+   adding an IOMMU/allowed-range checks. Current WRM has neither.
 
-Один bounce buffer не защищает от недоверенного драйвера, если тот по-прежнему
-может запрограммировать произвольный ADDRESS. После проверки descriptors
-они и их pointer graph не должны изменяться пользователем до completion:
-диск читает scatter-gather entry по мере продвижения, поэтому иначе
-получается подмена после проверки.
+A bounce buffer alone does not protect against an untrusted driver if it can still
+program an arbitrary ADDRESS. After descriptors are validated,
+the user must not change them or their pointer graph until completion:
+the disk reads scatter-gather entries as it progresses, otherwise
+allowing substitution after validation.
 
-Пока DMA активна, frames и descriptors pinned: allocator не раздаёт их
-другим задачам, unmap не освобождает backing, владелец не изменяет источник
-и не использует незавершённый destination. Отмена IPC или гибель драйвера
-не отменяют DMA автоматически. Освобождать buffer можно после device stop
-или подтверждённого completion; HDD transfer останавливается только reset.
+While DMA is active, frames and descriptors are pinned: the allocator does not give them
+to other tasks, unmapping does not free backing, and the owner neither modifies the source
+nor uses an incomplete destination. IPC cancellation or driver death
+does not automatically cancel DMA. A buffer may be freed after device stop
+or confirmed completion; an HDD transfer stops only on reset.
 
-DMA failure бывает после partial transfer. Проверять одновременно completion,
-error и прогресс, не считать DONE признаком успеха. Disk WRITE сохраняет
-только целые sectors, disk READ мог уже изменить часть sector в RAM;
-video EXPAND мог нарисовать только первые lines; shared READ/WRITE имеет
-partial byte count. Уже сделанные внешние writes не откатываются reset.
+DMA failure can occur after a partial transfer. Check completion,
+error and progress together; do not treat DONE as proof of success. Disk WRITE commits
+only whole sectors, while disk READ may already have changed part of a sector in RAM;
+video EXPAND may have drawn only the first lines; shared READ/WRITE has
+a partial byte count. Reset does not roll back external writes already performed.
 
-Чек-лист:
+Checklist:
 
-- [ ] MMIO pointers volatile, register offsets/ширины верны.
-- [ ] Clear-on-read и W1C не теряют события при диагностике/ack.
-- [ ] DMA API принимает проверенные ranges/handles, переводит VA→PA.
-- [ ] Проверены overflow `address+length`, frame ownership и alignment.
-- [ ] DMA buffers/descriptors pinned и защищены от изменения после проверки.
-- [ ] Exit/crash/cancel не освобождает storage активной DMA.
-- [ ] Определена граница доверия для каждого user driver с raw DMA MMIO.
+- [ ] MMIO pointers are volatile; register offsets/widths are correct.
+- [ ] Clear-on-read and W1C do not lose events during diagnostics/acknowledgement.
+- [ ] The DMA API accepts validated ranges/handles and translates VA→PA.
+- [ ] `address+length` overflow, frame ownership and alignment are checked.
+- [ ] DMA buffers/descriptors are pinned and protected from changes after validation.
+- [ ] Exit/crash/cancel does not free storage used by active DMA.
+- [ ] A trust boundary is defined for each user driver with raw DMA MMIO.
 
 <a id="devices"></a>
 
-## 10. Особенности каждого устройства
+## 10. Device-specific considerations
 
-Ниже перечислены все 17 занятых device pages (16 типов: два HDD одного
-типа). IRQ column описывает PIC line; CPU получает один общий IRQ input.
-Полные register layouts — в [Devices](SPECIFICATION.md#devices).
+All 17 occupied device pages are listed below (16 types: two HDDs of the same
+type). The IRQ column identifies the PIC line; the CPU receives one shared IRQ input.
+Full register layouts are in [Devices](SPECIFICATION.md#devices).
 
-| Device | Physical page | IRQ | Главная особенность |
+| Device | Physical page | IRQ | Key consideration |
 | --- | --- | --- | --- |
-| PIC | `0xFD000000` | — | 32 level-triggered lines, CLAIM не подтверждает event |
-| Keyboard | `0xFD001000` | 0 | HID events, FIFO, overflow clear-on-read |
-| UART | `0xFD002000` | 1 | DATA имеет read/write side effects, TX всегда ready |
-| Timer | `0xFD003000` | 2 | COUNT 64-bit, EXPIRED схлопывает пропущенные periods |
-| Power | `0xFD004000` | 11 | OFF/RESET прекращают исполнение после store |
-| HDD 0 | `0xFD005000` | 3 | DMA, 512-byte sectors, DONE даже при error |
-| HDD 1 | `0xFD006000` | 4 | Тот же interface; firmware не boot-ит с него |
-| Video | `0xFD007000` | 5 | VRAM, sync/async commands, общий DONE/VBLANK IRQ |
-| Floppy | `0xFD008000` | 6 | Removable, медленная DMA, CHANGED |
-| Beeper | `0xFD009000` | — | Один tone, duration в ticks |
-| Mouse | `0xFD00A000` | 7 | FIFO relative/absolute events, отключена при reset |
+| PIC | `0xFD000000` | — | 32 level-triggered lines; CLAIM does not acknowledge the event |
+| Keyboard | `0xFD001000` | 0 | HID events, FIFO, clear-on-read overflow |
+| UART | `0xFD002000` | 1 | DATA has read/write side effects; TX is always ready |
+| Timer | `0xFD003000` | 2 | 64-bit COUNT; EXPIRED coalesces missed periods |
+| Power | `0xFD004000` | 11 | OFF/RESET stop execution after the store |
+| HDD 0 | `0xFD005000` | 3 | DMA, 512-byte sectors, DONE even on error |
+| HDD 1 | `0xFD006000` | 4 | Same interface; firmware does not boot from it |
+| Video | `0xFD007000` | 5 | VRAM, sync/async commands, shared DONE/VBLANK IRQ |
+| Floppy | `0xFD008000` | 6 | Removable, slow DMA, CHANGED |
+| Beeper | `0xFD009000` | — | One tone, duration in ticks |
+| Mouse | `0xFD00A000` | 7 | FIFO of relative/absolute events, disabled on reset |
 | Ethernet | `0xFD00B000` | 8 | Physical descriptor rings, OWN, host NAT |
-| Audio | `0xFD00C000` | 9 | 8 DMA voices; FAULT сам по себе не поднимает IRQ |
+| Audio | `0xFD00C000` | 9 | 8 DMA voices; FAULT alone does not raise an IRQ |
 | RTC | `0xFD00D000` | 10 | Read-low latch, host wall time, one-shot alarm |
-| RNG | `0xFD00E000` | — | Read consumes word; seeded mode не секретен |
+| RNG | `0xFD00E000` | — | A read consumes a word; seeded mode is not secret |
 | Shared folder | `0xFD00F000` | — | Synchronous host operations, 16 handles |
-| Watchdog | `0xFD010000` | 12 | Bark, grace, reset; ack не заменяет kick |
+| Watchdog | `0xFD010000` | 12 | Bark, grace, reset; acknowledgement does not replace a kick |
 
 ### 10.1 PIC
 
-`PENDING` — текущие device line levels, `ENABLE` — mask (reset 0),
-`ACTIVE = PENDING & ENABLE`. `CLAIM` возвращает **наименьший номер**
-active line или `0xFFFFFFFF`. Чтение CLAIM не меняет state, нет отдельного
-EOI register. Handler должен очистить источник **в устройстве**, иначе
-после IRET тот же IRQ немедленно повторится.
+`PENDING` holds current device line levels, `ENABLE` is the mask (reset 0),
+`ACTIVE = PENDING & ENABLE`. `CLAIM` returns the **lowest-numbered**
+active line or `0xFFFFFFFF`. Reading CLAIM does not change state; there is no separate
+EOI register. The handler must clear the source **in the device**, otherwise
+the same IRQ will recur immediately after IRET.
 
-Низкий номер имеет приоритет при каждом CLAIM; один не обслуженный source
-может мешать остальным. Handler может иметь budget и mask проблемной линии,
-но masking не устраняет pending condition. Polling разрешён при ENABLE=0.
-При IRQ dispatch всегда проверять sentinel, не использовать его как index.
+A low number takes priority on every CLAIM; one unserviced source
+can obstruct the others. A handler may have a budget and mask a problematic line,
+but masking does not remove the pending condition. Polling is allowed with ENABLE=0.
+Always check the sentinel during IRQ dispatch; do not use it as an index.
 
-- [ ] Обслуживать device source до IRQ return; проверять все shared flags.
-- [ ] Проверить два одновременно pending IRQ и отсутствие starvation.
-- [ ] Mask/unmask protocol согласован с device polling и event delivery.
+- [ ] Service the device source before IRQ return; check all shared flags.
+- [ ] Check two simultaneously pending IRQs and the absence of starvation.
+- [ ] The mask/unmask protocol is consistent with device polling and event delivery.
 
 ### 10.2 Keyboard
 
-FIFO на 32 events; `DATA` извлекает event, empty — 0. Low 16 bits — USB
-HID usage page `0x07`, bit 31 — release. Это key code, не ASCII и не
-Unicode; layout, modifiers, compose и autorepeat реализует software.
-Hardware key repeat нет. Overflow означает потерянное событие и очищается
-чтением STATUS; потерянный release может оставить software key state stuck.
-CONTROL bit 0 flush-ит FIFO. IRQ 0 держится, пока очередь не пуста.
+The FIFO holds 32 events; `DATA` removes an event, or returns 0 when empty. The low 16 bits hold USB
+HID usages from page `0x07`; bit 31 indicates release. This is a key code, not ASCII or
+Unicode; software implements layout, modifiers, compose and autorepeat.
+There is no hardware key repeat. Overflow means an event was lost and is cleared
+by reading STATUS; a lost release can leave software key state stuck.
+CONTROL bit 0 flushes the FIFO. IRQ 0 remains asserted while the queue is nonempty.
 
-- [ ] Отделить HID key events от text input и учитывать press/release.
-- [ ] Drain FIFO и обработать overflow с восстановлением key state.
+- [ ] Separate HID key events from text input and handle press/release.
+- [ ] Drain the FIFO and handle overflow by recovering key state.
 
 ### 10.3 UART
 
-`DATA` write отправляет low byte в host stdout, read извлекает RX byte.
-Empty read возвращает 0, который неотличим от настоящего NUL без STATUS.
-RX FIFO 64 bytes, IRQ 1 держится пока он не пуст. STATUS overflow
-clear-on-read; CONTROL bit 0 flush. TX не блокирует, TX-ready всегда 1;
-TX IRQ отсутствует. Не нужен цикл ожидания освобождения transmit FIFO.
+A `DATA` write sends the low byte to host stdout; a read removes an RX byte.
+An empty read returns 0, indistinguishable from a real NUL without STATUS.
+The RX FIFO holds 64 bytes; IRQ 1 remains asserted while it is nonempty. STATUS overflow
+is clear-on-read; CONTROL bit 0 flushes. TX does not block, TX-ready is always 1;
+there is no TX IRQ. No wait loop for transmit FIFO space is needed.
 
-Native stdin terminal работает raw без local echo: echo/line editing делает
-guest. Host ограничивает чтение piped input свободным местом FIFO; input
-scripts могут переполнить его. UART stdout отделён от emulator stderr.
-В browser UART input отсутствует, output идёт в page/JS console.
+The native stdin terminal operates in raw mode without local echo: the guest does
+echo/line editing. The host limits piped input reads to free FIFO space; input
+scripts can overflow it. UART stdout is separate from emulator stderr.
+In the browser, UART input is absent and output goes to the page/JS console.
 
-- [ ] Проверять RX-ready перед read, не считать NUL отсутствием byte.
-- [ ] Panic output не зависит от IRQ, heap, scheduler и сложного formatter.
+- [ ] Check RX-ready before reading; do not treat NUL as an absent byte.
+- [ ] Panic output does not depend on IRQs, heap, scheduler or a complex formatter.
 
 ### 10.4 Timer
 
-Free-running COUNT 64-bit и down-counter идут каждый system tick.
-Согласованное чтение COUNT: **HI, LO, HI**, повтор при разных HI.
-FREQUENCY сообщает ticks/second. Запись CONTROL загружает VALUE из RELOAD,
-то есть даже изменение mode/enable перезапускает счётчик.
-`RELOAD=N` истекает через N ticks; 0 действует как 1.
+The 64-bit free-running COUNT and down-counter advance on every system tick.
+Read COUNT consistently: **HI, LO, HI**, retrying if HI values differ.
+FREQUENCY reports ticks/second. Writing CONTROL loads VALUE from RELOAD,
+so even a mode/enable change restarts the counter.
+`RELOAD=N` expires after N ticks; 0 acts as 1.
 
-One-shot сбрасывает enable после expiry, periodic перезагружает VALUE.
-EXPIRED W1C; disable не очищает его. Пока bit выставлен, несколько expiry
-не считаются отдельно. Для времени и пропущенных quantum вычислять delta
-по COUNT, а не умножать число IRQ на RELOAD.
+One-shot clears enable after expiry; periodic reloads VALUE.
+EXPIRED is W1C; disabling does not clear it. While the bit is set, multiple expiries
+are not counted separately. To measure time and missed quanta, compute a delta
+from COUNT, rather than multiplying the IRQ count by RELOAD.
 
-- [ ] Частоту получать из boot info/register; переводить время с overflow checks.
-- [ ] Перезапуск CONTROL и отдельный ack EXPIRED проверены.
-- [ ] Проверить delayed handler: один IRQ после нескольких periods.
+- [ ] Obtain frequency from boot info/the register; convert time with overflow checks.
+- [ ] CONTROL restart and separate EXPIRED acknowledgement are checked.
+- [ ] Check a delayed handler: one IRQ after multiple periods.
 
 ### 10.5 Power controller
 
-OFF использует low 8 bits как exit code процесса эмулятора; RESET value
-игнорируется. Request применяется в конце tick store; следующие инструкции
-не выполняются. OFF/RESET read возвращает 0. До OFF нужно завершить
-сохранение данных и disk FLUSH/shared SYNC; код после store ничего не исправит.
+OFF uses the low 8 bits as the emulator process exit code; the RESET value
+is ignored. A request is applied at the end of the store tick; subsequent instructions
+do not execute. OFF/RESET reads return 0. Before OFF, data saving and
+disk FLUSH/shared SYNC must finish; code after the store cannot fix anything.
 
-Host close/Ctrl+C устанавливает STATUS power-request и IRQ 11 только если
-PIC разрешил IRQ 11 и CPU не halted. Иначе host прекращает работу сразу;
-повторный request тоже выходит немедленно. STATUS request W1C.
+Host close/Ctrl+C sets the STATUS power-request and IRQ 11 only if
+the PIC has enabled IRQ 11 and the CPU is not halted. Otherwise, the host exits immediately;
+a repeated request also exits immediately. The STATUS request is W1C.
 RESET_CAUSE: 0 power-on, 1 software, 2 host key, 4 watchdog;
-3 зарезервирован для double fault, но сейчас double fault останавливает CPU.
+3 is reserved for double fault, but currently a double fault halts the CPU.
 
-- [ ] Shutdown request имеет worker для flush, затем OFF; ack не означает shutdown.
-- [ ] Отличать clean guest exit, HLT и unhandled fault по log и exit code.
+- [ ] A shutdown request has a worker for flushing, then OFF; acknowledgement does not mean shutdown.
+- [ ] Distinguish clean guest exit, HLT and unhandled fault by log and exit code.
 
-### 10.6 HDD 0 и HDD 1
+### 10.6 HDD 0 and HDD 1
 
-Сектора 512 bytes. READ/WRITE используют SECTOR, COUNT, physical ADDRESS;
-FLUSH и IDENTIFY — отдельные команды. COMMAND очищает прошлые DONE/ERROR,
-проверяет arguments; ошибочная команда может завершиться синхронно с DONE.
-COUNT=0 для READ/WRITE заканчивается без error. При BUSY запись transfer
-registers и COMMAND игнорируется; отдельной cancel command нет.
+Sectors are 512 bytes. READ/WRITE use SECTOR, COUNT and physical ADDRESS;
+FLUSH and IDENTIFY are separate commands. COMMAND clears previous DONE/ERROR,
+then validates arguments; an invalid command may complete synchronously with DONE.
+COUNT=0 for READ/WRITE completes without error. While BUSY, writes to transfer
+registers and COMMAND are ignored; there is no separate cancel command.
 
-HDD DMA: 4000000 bytes/s, слово раз в `floor(clock_rate*4/4000000)` ticks
-(32 при 32 MHz), 4096 ticks/sector; первое слово через W ticks после COMMAND.
-ADDRESS растёт на word, SECTOR/COUNT меняются после целого sector.
-DONE level IRQ W1C либо очищается следующей COMMAND; ERROR остаётся до
-следующей команды. Проверять bounds SECTOR+COUNT без integer wrap,
-alignment 4 и device ERROR (1…7), а не только DONE.
+HDD DMA: 4000000 bytes/s, one word every `floor(clock_rate*4/4000000)` ticks
+(32 at 32 MHz), 4096 ticks/sector; the first word arrives W ticks after COMMAND.
+ADDRESS advances by a word; SECTOR/COUNT change after a whole sector.
+DONE is a level IRQ, W1C or cleared by the next COMMAND; ERROR remains until
+the next command. Check SECTOR+COUNT bounds without integer wrap,
+alignment 4 and device ERROR (1…7), rather than DONE alone.
 
-Scatter-gather: COMMAND.LIST bit 8, LIST указывает на массив entries
-`{physical ADDRESS, LENGTH}` по 8 bytes; address/length кратны 4, length>0.
-End marker нет: объём задаёт COUNT sectors (IDENTIFY — один block).
-Entry читается при первом word его участка, LIST продвигается на 8;
-descriptor не обязан совпадать с sector boundary. После конца посреди
-entry продолжение требует нового descriptor для остатка, а не повторного
-использования текущего LIST как continuation pointer.
+Scatter-gather: COMMAND.LIST bit 8; LIST points to an array of 8-byte entries
+`{physical ADDRESS, LENGTH}`; address/length are multiples of 4, length>0.
+There is no end marker: COUNT sectors defines the volume (IDENTIFY uses one block).
+An entry is read at the first word of its segment; LIST advances by 8;
+a descriptor need not coincide with a sector boundary. After ending midway through
+an entry, continuation requires a new descriptor for the remainder, rather than
+reusing the current LIST as a continuation pointer.
 
-READ failure может оставить partial sector в памяти; WRITE failure не
-пишет partial sector на диск, но предыдущие whole sectors уже записаны.
-Progress registers нужны для диагностики и retry policy.
-DMA диска также достигает [VRAM window](SPECIFICATION.md#vram-window).
+READ failure may leave a partial sector in memory; WRITE failure does not
+write a partial sector to disk, but previous whole sectors have already been written.
+Progress registers are needed for diagnostics and retry policy.
+Disk DMA also reaches the [VRAM window](SPECIFICATION.md#vram-window).
 
-WRITE completion означает, что bytes достигли host file, **не durable
-storage**. FLUSH делает host sync; machine стоит, пока host выполняет
-операцию, но для guest команда завершается в tick store. Read-only FLUSH
-успешен. Перед `fsync` success и shutdown нужен успешный FLUSH.
+WRITE completion means bytes reached the host file, **not durable
+storage**. FLUSH performs host sync; the machine pauses while the host performs
+the operation, but to the guest the command completes in the store tick. Read-only FLUSH
+succeeds. A successful FLUSH is required before reporting `fsync` success and shutting down.
 
-IDENTIFY пишет 512-byte `WRMD` block: version, size, flags, UUID, serial,
-model. Numeric fields little-endian, UUID bytes — обычный big-endian UUID
-order. IDENTIFY игнорирует SECTOR/COUNT и требует inserted disk.
-Default serial зависит от absolute image path; при deterministic — имени
-файла. Rename/move может изменить identity; explicit serial стабилизирует её.
-Host блокирует совместный доступ к images: writable exclusive, read-only
-shared; нельзя рассчитывать на live sharing меняющегося image между VMs.
-Доступны whole sectors, trailing file bytes не видны.
+IDENTIFY writes a 512-byte `WRMD` block: version, size, flags, UUID, serial,
+model. Numeric fields are little-endian; UUID bytes use ordinary big-endian UUID
+order. IDENTIFY ignores SECTOR/COUNT and requires an inserted disk.
+The default serial depends on the absolute image path; in deterministic mode, on the
+file name. Renaming/moving may change identity; an explicit serial stabilizes it.
+The host locks images for access: writable exclusive, read-only
+shared; do not rely on live sharing of a changing image between VMs.
+Only whole sectors are accessible; trailing file bytes are invisible.
 
-- [ ] Проверены immediate error, partial failure, BUSY writes и zero COUNT.
-- [ ] SG list валидируется целиком, закреплена до completion и не меняется.
-- [ ] Flush failure не возвращает клиенту ложный durable success.
-- [ ] UUID/serial controller не смешиваются с UUID filesystem.
+- [ ] Immediate error, partial failure, BUSY writes and zero COUNT are checked.
+- [ ] The entire SG list is validated, pinned until completion and unchanged.
+- [ ] Flush failure does not report false durable success to the client.
+- [ ] Controller UUID/serial are not confused with filesystem UUID.
 
 ### 10.7 Floppy
 
-Register interface HDD, но носитель removable и DMA медленнее: 62500 bytes/s,
-word period `floor(clock_rate*4/62500)` ticks (2048 при 32 MHz).
-Insertion/ejection ставит CHANGED; CHANGED и DONE держат общий IRQ 6,
-каждый flag требует ack. После reset CHANGED clear даже с inserted disk.
-Eject при BUSY останавливает transfer с no-disk error 2; whole sectors,
-уже записанные на image, остаются.
-Размер не обязан быть 1.44 MB, но не больше: максимум 2880 секторов, больший
-образ не вставляется. Читать SECTORS заново при смене media.
+The register interface matches HDD, but media is removable and DMA slower: 62500 bytes/s,
+word period `floor(clock_rate*4/62500)` ticks (2048 at 32 MHz).
+Insertion/ejection sets CHANGED; CHANGED and DONE hold shared IRQ 6,
+and each flag requires acknowledgement. After reset, CHANGED is clear even with a disk inserted.
+Ejection while BUSY stops the transfer with no-disk error 2; whole sectors
+already written to the image remain.
+The size need not be 1.44 MB, but cannot exceed it: at most 2880 sectors; a larger
+image cannot be inserted. Reread SECTORS on media changes.
 
-- [ ] CHANGED инвалидирует cached sectors, geometry и filesystem state.
-- [ ] Обработаны оба IRQ source и removal во время DMA.
+- [ ] CHANGED invalidates cached sectors, geometry and filesystem state.
+- [ ] Both IRQ sources and removal during DMA are handled.
 
-### 10.8 Video card и VRAM
+### 10.8 Video card and VRAM
 
-4 MiB VRAM, 2D engine и cursor. Text mode нет: text рисуется glyph bitmap.
-Resolution 320×240/640×480/800×600/1024×768 сочетается с 1/4/8/16/32 bpp.
-1/4 bpp packed **MSB first**, 8 bpp palette, 16 bpp little-endian RGB565,
-32 bpp little-endian XRGB8888. Palette values `0x00RRGGBB`, cursor ARGB.
-MODE с invalid depth/extra bits игнорируется; valid mode change сохраняет
-VRAM/palette. WIDTH/HEIGHT/BPP/PITCH отражают mode; visible PITCH fixed.
+4 MiB VRAM, a 2D engine and cursor. There is no text mode: text is drawn with glyph bitmaps.
+Resolutions 320×240/640×480/800×600/1024×768 combine with 1/4/8/16/32 bpp.
+1/4 bpp are packed **MSB first**, 8 bpp is paletted, 16 bpp little-endian RGB565,
+32 bpp little-endian XRGB8888. Palette values are `0x00RRGGBB`, cursor ARGB.
+MODE with invalid depth/extra bits is ignored; a valid mode change preserves
+VRAM/palette. WIDTH/HEIGHT/BPP/PITCH reflect the mode; visible PITCH is fixed.
 
-Display показывает visible region от START в конце frame (~60 Hz ticks).
-START flip позволяет double buffering, но write не запускает immediate
-scanout. Lines вне VRAM и выключенный display чёрные. FRAME увеличивается,
-VBLANK sticky до W1C; несколько frames схлопываются в один bit.
-Engine surfaces имеют свои BASE/PITCH/XY и могут быть offscreen.
+The display shows the visible region from START at frame end (~60 Hz in ticks).
+A START flip allows double buffering, but a write does not trigger immediate
+scanout. Lines outside VRAM and a disabled display are black. FRAME increments,
+VBLANK is sticky until W1C; multiple frames coalesce into one bit.
+Engine surfaces have their own BASE/PITCH/XY and can be offscreen.
 
-FILL/COPY/EXPAND из VRAM выполняются синхронно при store COMMAND.
-LOAD/STORE и EXPAND.MEMORY — DMA, BUSY до завершения; engine register writes
-при BUSY игнорируются. Другие registers, включая MODE/palette, меняются;
-EXPAND.MEMORY использует destination depth на момент старта.
-Zero-size rectangle ничего не рисует; invalid bounds дают error до draw.
-COPY с одинаковым pitch имеет memmove overlap semantics;
-при разных pitches overlapping result undefined.
+FILL/COPY/EXPAND from VRAM execute synchronously on the COMMAND store.
+LOAD/STORE and EXPAND.MEMORY use DMA, remaining BUSY until completion; engine register writes
+while BUSY are ignored. Other registers, including MODE/palette, can change;
+EXPAND.MEMORY uses the destination depth at startup.
+A zero-size rectangle draws nothing; invalid bounds cause an error before drawing.
+COPY with identical pitch has memmove overlap semantics;
+with different pitches, overlapping results are undefined.
 
-LOAD копирует physical RAM/ROM/VRAM в VRAM, STORE — VRAM в RAM/VRAM,
-word/tick, addresses/count кратны 4. EXPAND.MEMORY читает aligned words,
-содержащие source line bits; source может начинаться на любом byte/bit,
-но **все читаемые words**, включая края, должны быть доступны и разрешены
-DMA broker. Завершённые lines сохраняются при последующей ошибке.
-VRAM window позволяет также CPU reads/writes любой обычной ширины.
-Code fetch и page table walk оттуда запрещены.
+LOAD copies physical RAM/ROM/VRAM into VRAM; STORE copies VRAM into RAM/VRAM,
+one word/tick, with addresses/count multiples of 4. EXPAND.MEMORY reads aligned words
+containing source line bits; the source may start at any byte/bit,
+but **all words read**, including the edges, must be accessible and permitted
+by the DMA broker. Completed lines remain after a subsequent error.
+The VRAM window also allows CPU reads/writes of any ordinary width.
+Code fetch and page table walks from it are prohibited.
 
-DONE и VBLANK — общий IRQ 5 с отдельными CONTROL enables и W1C bits.
-ENGINE ERROR означает failure, даже при DONE. Cursor — 64×64 ARGB8888,
-256 bytes/line, alpha-blended поверх frame без изменения VRAM;
-XY signed, HOT задаёт hotspot, offscreen pixels clipped.
-Это отдельный ресурс VRAM, который нельзя затереть screen/font allocator.
+DONE and VBLANK share IRQ 5 with separate CONTROL enables and W1C bits.
+ENGINE ERROR means failure, even with DONE. The cursor is 64×64 ARGB8888,
+256 bytes/line, alpha-blended over the frame without changing VRAM;
+XY is signed, HOT defines the hotspot, and offscreen pixels are clipped.
+This is a separate VRAM resource that the screen/font allocator must not overwrite.
 
-- [ ] VRAM allocator резервирует visible buffers, font и cursor без overlap.
-- [ ] Pixel packing, pitch, mode и rectangle bounds проверяются до команды.
-- [ ] BUSY запрещает повторную передачу engine другому request.
-- [ ] Оба IRQ source подтверждаются отдельно; MODE/START updates согласованы с frame.
-- [ ] DMA validation учитывает aligned-word overread у EXPAND.MEMORY.
+- [ ] The VRAM allocator reserves visible buffers, font and cursor without overlap.
+- [ ] Pixel packing, pitch, mode and rectangle bounds are checked before commands.
+- [ ] BUSY prevents handing the engine to another request.
+- [ ] Both IRQ sources are acknowledged separately; MODE/START updates are coordinated with frames.
+- [ ] DMA validation accounts for aligned-word overread in EXPAND.MEMORY.
 
 ### 10.9 Beeper
 
-Один square-wave tone; FREQUENCY Hz, 0 — silence. DURATION в ticks,
-0 — бесконечно до disable; ненулевая duration убывает только когда on,
-после expiry CONTROL on очищается. Manual off сохраняет remaining duration.
-Новая enable начинает wave заново. Frequency выше половины clock rate
-даёт silence. IRQ нет, completion можно poll-ить.
-Звук host может задерживаться примерно до 85 ms; headless/mute не меняет
-device state и timing, только воспроизведение.
+One square-wave tone; FREQUENCY is in Hz, 0 means silence. DURATION is in ticks,
+0 means indefinitely until disabled; a nonzero duration decreases only while on,
+and expiry clears CONTROL on. Manual off preserves remaining duration.
+Enabling again restarts the wave. A frequency above half the clock rate
+produces silence. There is no IRQ; completion can be polled.
+Host sound may be delayed by up to roughly 85 ms; headless/mute does not change
+device state or timing, only playback.
 
-- [ ] Не ждать IRQ beeper; пауза/таймаут учитывает ticks, а не host playback.
+- [ ] Do not wait for a beeper IRQ; delays/timeouts use ticks, rather than host playback.
 
 ### 10.10 Mouse
 
-FIFO на 64 events, disabled после reset; CONTROL enable обязателен. DATA pop,
-empty — 0; каждый event имеет bit 31=1. Relative DX/DY/WHEEL — signed 8-bit,
-Y растёт вниз; buttons — состояние после event. Длинное движение дробится,
-соседние совместимые motion events сливаются. Overflow clear-on-read STATUS.
-IRQ 7 держится пока FIFO не пуст; flush не заменяет обновление button state.
+The FIFO holds 64 events and is disabled after reset; CONTROL enable is required. DATA pops,
+returning 0 when empty; each event has bit 31=1. Relative DX/DY/WHEEL are signed 8-bit,
+Y increases downwards; buttons represent state after the event. Long movements are split,
+and adjacent compatible motion events merge. STATUS overflow is clear-on-read.
+IRQ 7 remains asserted while the FIFO is nonempty; flushing does not replace updating button state.
 
-Relative units — host window pixels, не обязательно pixels video mode.
-Pointer capture получает guest после click, сам capture click не event;
-Ctrl+Alt/focus loss освобождают pointer и дают release held buttons.
-В absolute mode capture нет: event bit 27=1, DX/DY — 0, POSITION в pixels
-current mode. **Сначала DATA, затем POSITION**: POSITION привязан к
-последнему popped event, а не к голове FIFO. Соседние moves coalesce;
-нельзя ожидать event на каждую промежуточную позицию. Headless events
-могут поступать из input script.
+Relative units are host window pixels, not necessarily video mode pixels.
+The guest gains pointer capture after a click; the capture click itself is not an event;
+Ctrl+Alt/focus loss releases the pointer and reports releases for held buttons.
+There is no capture in absolute mode: event bit 27=1, DX/DY are 0, POSITION is in
+current mode pixels. **Read DATA first, then POSITION**: POSITION belongs to
+the last popped event, rather than the FIFO head. Adjacent moves coalesce;
+do not expect an event for every intermediate position. Headless events
+may arrive from an input script.
 
-- [ ] Signed motion и button state обрабатываются раздельно.
-- [ ] Absolute position читается после своего DATA, mode switch проверен.
-- [ ] Overflow/focus loss не оставляют stuck buttons.
+- [ ] Signed motion and button state are handled separately.
+- [ ] Absolute position is read after its DATA; mode switching is checked.
+- [ ] Overflow/focus loss does not leave stuck buttons.
 
 ### 10.11 Ethernet card
 
-Ethernet II frames 14…1514 bytes без FCS. Link status не означает CONTROL on.
-RX/TX rings — physical arrays 8-byte descriptors `{ADDRESS, CONTROL}`,
-ring base alignment 8, до 1024 entries. Buffer byte address не требует
-word alignment. Length low 16, ERROR bit 30, OWN bit 31.
-OWN=1 отдаёт descriptor device; менять buffer/descriptor в это время нельзя.
+Ethernet II frames are 14…1514 bytes without FCS. Link status does not imply CONTROL on.
+RX/TX rings are physical arrays of 8-byte descriptors `{ADDRESS, CONTROL}`,
+ring base alignment 8, up to 1024 entries. The buffer byte address does not require
+word alignment. Length is in the low 16 bits, ERROR bit 30, OWN bit 31.
+OWN=1 hands the descriptor to the device; the buffer/descriptor must not change during this time.
 
-Для RX length сначала capacity; device пишет frame, фактическую length и
-возвращает OWN=0. Слишком длинный frame обрезается с ERROR. Для TX length
-— размер frame, после публикации OWN требуется TX_KICK. Sending завершается
-внутри store TX_KICK, он обрабатывает descriptors до первого OWN=0.
-Ring base/size меняются только при off; enable сбрасывает NEXT indices 0.
+For RX, length initially means capacity; the device writes the frame and actual length,
+then returns OWN=0. An oversized frame is truncated with ERROR. For TX, length
+is the frame size; publishing OWN must be followed by TX_KICK. Sending completes
+within the TX_KICK store, processing descriptors until the first OWN=0.
+Ring base/size change only while off; enabling resets NEXT indices to 0.
 
-RX/TX/LOST/FAULT в PENDING W1C, IRQ 8 зависит от CONTROL masks; FAULT
-разрешён любой из RX/TX IRQ enables. DMA fault останавливает card на
-descriptor и выключает её. Без free RX descriptor host queue удерживает
-до 64 frames, затем теряет их. Off card drops incoming frames.
-Драйвер читает ring state, не считает sticky RX bit числом packets.
+RX/TX/LOST/FAULT in PENDING are W1C; IRQ 8 depends on CONTROL masks; FAULT
+is enabled by either RX/TX IRQ enable. A DMA fault stops the card at the
+descriptor and disables it. Without a free RX descriptor, the host queue retains
+up to 64 frames, then loses them. An off card drops incoming frames.
+The driver reads ring state, rather than treating the sticky RX bit as a packet count.
 
-Guest сам реализует ARP/IP/TCP/UDP/DHCP. Native backend — host NAT:
+The guest implements ARP/IP/TCP/UDP/DHCP itself. The native backend is host NAT:
 guest `10.0.2.15/24`, gateway/DHCP `10.0.2.2`, DNS `10.0.2.3`,
-MAC guest `52:54:00:12:34:56`. Gateway поддерживает TCP/UDP и условно
-unprivileged ping; fragments не собирает/не посылает, MSS до 1460.
-DNS отвечает A, другие types без answer. По умолчанию разрешены public
-destinations, local/private blocked; последний совпавший allow/deny rule
-решает доступ. Port forwarding отдельно открывает host→guest path.
+guest MAC `52:54:00:12:34:56`. The gateway supports TCP/UDP and, conditionally,
+unprivileged ping; it neither reassembles nor sends fragments, with MSS up to 1460.
+DNS answers A queries; other types receive no answer. By default, public
+destinations are allowed and local/private ones blocked; the last matching allow/deny rule
+determines access. Port forwarding separately opens the host→guest path.
 
-`--no-net` даёт link down. Browser backend использует proxy для TCP/DNS,
-без native UDP/ping. Reset/load snapshot теряют host connections:
-guest networking должен справляться с исчезновением transport state.
+`--no-net` gives link down. The browser backend uses a proxy for TCP/DNS,
+without native UDP/ping. Reset/snapshot load loses host connections:
+guest networking must handle the disappearance of transport state.
 
-- [ ] OWN publication/return упорядочены, rings writable и buffers pinned.
-- [ ] RX truncation, TX invalid length, ring exhaustion и FAULT не зависают.
-- [ ] После off/fault/restart indices и descriptors переинициализированы.
-- [ ] Backend/network policy и snapshot disconnect учитываются в тестах.
+- [ ] OWN publication/return are ordered; rings are writable and buffers pinned.
+- [ ] RX truncation, TX invalid length, ring exhaustion and FAULT do not cause hangs.
+- [ ] Indices and descriptors are reinitialized after off/fault/restart.
+- [ ] Tests account for backend/network policy and snapshot disconnection.
 
 ### 10.12 Audio card
 
-8 DMA voices, host mix 48000 stereo frames/s. Sample data signed 8-bit либо
-signed 16-bit little-endian, mono/stereo: frame 1/2/4 bytes. ADDRESS physical,
-LENGTH/LOOP/POSITION в **frames**, не bytes; RATE low 24 bits в frames/s.
-16-bit values требуют even addresses. Читать можно RAM/ROM/VRAM.
-No interpolation; fractional advance накоплен внутри device, RATE 0
-держит текущий frame. MASTER и voice VOLUME задают left/right0…255;
-MASTER reset 0, поэтому voice on ещё не означает слышимый звук.
+8 DMA voices, host mix of 48000 stereo frames/s. Sample data is signed 8-bit or
+signed 16-bit little-endian, mono/stereo: frames are 1/2/4 bytes. ADDRESS is physical,
+LENGTH/LOOP/POSITION are in **frames**, rather than bytes; RATE uses the low 24 bits in frames/s.
+16-bit values require even addresses. RAM/ROM/VRAM can be read.
+There is no interpolation; fractional advance accumulates inside the device, and RATE 0
+holds the current frame. MASTER and voice VOLUME specify left/right 0…255;
+MASTER resets to 0, so a voice being on does not yet imply audible sound.
 
-Enable не сбрасывает POSITION; для replay поставить его 0. Write POSITION
-сбрасывает fractional phase. При loop и LOOP<LENGTH voice возвращается
-в loop region; иначе заканчивает на LENGTH и выключается.
-End/halfway signals выставляют voice bit STATUS; IRQ 9 при STATUS≠0,
-STATUS W1C. Несколько signals одного voice схлопываются; refill stream
-сверяется с POSITION и временем, иначе возможен underrun.
+Enabling does not reset POSITION; set it to 0 for replay. Writing POSITION
+resets the fractional phase. With loop and LOOP<LENGTH, the voice returns
+to the loop region; otherwise, it ends at LENGTH and turns off.
+End/halfway signals set the voice bit in STATUS; IRQ 9 is asserted when STATUS≠0,
+and STATUS is W1C. Multiple signals from one voice coalesce; stream refill
+must check POSITION and time, otherwise an underrun is possible.
 
-Bad DMA/alignment выключает voice и ставит FAULT bit **без STATUS signal**;
-FAULT сам по себе IRQ не поднимает. Ошибку нужно проверять программно.
-Loop buffer pinned пока voice играет; одну половину refilling делать после
-прохождения device этой половины, а не просто по любому voice IRQ.
-Mute/headless сохраняют device operation. Host playback latency не равна
-guest POSITION и может достигать примерно 85 ms.
+Bad DMA/alignment disables the voice and sets the FAULT bit **without a STATUS signal**;
+FAULT alone does not raise an IRQ. Software must check for errors.
+A loop buffer is pinned while the voice plays; refill one half after
+the device passes that half, rather than on any voice IRQ.
+Mute/headless preserve device operation. Host playback latency differs from
+guest POSITION and can reach roughly 85 ms.
 
-- [ ] Frame sizes/length multiplication и sample physical ranges проверены.
-- [ ] STATUS и FAULT обслуживаются раздельно; silence MASTER учтён.
-- [ ] Streaming выдерживает delayed handler и повторные half/end events.
+- [ ] Frame sizes/length multiplication and sample physical ranges are checked.
+- [ ] STATUS and FAULT are serviced separately; silent MASTER is accounted for.
+- [ ] Streaming tolerates delayed handlers and repeated half/end events.
 
 ### 10.13 RTC
 
-Host wall time в Unix seconds + nanoseconds, local UTC_OFFSET signed
-seconds, DST included. **Читать LO первым**: это latch всей даты;
-HI/NANOSECONDS/UTC_OFFSET относятся к этому latch до следующего LO.
-Это другой протокол, чем HI–LO–HI counters. RTC не устанавливается guest;
-для собственного времени ОС хранит offset. Leap seconds не учитываются.
+Host wall time is in Unix seconds + nanoseconds; local UTC_OFFSET is in signed
+seconds, including DST. **Read LO first**: this latches the entire date;
+HI/NANOSECONDS/UTC_OFFSET refer to that latch until the next LO.
+This protocol differs from HI–LO–HI counters. The guest cannot set the RTC;
+the OS stores an offset for its own time. Leap seconds are not accounted for.
 
-Alarm one-shot: целые seconds сравниваются с ALARM при arm и затем
-примерно каждые 1 ms machine time. Past alarm срабатывает сразу.
-ALARM sticky/IRQ 10 W1C, disarm не очищает status. Host time может
-отличаться от guest ticks; monotonic deadlines/scheduler используют Timer.
-`--rtc` даёт virtual epoch + ticks since power-on, UTC_OFFSET0;
-virtual RTC, как и host RTC, не откатывает время при guest reset.
+The alarm is one-shot: whole seconds are compared with ALARM when armed, then
+roughly every 1 ms of machine time. A past alarm fires immediately.
+ALARM is sticky/IRQ 10 W1C; disarming does not clear status. Host time may
+differ from guest ticks; monotonic deadlines/the scheduler use Timer.
+`--rtc` provides a virtual epoch + ticks since power-on, with UTC_OFFSET 0;
+like host RTC, virtual RTC does not roll back time on guest reset.
 
-- [ ] Clock APIs отделяют monotonic ticks от wall time.
-- [ ] Latch reads, past alarm, clear/disarm и reset проверены.
+- [ ] Clock APIs separate monotonic ticks from wall time.
+- [ ] Latch reads, past alarms, clear/disarm and reset are checked.
 
 ### 10.14 RNG
 
-DATA выдаёт новое 32-bit word без ожидания; narrow read расходует весь
-word. STATUS bit 0 означает **seeded**, а не «готово» или «достаточно entropy».
-В обычном режиме источник — host CSPRNG. `--seed`/deterministic выбирают
-воспроизводимый ChaCha20 stream: N little-endian в первых 8 bytes key,
-остаток 0, nonce 0, 64-bit block counter начиная 0.
-Такой seed не источник секретных ключей.
+DATA returns a new 32-bit word without waiting; a narrow read consumes the entire
+word. STATUS bit 0 means **seeded**, rather than “ready” or “enough entropy”.
+In ordinary mode, the source is the host CSPRNG. `--seed`/deterministic select
+a reproducible ChaCha20 stream: N little-endian in the first 8 key bytes,
+the remainder 0, nonce 0, and a 64-bit block counter starting at 0.
+Such a seed is not a source of secret keys.
 
-Последовательность продолжается при reset. Snapshot seeded stream
-продолжается со своего state; host mode после load берёт новые bytes.
-Новая выборка может численно совпасть с прежней: uniqueness ID нужно
-обеспечивать отдельно, а не предполагать из random32.
+The sequence continues on reset. A snapshot's seeded stream
+continues from its state; host mode obtains new bytes after load.
+A new sample may numerically equal the previous one: ID uniqueness must
+be ensured separately, rather than assumed from random32.
 
-- [ ] Seeded mode явно различается с host entropy mode.
-- [ ] Key/ID generation не полагается на уникальность каждого random word.
+- [ ] Seeded mode is explicitly distinguished from host entropy mode.
+- [ ] Key/ID generation does not rely on every random word being unique.
 
 ### 10.15 Shared folder
 
-Host filesystem proxy, **не block disk и не filesystem LA/IX**. Команды
+A host filesystem proxy, **not a block disk or LA/IX filesystem**. Commands
 OPEN/CLOSE/READ/WRITE/STAT/READDIR/MKDIR/REMOVE/RENAME/TRUNCATE/SYNC
-выполняются синхронно в store COMMAND, без IRQ. Host operation может
-занять wall time, хотя guest tick не продвигается. ERROR/RESULT надо
-читать сразу; следующий COMMAND сбросит RESULT/изменит outcome.
+execute synchronously in the COMMAND store, without IRQs. A host operation may
+take wall time even though the guest tick does not advance. Read ERROR/RESULT
+immediately; the next COMMAND will reset RESULT/change the outcome.
 
-PATH/PATH2/data — physical, paths RAM/ROM/VRAM по текущей bus реализации,
-READ destinations writable RAM/VRAM. Paths NUL-terminated, максимум 1023
-bytes + NUL; relative to shared root. Empty slash components пропускаются,
-`.`/`..`, control chars, backslash, colon запрещены. Encoding/case решает
-host. Symlink вне root запрещён на native POSIX, **Windows links не
-проверяются** по текущему documented contract; не приписывать этот sandbox
-LA/IX filesystem policy. Read-only share или handle запрещает изменения.
+PATH/PATH2/data are physical; under the current bus implementation, paths can be in RAM/ROM/VRAM,
+and READ destinations in writable RAM/VRAM. Paths are NUL-terminated, at most 1023
+bytes + NUL, relative to the shared root. Empty slash components are skipped;
+`.`/`..`, control characters, backslash and colon are prohibited. The host determines
+encoding/case. Symlinks outside the root are prohibited on native POSIX; **Windows links
+are not checked** under the current documented contract; do not attribute this sandbox
+to LA/IX filesystem policy. A read-only share or handle prohibits modifications.
 
-16 handles0…15, OPEN выбирает lowest free. Directories требуют DIRECTORY
-flag отдельно; handles общие всему device, изоляцию клиентов создаёт
-сервер. READ/WRITE до 1 MiB за команду, без alignment constraints;
-64-bit POSITION и ADDRESS растут, COUNT уменьшается, RESULT — actual bytes.
-EOF/partial DMA error допускают short result. Writes могут расширять file,
-gap читается как zeros. SYNC нужен для durable acknowledgement.
+There are 16 handles, 0…15; OPEN chooses the lowest free one. Directories require a separate
+DIRECTORY flag; handles are shared across the entire device, with the server providing
+client isolation. READ/WRITE allow up to 1 MiB per command, without alignment constraints;
+64-bit POSITION and ADDRESS increase, COUNT decreases, RESULT is actual bytes.
+EOF/partial DMA errors permit a short result. Writes may extend the file,
+and gaps read as zeros. SYNC is required for durable acknowledgement.
 
-STAT record 32 bytes с type/size/mtime, READDIR — record и name, buffer
-не меньше 288; RESULT 0 — конец directory. Порядок entries host-dependent,
-`.`/`..` и недопустимые names опускаются. Reset/load snapshot закрывают все
-handles; files не откатываются. Error7 после load требует reopen.
+A STAT record is 32 bytes with type/size/mtime; READDIR returns a record and name, with a buffer
+of at least 288 bytes; RESULT 0 means end of directory. Entry order is host-dependent;
+`.`/`..` and invalid names are omitted. Reset/snapshot load closes all
+handles; files are not rolled back. Error 7 after load requires reopening.
 
-- [ ] Server проверяет paths, flags, handles, short I/O и RESULT/ERROR.
-- [ ] Physical buffers проверены до synchronous host command.
-- [ ] Read-only и SYNC входят в контракт; snapshot закрывает client handles.
-- [ ] Tests не зависят от READDIR order и особенностей host case/encoding.
+- [ ] The server checks paths, flags, handles, short I/O and RESULT/ERROR.
+- [ ] Physical buffers are validated before a synchronous host command.
+- [ ] Read-only and SYNC are part of the contract; a snapshot closes client handles.
+- [ ] Tests do not depend on READDIR order or host case/encoding behavior.
 
 ### 10.16 Watchdog
 
-TIMEOUT/GRACE в ticks; 0 действует как 1. Enable загружает TIMEOUT.
-Expiry ставит BARK/IRQ 12, начинает grace; её конец reset с cause 4.
-KICK перезагружает TIMEOUT, выходит из grace и очищает BARK.
-W1C BARK только снимает IRQ, **не отменяет reset после grace**.
-Изменённые TIMEOUT/GRACE учитываются после следующего kick.
+TIMEOUT/GRACE are in ticks; 0 acts as 1. Enabling loads TIMEOUT.
+Expiry sets BARK/IRQ 12 and starts grace; its end resets with cause 4.
+KICK reloads TIMEOUT, leaves grace and clears BARK.
+W1C BARK only deasserts the IRQ; it **does not cancel reset after grace**.
+Changed TIMEOUT/GRACE take effect after the next kick.
 
-LOCK делает CONTROL/TIMEOUT/GRACE read-only до reset, KICK остаётся.
-NMI нет: при masked IRQ/EXL=1 bark не попадёт в handler, но countdown
-идёт до reset. При HLT ticks остановлены, поэтому watchdog **не способен
-восстановить CPU после HLT/double fault**. Во время WFI countdown идёт.
+LOCK makes CONTROL/TIMEOUT/GRACE read-only until reset; KICK remains available.
+There is no NMI: with a masked IRQ/EXL=1, bark will not reach the handler, but the countdown
+continues to reset. HLT stops ticks, so the watchdog **cannot
+recover the CPU after HLT/double fault**. The countdown continues during WFI.
 
-- [ ] Проверены kick, ack-only, locked state и reset cause 4.
-- [ ] Не рассчитывать на bark при IE0 или на watchdog recovery после halt.
+- [ ] Kick, acknowledgement alone, locked state and reset cause 4 are checked.
+- [ ] Do not rely on bark with IE=0 or watchdog recovery after halt.
 
 <a id="timing"></a>
 
-## 11. Время, pipeline и производительность
+## 11. Time, pipeline and performance
 
-Default clock 32 MHz настраивается host; это не обязательная константа ISA.
-Timer, DMA, video frames, beep duration, audio sampling, watchdog работают
-в machine ticks. Обычная RTC использует host wall clock; это отдельная
-шкала. При slow emulation guest monotonic time отстаёт от host time,
-при unthrottled может опережать. CPU HLT останавливает ticks, WFI — нет.
+The default 32 MHz clock is host-configurable; it is not a mandatory ISA constant.
+Timer, DMA, video frames, beep duration, audio sampling and watchdog operate
+in machine ticks. Ordinary RTC uses the host wall clock, a separate
+time scale. Under slow emulation, guest monotonic time lags host time;
+unthrottled, it may advance faster. CPU HLT stops ticks; WFI does not.
 
-На tick устройства идут в фиксированном порядке: Timer → HDD0/HDD1 →
-Video → Floppy → Beeper → Audio → RTC → Watchdog → CPU. IRQ/DMA event
-на этом tick может быть виден CPU на том же tick. Эмулятор оптимизирует
-пустые промежутки и синхронизирует lazy devices перед register access;
-это не разрешение software полагаться на скорость host polling loop.
+On each tick, devices run in a fixed order: Timer → HDD0/HDD1 →
+Video → Floppy → Beeper → Audio → RTC → Watchdog → CPU. An IRQ/DMA event
+on that tick may be visible to the CPU in the same tick. The emulator optimizes
+empty intervals and synchronizes lazy devices before register access;
+this does not permit software to rely on host polling-loop speed.
 
-Pipeline IF/ID/EX/MEM/WB имеет latency 5 cycles, throughput до 1 instruction
-за cycle. Есть forwarding; immediate load-use dependency добавляет 1 cycle.
-Branches predicted not taken; taken branch/jump удаляет две младшие
-инструкции, penalty 2 cycles. Arithmetic, в том числе division и float,
-в нынешней модели выполняется за один EX cycle; это не latency реального
-host arithmetic. `IRET` redirect на WB имеет penalty 4 cycles.
-Control accesses сериализуют старые операции; mode/PTBR/trigger/FCSR
-changes и TLBI refetch-ят молодые instructions.
-TLB walk выполняется в том же cycle без дополнительного timing penalty.
+The IF/ID/EX/MEM/WB pipeline has a latency of 5 cycles and throughput up to 1 instruction
+per cycle. Forwarding is present; an immediate load-use dependency adds 1 cycle.
+Branches are predicted not taken; a taken branch/jump discards the two younger
+instructions, with a 2-cycle penalty. Arithmetic, including division and float,
+executes in one EX cycle in the current model; this is not the latency of actual
+host arithmetic. An `IRET` redirect at WB has a 4-cycle penalty.
+Control accesses serialize older operations; mode/PTBR/trigger/FCSR
+changes and TLBI refetch younger instructions.
+A TLB walk occurs in the same cycle without an additional timing penalty.
 
-Нет delay slots и обязанности вставлять NOP для forwarding. Loads/stores
-в MEM не выполняются спекулятивно; speculative IF может walk page tables
-и выставить A. Squashed instructions не меняют GPR, RAM или FCSR flags,
-но наблюдение A не доказывает retirement. Fetch/walk не вызывает MMIO
-side effects, поскольку MMIO/VRAM запрещены для этих bus операций.
+There are no delay slots or requirements to insert NOPs for forwarding. Loads/stores
+in MEM do not execute speculatively; speculative IF may walk page tables
+and set A. Squashed instructions do not change GPRs, RAM or FCSR flags,
+but observing A does not prove retirement. Fetch/walk cause no MMIO
+side effects because MMIO/VRAM are prohibited for these bus operations.
 
-64-bit `CYCLE` и `INSTRET` читаются HI–LO–HI с retry при rollover.
-CYCLE учитывает WFI, не HLT; INSTRET считает только успешно retired
-instructions: faulting SYSCALL/BREAK не добавляются, IRQ не instruction,
-squashed instructions не считаются. Guest reset обнуляет CPU counters
-и Timer COUNT; RTC virtual epoch + power-on ticks продолжает идти.
-Нельзя смешивать эти origins после reset.
+64-bit `CYCLE` and `INSTRET` are read HI–LO–HI with retry on rollover.
+CYCLE includes WFI, but not HLT; INSTRET counts only successfully retired
+instructions: faulting SYSCALL/BREAK are not added, IRQ is not an instruction,
+and squashed instructions are not counted. Guest reset zeroes CPU counters
+and Timer COUNT; RTC virtual epoch + power-on ticks continues advancing.
+These origins must not be mixed after reset.
 
-Размер TLB (сейчас 64 entries в [mmu.h](../include/mmu.h)), replacement,
-host-side caches и ускорение lazy devices — детали эмулятора. Kernel
-correctness не должна зависеть от eviction, случайно очищающего stale mapping.
-Pipeline timing пригоден для ISA regression, но throughput host emulator
-не является оценкой реального аппаратного WRM implementation.
+TLB size (currently 64 entries in [mmu.h](../include/mmu.h)), replacement,
+host-side caches and lazy-device acceleration are emulator details. Kernel
+correctness must not depend on eviction accidentally clearing a stale mapping.
+Pipeline timing is suitable for ISA regression, but host emulator throughput
+is not an estimate of a real hardware WRM implementation.
 
-Чек-лист:
+Checklist:
 
-- [ ] Все сроки явно указывают шкалу: ticks, monotonic duration или wall time.
-- [ ] 64-bit counters читаются согласованно, reset origins учитываются.
-- [ ] Timing-sensitive tests задают clock и контролируют внешний input.
-- [ ] Устаревшие mappings удаляются TLBI, а не надеждой на eviction.
+- [ ] All deadlines explicitly state their scale: ticks, monotonic duration or wall time.
+- [ ] 64-bit counters are read consistently; reset origins are accounted for.
+- [ ] Timing-sensitive tests set the clock and control external input.
+- [ ] Stale mappings are removed with TLBI, rather than hoping for eviction.
 
 <a id="diagnostics"></a>
 
-## 12. Диагностика, debugging и snapshots
+## 12. Diagnostics, debugging and snapshots
 
-### Kernel panic и ранний failure path
+### Kernel panic and early failure path
 
-Kernel panic должен печатать stage, origin по PUM, CAUSE и его имя,
-EPC, BADADDR, STATUS с flags, PTBR, FCSR, все GPR и состояние stack bounds.
-Полезны current task/address space, last IRQ/device error и kernel image
-identity. Hex addresses нужны с ведущими нулями для сравнения с symbol map.
-Не разыменовывать неизвестные pointers ради красивого diagnostic message.
+Kernel panic should print the stage, origin from PUM, CAUSE and its name,
+EPC, BADADDR, STATUS with flags, PTBR, FCSR, all GPRs and stack bounds state.
+The current task/address space, last IRQ/device error and kernel image
+identity are useful. Hex addresses need leading zeros for comparison with the symbol map.
+Do not dereference unknown pointers to improve a diagnostic message.
 
-Сбой entry до полного frame требует отдельного early panic path:
-нельзя читать ещё не сохранённые поля, вызывать обычную функцию на плохом
-stack или обращаться к отсутствующему framebuffer mapping.
-Polling UART — простая основа: нет TX IRQ, ожидания DMA и allocation.
-Поздний графический dump возможен только при гарантированно valid video
-mapping/engine state; очередная неисправная операция при EXL приведёт к halt.
-Рекурсивный panic/formatter failure должен иметь ограниченный fallback.
+An entry failure before a complete frame requires a separate early panic path:
+do not read fields that have not yet been saved, call an ordinary function on a bad
+stack or access a missing framebuffer mapping.
+Polling UART is a simple foundation: no TX IRQ, DMA wait or allocation.
+A later graphical dump is possible only with guaranteed valid video
+mapping/engine state; another invalid operation under EXL will halt the CPU.
+Recursive panic/formatter failure must have a bounded fallback.
 
-Запись вида `CAUSE=13 (breakpoint), stage=trap-selftest` доказывает, что
-BREAK дошёл до handler и dump напечатан. Она **не доказывает корректность
-IRET или сохранения всех registers**. Для ожидаемого self-test BREAK
-нужно проверить allow condition, обновить EPC ровно на 4, вернуться и сравнить
-контекст. Не превращать любое BREAK в success: unexpected breakpoint
-в kernel по-прежнему требует диагностики.
+A record such as `CAUSE=13 (breakpoint), stage=trap-selftest` proves that
+BREAK reached the handler and the dump was printed. It **does not prove correct
+IRET or preservation of all registers**. For an expected self-test BREAK,
+check the allow condition, advance EPC by exactly 4, return and compare
+the context. Do not turn every BREAK into success: an unexpected breakpoint
+in the kernel still requires diagnostics.
 
-После CPU double fault software panic может уже не исполняться. Эмулятор
-печатает unhandled fault state на stderr, а `--debug` также dump-ит HLT,
-power-off и quit. Остановленный CPU хранит pipeline: MEM/WB показывает
-вторую остановившую инструкцию; saved EPC может относиться к первому trap.
-Для EPC lookup использовать map **того же image**, а не свежие symbols
-для старого binary. Для page fault дополнительно разобрать PTBR/PDE/PTE,
-permissions и physical accessibility; отсутствие page mapping и bus error
-после успешной translation — разные неисправности.
+After a CPU double fault, software panic may no longer execute. The emulator
+prints unhandled fault state to stderr, and `--debug` also dumps HLT,
+power-off and quit. A stopped CPU retains its pipeline: MEM/WB shows
+the second instruction that caused the halt; saved EPC may refer to the first trap.
+For EPC lookup, use the map **of the same image**, rather than fresh symbols
+for an old binary. For a page fault, also inspect PTBR/PDE/PTE,
+permissions and physical accessibility; a missing page mapping and a bus error
+after successful translation are different failures.
 
-### Guest single-step и triggers
+### Guest single-step and triggers
 
-`STATUS.SS` даёт trap 14 после instruction, EPC следующая, BADADDR предыдущая.
-SS оценивается в начале instruction: включающая его MTCR не step-ится,
-следующая instruction step-ится; instruction, очищающая уже установленный
-SS, всё ещё вызывает step. HLT не даёт step, WFI при stepping не ждёт,
-а даёт step trap. Entry сохраняет SS в PSS; IRET восстанавливает SS=PSS.
-Во время EXL1 guest step/triggers подавлены.
+`STATUS.SS` causes trap 14 after an instruction, with EPC at the next instruction and BADADDR at the previous one.
+SS is evaluated at instruction start: the MTCR that enables it is not stepped,
+the next instruction is; an instruction clearing an already set
+SS still causes a step. HLT does not produce a step; WFI under stepping does not wait,
+but produces a step trap. Entry saves SS in PSS; IRET restores SS=PSS.
+Guest step/triggers are suppressed during EXL=1.
 
-Два triggers: TADDR0/TCTRL0 и TADDR1/TCTRL1, virtual addresses.
-TCTRL содержит X/R/W bits 0/1/2 и SIZE bits 12–8: aligned region 2^SIZE,
-содержащий TADDR. Match любого затронутого byte даёт cause 15 **до effects**
-инструкции. Для data alignment check идёт прежде trigger, trigger прежде
-translation; для fetch сначала fetch (его fault имеет приоритет), затем
-trigger. После IRET к прежнему EPC trigger снова совпадёт.
-Для выполнения одной instruction debugger временно выключает trigger,
-делает step через PSS и включает trigger обратно. Если triggers принадлежат
-задачам, scheduler сохраняет/восстанавливает и этот state.
+There are two triggers: TADDR0/TCTRL0 and TADDR1/TCTRL1, using virtual addresses.
+TCTRL contains X/R/W bits 0/1/2 and SIZE bits 12–8: an aligned region of 2^SIZE
+containing TADDR. A match on any accessed byte raises cause 15 **before the instruction's
+effects**. For data, alignment is checked before the trigger, and the trigger before
+translation; for fetch, fetch comes first (its fault takes priority), then
+the trigger. After IRET to the same EPC, the trigger will match again.
+To execute one instruction, the debugger temporarily disables the trigger,
+steps through PSS and enables the trigger again. If triggers belong to
+tasks, the scheduler saves/restores this state too.
 
-### Host monitor и trace
+### Host monitor and trace
 
-Host monitor (`--monitor`, `--pause`) имеет собственные breakpoints и
-watchpoints, **не guest triggers**. Он останавливает между instructions,
-не входит в IVEC, не меняет guest trap frame и работает с ROM. Breakpoint
-срабатывает перед instruction, watchpoint — после load/store. Поэтому
-host watchpoint и guest trigger имеют разный момент наблюдения effects.
+The host monitor (`--monitor`, `--pause`) has its own breakpoints and
+watchpoints, **not guest triggers**. It stops between instructions,
+does not enter IVEC, does not change the guest trap frame and works with ROM. A breakpoint
+fires before the instruction, a watchpoint after the load/store. Host watchpoints
+and guest triggers therefore observe effects at different points.
 
-Полезные commands: `r`, `d`, `x` virtual, `xp` physical, `b`, `watch`,
-`s`, `c`, `info`. `w/wp` меняют RAM; такие edits — debugger actions,
-а не безопасный runtime memory API ядра. Monitor слушает localhost.
-Для исследования active mappings различать VA и PA; physical read
-не является доказательством user permissions.
+Useful commands: `r`, `d`, virtual `x`, physical `xp`, `b`, `watch`,
+`s`, `c`, `info`. `w/wp` change RAM; such edits are debugger actions,
+rather than a safe kernel runtime memory API. The monitor listens on localhost.
+When inspecting active mappings, distinguish VA and PA; a physical read
+does not prove user permissions.
 
-`--trace` пишет дошедшие до WB instructions, изменения и faults,
-IRQ отдельной строкой. Squashed instructions не видны; faulting instruction
-видна, хотя не прибавляет INSTRET. Trace растёт примерно 80 bytes/instruction
-и замедляет host; запускать на коротком воспроизводимом сценарии.
-UART log stdout и emulator diagnostic stderr сохранять раздельно.
+`--trace` records instructions that reach WB, changes and faults,
+with IRQs on a separate line. Squashed instructions are invisible; a faulting instruction
+is visible even though it does not increase INSTRET. Trace grows by roughly 80 bytes/instruction
+and slows the host; run it on a short reproducible scenario.
+Save UART stdout logs and emulator diagnostic stderr separately.
 
-### Snapshots и воспроизводимость
+### Snapshots and reproducibility
 
-Snapshot хранит CPU/pipeline/TLB, RAM/VRAM и devices. Нужны та же ROM,
-clock, RAM config и **тот же build эмулятора**. Disk images **не копируются**:
-snapshot не откатывает disk/shared-folder writes, load предупреждает об
-изменившемся image. Network connections теряются, shared handles закрываются;
-host RNG берёт свежие bits, seeded RNG продолжает stream.
-Snapshot — удобная точка исследования CPU, но не transaction всей host среды.
+A snapshot stores CPU/pipeline/TLB, RAM/VRAM and devices. It requires the same ROM,
+clock, RAM config and **the same emulator build**. Disk images **are not copied**:
+a snapshot does not roll back disk/shared-folder writes; load warns of
+an altered image. Network connections are lost and shared handles closed;
+host RNG obtains fresh bits, while seeded RNG continues its stream.
+A snapshot is a convenient point for CPU investigation, but not a transaction of the entire host environment.
 
-`--deterministic` включает unthrottled, virtual RTC, seeded RNG и fixed-tick
-network polling. Сам по себе он не делает live terminal/window/network,
-shared directory contents/order и ответы host servers воспроизводимыми.
-Для regression задавать ROM/disk/config/seed/input script и контролировать
-внешнюю сеть; для чистых CPU tests обычно отключать её.
-Input script инжектирует key/UART/mouse/power перед указанным power-on tick;
-full FIFO drops events, disabled mouse ignores их, как при настоящем input.
+`--deterministic` enables unthrottled operation, virtual RTC, seeded RNG and fixed-tick
+network polling. By itself, it does not make live terminal/window/network,
+shared directory contents/order or host server responses reproducible.
+For regression, specify ROM/disk/config/seed/input script and control
+the external network; for pure CPU tests, normally disable it.
+An input script injects key/UART/mouse/power events before the specified power-on tick;
+a full FIFO drops events and a disabled mouse ignores them, as with real input.
 
-Browser имеет дополнительные ограничения: UART без input, network через
-proxy, images сохраняются в IndexedDB для origin. Disk writes сохраняются
-при FLUSH и периодически; downloaded image — отдельный артефакт.
-Native shutdown/host filesystem поведение нельзя автоматически переносить
-на browser persistence.
+The browser has additional limits: no UART input, network through a
+proxy, and images saved in IndexedDB for the origin. Disk writes are persisted
+on FLUSH and periodically; a downloaded image is a separate artifact.
+Native shutdown/host filesystem behavior must not be automatically assumed
+for browser persistence.
 
-Чек-лист:
+Checklist:
 
-- [ ] Fault dump пригоден без heap/scheduler и не создаёт новый fault.
-- [ ] Trap self-test проверяет return state, а не только наличие dump.
-- [ ] EPC сопоставляется с правильными map/image и instruction bytes.
-- [ ] Guest trigger и host monitor breakpoint не смешиваются в тестах.
-- [ ] Regression сохраняет config, input, logs и identity ready binary.
-- [ ] Snapshot tests учитывают внешние files, закрытые handles и connections.
+- [ ] A fault dump works without heap/scheduler and does not create a new fault.
+- [ ] Trap self-test checks return state, rather than only the presence of a dump.
+- [ ] EPC is matched to the correct map/image and instruction bytes.
+- [ ] Tests do not confuse guest triggers with host monitor breakpoints.
+- [ ] Regression preserves config, input, logs and the identity of the ready binary.
+- [ ] Snapshot tests account for external files, closed handles and connections.
 
 <a id="clarifications"></a>
 
-## 13. Границы текущей реализации и решения LA/IX
+## 13. Current implementation limits and LA/IX choices
 
-Здесь собрано то, что легко принять за свойство ISA или за готовую
-функциональность. Этот файл не меняет ISA, emulator code или готовность LA/IX.
+This section collects details easily mistaken for ISA properties or completed
+functionality. This file does not change the ISA, emulator code or LA/IX readiness.
 
-| Тема | Уточнение и источник |
+| Topic | Clarification and source |
 | --- | --- |
-| Multi-core section | [Cores](INSTRUCTIONS.md#cores) — направление расширения. HARTID=0, один CPU; AP start, работающий shootdown и SMP scheduler отсутствуют. |
-| LA/IX low words/frame | `0x1FF0…0x1FFC`, page zero без mapping, frame 160, stack 8192 и headroom 512 — [решения LA/IX](../laix/src/arch/wrm081632/defs.inc), не обязательные hardware constants. |
-| Kernel features | Наличие machine instruction/branch в assembly не означает готовность user launcher, allocator, scheduler, IPC или isolated driver. Проверять [план и критерии этапов](../laix/docs/KERNEL.md). |
+| Multi-core section | [Cores](INSTRUCTIONS.md#cores) is an extension direction. HARTID=0, one CPU; AP startup, operational shootdown and an SMP scheduler are absent. |
+| LA/IX low words/frame | `0x1FF0…0x1FFC`, unmapped page zero, frame 160, stack 8192 and headroom 512 are [LA/IX choices](../laix/src/arch/wrm081632/defs.inc), rather than mandatory hardware constants. |
+| Kernel features | A machine instruction/branch in assembly does not imply a ready user launcher, allocator, scheduler, IPC or isolated driver. Check the [plan and stage criteria](../laix/docs/KERNEL.md). |
 
-CPU ISA не задаёт syscall numbers, policies IPC/capabilities, fault fixup
-tables, user virtual layout, allocator ownership и service restart.
-Это контракты LA/IX, которые надо описывать и проверять отдельно.
-ABI пока не определяет dynamic linker/PIE/debug info; hardware пока не
-реализует SMP/IOMMU/NMI. Не строить архитектуру микроядра на их наличии.
+The CPU ISA does not specify syscall numbers, IPC/capability policies, fault fixup
+tables, user virtual layout, allocator ownership or service restart.
+These are LA/IX contracts that must be described and verified separately.
+The ABI does not yet define dynamic linking/PIE/debug information; hardware does not yet
+implement SMP/IOMMU/NMI. Do not build the microkernel architecture on their availability.
 
 <a id="acceptance"></a>
 
-## 14. Сквозная проверка LA/IX
+## 14. End-to-end LA/IX verification
 
-Проверки выполняются по исходникам и на готовом image с известными
-ROM/config/map. Следующие пункты — критерии приёмки, а не отчёт о
-пройденных tests.
+Checks are performed against sources and on a ready image with known
+ROM/config/map. The following items are acceptance criteria, rather than a report
+of passed tests.
 
-| Направление | Где искать исходный контракт/сценарии |
+| Area | Where to find the original contract/scenarios |
 | --- | --- |
 | ISA, modes, traps, atomics, FP | [tests/isa](../tests/isa/), [INSTRUCTIONS](INSTRUCTIONS.md) |
 | Precise effects, redirects, timing | [tests/pipeline](../tests/pipeline/) |
 | MMU, permissions, superpages, TLB | [tests/mmu](../tests/mmu/) |
-| IRQ/device/DMA behaviour | [tests](../tests/), соответствующие sections SPECIFICATION |
-| LA/IX boot/trap/guard и ready image | [приёмка LA/IX](../laix/tests/ACCEPTANCE.md), [этап 1](../laix/docs/01_BOOT_TRAPS.md) |
-| User/tasks/IPC/services | [этап 3](../laix/docs/03_USER_TASK_SYSCALLS.md), [этап 4](../laix/docs/04_SCHEDULER_IRQ.md), [этап 5](../laix/docs/05_IPC_RIGHTS.md), [этап 6](../laix/docs/06_USER_SERVICES.md) |
+| IRQ/device/DMA behaviour | [tests](../tests/), corresponding SPECIFICATION sections |
+| LA/IX boot/trap/guard and ready image | [LA/IX acceptance](../laix/tests/ACCEPTANCE.md), [stage 1](../laix/docs/01_BOOT_TRAPS.md) |
+| User/tasks/IPC/services | [stage 3](../laix/docs/03_USER_TASK_SYSCALLS.md), [stage 4](../laix/docs/04_SCHEDULER_IRQ.md), [stage 5](../laix/docs/05_IPC_RIGHTS.md), [stage 6](../laix/docs/06_USER_SERVICES.md) |
 
-- [ ] Warm boot с грязной BSS обнуляет её, сохраняет boot info и reserves.
-- [ ] Supervisor и user trap восстанавливают все GPR, sp/tp/FCSR/status.
-- [ ] User entry работает с неисправным пользовательским stack pointer.
-- [ ] IRQ возвращается на next EPC; syscall/BREAK skip4; page fault retry.
-- [ ] EXL nesting policy и авария до frame проверены отдельно от обычного panic.
-- [ ] Kernel frames, entry state, RX/RW sections и guards защищены без aliases.
-- [ ] ASID reuse и revoke mappings не оставляют доступ через старый TLB.
-- [ ] Две задачи не портят memory/TLS/FCSR/debug state друг друга.
-- [ ] Device IRQ ack действительно снимает source, включая shared flags.
-- [ ] WFI idle просыпается, pending/masked IRQ не создаёт вечного busy loop.
-- [ ] DMA не использует VA как PA, frames pinned, partial errors видны клиенту.
-- [ ] Недоверенный driver не имеет обхода broker через raw DMA registers.
-- [ ] Device/service crash не освобождает storage незавершённой DMA.
-- [ ] Shutdown ждёт durable FLUSH/SYNC и завершает работу с явным exit code.
-- [ ] Проверки на native/browser/reset/snapshot учитывают их разные contracts.
+- [ ] Warm boot with dirty BSS zeroes it, preserves boot info and reserved regions.
+- [ ] Supervisor and user traps restore all GPRs, sp/tp/FCSR/status.
+- [ ] User entry works with a bad user stack pointer.
+- [ ] IRQ returns to the next EPC; syscall/BREAK skip 4; page fault retries.
+- [ ] EXL nesting policy and failure before the frame are checked separately from ordinary panic.
+- [ ] Kernel frames, entry state, RX/RW sections and guards are protected without aliases.
+- [ ] ASID reuse and mapping revocation leave no access through the old TLB.
+- [ ] Two tasks do not corrupt each other's memory/TLS/FCSR/debug state.
+- [ ] Device IRQ acknowledgement actually deasserts the source, including shared flags.
+- [ ] WFI idle wakes up; pending/masked IRQs do not create an endless busy loop.
+- [ ] DMA does not use VA as PA; frames are pinned and partial errors visible to the client.
+- [ ] An untrusted driver cannot bypass the broker through raw DMA registers.
+- [ ] Device/service crashes do not free storage used by incomplete DMA.
+- [ ] Shutdown waits for durable FLUSH/SYNC and exits with an explicit exit code.
+- [ ] Native/browser/reset/snapshot checks account for their different contracts.
 
-Для микроядра главный следующий рубеж — реальная user task с отдельным
-address space и безопасным trap return. Supervisor self-test необходим,
-но не заменяет эту проверку и не доказывает изоляцию DMA drivers.
+For the microkernel, the main next milestone is a real user task with a separate
+address space and safe trap return. Supervisor self-test is necessary,
+but does not replace this check or prove DMA driver isolation.

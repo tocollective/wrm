@@ -6,7 +6,7 @@ WRM.081632 – is a 32-bit, RISC based, little-endian CPU architecture.
 
 Architecture reference: [ISA](docs/INSTRUCTIONS.md),
 [machine and devices](docs/SPECIFICATION.md), [ABI](docs/ABI.md),
-and [implementation notes for kernels and drivers (Russian)](docs/SPECIFICS.md).
+and [implementation notes for kernels and drivers](docs/SPECIFICS.md).
 
 ```sh
 cmake -S . -B build     # RelWithDebInfo unless -DCMAKE_BUILD_TYPE says otherwise
