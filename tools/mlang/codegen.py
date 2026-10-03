@@ -489,6 +489,8 @@ class FuncGen:
 	def st_VarDecl(self, s):
 		var, t = s.var, s.var.type
 		var.indirect = False
+		if var.const is not None and not var.address_taken:
+			return  # every read is the constant itself (CodeGen.expr): no slot needed
 		var.align = max(align_of(t), 4)
 		var.offset = self.slot(size_of(t), var.align)
 		if s.init is None:

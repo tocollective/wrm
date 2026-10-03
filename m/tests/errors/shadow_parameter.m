@@ -1,4 +1,5 @@
-// Error: a local can't take a parameter name
+// Error: the parameters and the body of a function are one block, as in C:
+// a local of the body itself can't take a parameter name
 // @error 5: 'n' is a parameter
 
 let f(n: UWord): UWord {

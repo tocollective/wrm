@@ -40,36 +40,36 @@ type Sum25 = (a1: Word, a2: Word, a3: Word, a4: Word, a5: Word, a6: Word, a7: Wo
 let main(argc: UWord, argv: *UByte[]): Word {
     puts("deep")
     say(sum25(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25))
-    let x1: Word = 1
-    let x2: Word = 2
-    let x3: Word = 3
-    let x4: Word = 4
-    let x5: Word = 5
-    let x6: Word = 6
-    let x7: Word = 7
-    let x8: Word = 8
-    let x9: Word = 9
-    let x10: Word = 10
-    let x11: Word = 11
-    let x12: Word = 12
-    let x13: Word = 13
-    let x14: Word = 14
-    let x15: Word = 15
-    let x16: Word = 16
-    let x17: Word = 17
-    let x18: Word = 18
-    let x19: Word = 19
-    let x20: Word = 20
-    let x21: Word = 21
-    let x22: Word = 22
-    let x23: Word = 23
-    let x24: Word = 24
-    let x25: Word = 25
-    let x26: Word = 26
-    let x27: Word = 27
-    let x28: Word = 28
-    let x29: Word = 29
-    let x30: Word = 30
+    let mut x1: Word = 1
+    let mut x2: Word = 2
+    let mut x3: Word = 3
+    let mut x4: Word = 4
+    let mut x5: Word = 5
+    let mut x6: Word = 6
+    let mut x7: Word = 7
+    let mut x8: Word = 8
+    let mut x9: Word = 9
+    let mut x10: Word = 10
+    let mut x11: Word = 11
+    let mut x12: Word = 12
+    let mut x13: Word = 13
+    let mut x14: Word = 14
+    let mut x15: Word = 15
+    let mut x16: Word = 16
+    let mut x17: Word = 17
+    let mut x18: Word = 18
+    let mut x19: Word = 19
+    let mut x20: Word = 20
+    let mut x21: Word = 21
+    let mut x22: Word = 22
+    let mut x23: Word = 23
+    let mut x24: Word = 24
+    let mut x25: Word = 25
+    let mut x26: Word = 26
+    let mut x27: Word = 27
+    let mut x28: Word = 28
+    let mut x29: Word = 29
+    let mut x30: Word = 30
     say(x1 - (x2 - (x3 - (x4 - (x5 - (x6 - (x7 - (x8 - (x9 - (x10 - (x11 - (x12 - (x13 - (x14 - (x15 - (x16 - (x17 - (x18 - (x19 - (x20 - (x21 - (x22 - (x23 - (x24 - (x25 - (x26 - (x27 - (x28 - (x29 - (x30))))))))))))))))))))))))))))))
     say(twenty(inc(1), inc(inc(2)), inc(inc(inc(3))), 4, inc(5), inc(inc(6)), inc(inc(inc(7))), 8, inc(9), inc(inc(10)), inc(inc(inc(11))), 12, inc(13), inc(inc(14)), inc(inc(inc(15))), 16, inc(17), inc(inc(18)), inc(inc(inc(19))), 20))
     say(colors(rgb(1), rgb(2), rgb(3), 300, rgb(4), rgb(5), rgb(6), 600, rgb(7), rgb(8), rgb(9), 900, rgb(10), rgb(11), rgb(12), 1200, rgb(13), rgb(14), rgb(15), 1500, rgb(16), rgb(17), rgb(18), 1800, rgb(19), rgb(20)))

@@ -71,8 +71,8 @@ let putc(c: UByte): Void {
 | `clz(x)`, `ctz(x)`, `popcount(x)` | `CLZ`, `CTZ`, `POPCNT` | `UWord`; `x: Word` или `UWord` |
 | `bswap(x)` | `BSWAP` | тип `x`; `x: Word` или `UWord` |
 | `rotl(x, n)`, `rotr(x, n)` | `ROL`, `ROR` | тип `x`; `x: Word` или `UWord`, `n: UWord` |
-| `sizeof(T)` | — | `UWord`, константа |
-| `alignof(T)` | — | `UWord`, константа |
+| `sizeof(T)`, `sizeof(x)` | — | `UWord`, константа |
+| `alignof(T)`, `alignof(x)` | — | `UWord`, константа |
 | `offsetof(T, поле)` | — | `UWord`, константа |
 | `vaCount(args)` | загрузка длины пакета | `UWord`; вариативный параметр |
 | `vaArg(args, i, T)` | загрузка слова и нормализация | `T`; скалярный тип, `i: UWord`; [3.4](03-declarations.md#вариативные-параметры) |
@@ -125,9 +125,20 @@ let putc(c: UByte): Void {
 
 ### `sizeof`, `alignof`, `offsetof`
 
-- Аргумент — тип, а не выражение.
-- `offsetof(T, поле)` — только прямое поле структуры `T`.
-- `sizeof` у `Void` и `T[]` — ошибка.
+- Аргумент `sizeof` и `alignof` — тип или выражение, как в C. Выражение
+  не вычисляется: берётся только его тип. Имя переменной — значение, имя
+  типа — тип: `sizeof(bar)`, `sizeof(bar[0])`, `sizeof(*p)`, `sizeof(s.f)`.
+- Число элементов массива — как в C:
+
+  ```
+  let bar: StringPtr[] = ["one", "two"]
+  let barCount: UWord = sizeof(bar) / sizeof(bar[0])   // 2, константа
+  ```
+
+- `offsetof(T, поле)` — только тип и только прямое поле структуры `T`.
+- `sizeof` у `Void` и `T[]` — ошибка. У параметра `xs: T[]` тоже: это
+  указатель, длина массива неизвестна, её передают отдельно. Ошибка и у
+  значения без типа (`sizeof(1)`, `sizeof(null)`) и у пакета `args: ...`.
 
 Пример: [examples/cpu.m](../../examples/cpu.m),
 [examples/layout.m](../../examples/layout.m).

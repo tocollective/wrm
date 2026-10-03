@@ -15,8 +15,16 @@ obj_dir="$laix_dir/build/obj"
 mkdir -p "$obj_dir/font"
 python3 "$repo_dir/tools/asm.py" -c "$laix_dir/src/start.asm" -o "$obj_dir/start.o"
 set -- "$obj_dir/start.o"
-python3 "$repo_dir/tools/m.py" -c "${LAIX_MAIN:-$laix_dir/src/main.m}" -o "$obj_dir/main.o"
+main_source=${LAIX_MAIN:-$laix_dir/src/main.m}
+python3 "$repo_dir/tools/m.py" -c "$main_source" -o "$obj_dir/main.o"
 set -- "$@" "$obj_dir/main.o"
+# The MMU CPU probes share a test-only M module and its assembly companion.
+case "$(basename -- "$main_source")" in
+    mmu_remap.m|mmu_unmap.m|mmu_protect.m|asid_reuse.m)
+        python3 "$repo_dir/tools/m.py" -c "$laix_dir/tests/mmu_probe.m" -o "$obj_dir/mmu_probe.o"
+        set -- "$@" "$obj_dir/mmu_probe.o"
+        ;;
+esac
 for module in defs boot memory mmu trap_frame trap panic debug_uart console rnd font/font font/glyph_cache font/data; do
     python3 "$repo_dir/tools/m.py" -c "$laix_dir/src/$module.m" -o "$obj_dir/$module.o"
     set -- "$@" "$obj_dir/$module.o"

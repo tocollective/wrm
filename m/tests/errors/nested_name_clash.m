@@ -1,7 +1,7 @@
-// Error: the name of a nested function is a local of the function around,
-// and the functions it can see can't be shadowed
-// @error 10: 'x' is already declared at line 9; there is no shadowing
-// @error 12: parameter 'helper' has the name of the function at line 11; there is no shadowing
+// Error: the name of a nested function is a local of the function around:
+// it can't repeat a name of the same block. Shadowing it from a parameter
+// of another nested function is only a warning (warnings/shadow.m)
+// @error 10: 'x' is already declared at line 9 in the same block
 
 import { puts } from "../../examples/externs.m"
 

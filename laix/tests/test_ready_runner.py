@@ -16,7 +16,9 @@ def symbols():
                 trapFaultInstruction=0x12340, stackGuardFaultInstruction=0x12344,
                 nullCallReturn=0x12350, triggerTextWrite=0x12360,
                 textWriteInstruction=0x12368, dataExecTarget=0x7F004,
-                dataExecReturn=0x12380)
+                dataExecReturn=0x12380, rodataWriteTarget=0x15004,
+                rodataWriteInstruction=0x12390, mmuLoadInstruction=0x123A0,
+                mmuStoreInstruction=0x123A4)
 
 
 def panic_dump(guard=False):
@@ -49,6 +51,16 @@ def data_exec_dump(ra=0x12380):
     return fault_dump("data-exec-test", 8, 0x7F004, 0x7F004, ra)
 
 
+def mmu_dump(case):
+    stage, cause, pc, address = {
+        "mmu_unmap": ("mmu-unmap-test", 9, 0x123A0, 0x40000000),
+        "mmu_protect": ("mmu-protect-test", 10, 0x123A4, 0x40000000),
+        "asid_reuse": ("asid-reuse-test", 9, 0x123A0, 0x40001000),
+    }[case]
+    prefix = "ASID replacement mapping OK\n" if case == "asid_reuse" else ""
+    return prefix + fault_dump(stage, cause, pc, address).replace("ptbr=00095001", "ptbr=00095071")
+
+
 def stack_overflow_dump(sp=0x90FF0, scratch=0x90FF0, r30=0x90FF0, bottom=0x91000, full=True):
     early = ("\nLA/IX EARLY PANIC: invalid kernel stack\n"
              "cause=0000000A epc=00012400 badaddr=00090FF8\n"
@@ -64,6 +76,68 @@ def stack_overflow_dump(sp=0x90FF0, scratch=0x90FF0, r30=0x90FF0, bottom=0x91000
 
 
 class ReadyRunnerTests(unittest.TestCase):
+    def test_runtime_probe_sources_pass_checker_and_asm_syntax_without_emission(self):
+        from test_kernel import LAIX, check_m, parse_asm
+        for name in ("mmu_remap", "mmu_unmap", "mmu_protect", "asid_reuse",
+                     "text_write", "rodata_write", "data_exec"):
+            with self.subTest(source=name):
+                check_m(LAIX / "tests" / (name + ".m"))
+        for name in ("mmu_probe", "text_write", "rodata_write", "data_exec"):
+            with self.subTest(assembly=name):
+                parse_asm(LAIX / "tests" / (name + ".asm"))
+
+    def test_mmu_faults_require_exact_access_and_active_asid(self):
+        for case in ("mmu_unmap", "mmu_protect", "asid_reuse"):
+            output = mmu_dump(case)
+            with self.subTest(case=case):
+                check_output(case, symbols(), output, 254)
+                for old, new in (("cause=00000009", "cause=0000000A"),
+                                 ("cause=0000000A", "cause=00000009"),
+                                 ("badaddr=40000000", "badaddr=40001000"),
+                                 ("badaddr=40001000", "badaddr=40000000"),
+                                 ("epc=000123A0", "epc=000123A4"),
+                                 ("epc=000123A4", "epc=000123A0"),
+                                 ("ptbr=00095071", "ptbr=00095081"),
+                                 ("r28=00000000", "")):
+                    if old in output:
+                        with self.assertRaises(ValueError):
+                            check_output(case, symbols(), output.replace(old, new), 254)
+                for bad_output, code in ((output, 0), ("", 0),
+                                         ("LA/IX PANIC: MMU CPU probe failed", 254)):
+                    with self.assertRaises(ValueError):
+                        check_output(case, symbols(), bad_output, code)
+        with self.assertRaisesRegex(ValueError, "replacement mapping"):
+            check_output("asid_reuse", symbols(),
+                         mmu_dump("asid_reuse").replace("ASID replacement mapping OK", ""), 254)
+
+    def test_remap_requires_boot_and_success_marker_without_panic(self):
+        output = ("MMU enabled, kernel stack guard active, kernel W^X\n"
+                  "TrapFrame and syscall self-tests passed\nMMU remap runtime OK\n")
+        check_output("mmu_remap", symbols(), output, 0)
+        for bad_output, code in (("", 0), (output, 254), (output + "PANIC", 0),
+                                 (output.replace("MMU remap runtime OK", "trap runtime OK"), 0)):
+            with self.assertRaises(ValueError):
+                check_output("mmu_remap", symbols(), bad_output, code)
+
+    def test_rodata_fault_and_wx_section_boundaries(self):
+        output = fault_dump("rodata-write-test", 10, 0x12390, 0x15004)
+        check_output("rodata_write", symbols(), output, 254)
+        for old, new in (("cause=0000000A", "cause=00000009"),
+                         ("badaddr=00015004", "badaddr=00015008"),
+                         ("epc=00012390", "epc=00012394")):
+            with self.assertRaises(ValueError):
+                check_output("rodata_write", symbols(), output.replace(old, new), 254)
+        for case, dump, name, address in (
+                ("rodata_write", output, "rodataWriteTarget", 0x7F004),
+                ("text_write", text_write_dump(), "triggerTextWrite", 0x15004),
+                ("data_exec", data_exec_dump(), "dataExecTarget", 0x15004)):
+            wrong = symbols()
+            original = wrong[name]
+            wrong[name] = address
+            dump = dump.replace(f"{original:08X}", f"{address:08X}")
+            with self.assertRaisesRegex(ValueError, "expected kernel section"):
+                check_output(case, wrong, dump, 254)
+
     def test_map_reader_ignores_duplicate_object_local_symbols(self):
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "kernel.map"

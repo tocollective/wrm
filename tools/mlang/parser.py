@@ -256,7 +256,7 @@ class Parser:
 		if self.at("="):
 			raise ParseError(self.tok, f"the type of '{name}' must be written: 'let {name}: T = ...'")
 		self.expect(":", "':' and a type")
-		typ = self.type()
+		typ = self.type(slice_ok=True)     # 'T[]': the length comes from the literal (3.2)
 		init = None
 		if self.accept("="):
 			init = self.expr()
@@ -351,7 +351,8 @@ class Parser:
 			loc = self.next().loc
 			if self.accept("]"):
 				if not slice_ok:
-					self.error(loc, "'T[]' is only for parameter types; elsewhere write '*T' or 'T[N]'")
+					self.error(loc, "'T[]' is only for parameter types and 'let' with an array literal; "
+									"elsewhere write '*T' or 'T[N]'")
 				return SliceType(loc, typ, False)
 			size = self.with_struct(self.expr)
 			self.expect("]")
@@ -374,6 +375,7 @@ class Parser:
 			self.next()
 			typ = self.type()
 			self.expect(")")
+			typ.grouped = True      # for sizeof: '(*p)[0]' isn't '*p[0]' (Checker.type_as_expr)
 			return typ
 		if tok.kind == "id":
 			self.next()
@@ -706,7 +708,7 @@ class Parser:
 			return VaArg(tok.loc, pack, index, target)
 		if tok.value in ("sizeof", "alignof", "offsetof"):
 			self.next()
-			typ = self.with_struct(self.type)
+			typ = self.with_struct(self.type if tok.value == "offsetof" else self.query_arg)
 			field = None
 			if tok.value == "offsetof":
 				self.expect(",")
@@ -716,6 +718,21 @@ class Parser:
 			self.expect(")")
 			return TypeQuery(tok.loc, tok.value, typ, field)
 		return BuiltinCall(tok.loc, tok.value, self.args())
+
+	def query_arg(self):
+		"""The argument of sizeof and alignof: a type or a value (7.2). What
+		reads as a type ('bar', 'bar[0]', '*p') stays one, and the checker
+		makes it an expression if the name is a variable; the rest ('s.f',
+		'f()', 'a + b') is an expression."""
+		start, last = self.i, self.last
+		try:
+			typ = self.type(slice_ok=True)
+			if self.at(")"):
+				return typ
+		except ParseError:
+			pass
+		self.i, self.last = start, last
+		return self.expr()
 
 	def func_lit(self):
 		"""(params): R { body }, the same rule as a function type (9)."""

@@ -9,8 +9,9 @@ class Sym:
 	"""A named thing: kind 'var', 'func', 'type' or 'import'.
 
 	var: storage is 'global', 'local', 'param' or 'for'; const is the
-	value of a global 'let' when it's a scalar constant. func: storage is
-	'nested' for a function in a function or a function literal (3.8)."""
+	value of a 'let' (global or local) when it's a scalar constant. func:
+	storage is 'nested' for a function in a function or a function literal
+	(3.8)."""
 
 	def __init__(self, kind, name, decl, module):
 		self.kind = kind
@@ -209,17 +210,24 @@ class Checker:
 				na.sym.target = target
 
 	def lookup(self, name, loc, report=True):
+		hidden = None   # a local of a function around this one: not visible (3.8)
 		for i in range(len(self.scopes) - 1, -1, -1):
 			sym = self.scopes[i].get(name)
 			if sym is None:
 				continue
-			if i < self.base and sym.kind == "var" and report:
-				# a local of a function around this one: no capture (3.8)
-				self.error(loc, f"'{name}' is a local of {sym.owner}: a nested function can't capture it")
+			if i < self.base and sym.kind == "var":
+				hidden = hidden or sym
+				continue    # what it shadows is visible
 			if sym is not self.current:
 				sym.used = True
 			return sym
 		sym = self.module.scope.get(name)
+		if sym is None and hidden is not None:
+			if report:
+				self.error(loc, f"'{name}' is a local of {hidden.owner}: a nested function "
+								f"can't capture it")
+			hidden.used = True
+			return hidden
 		if sym is None:
 			if report:
 				self.error(loc, f"'{name}' is not declared" + self.enum_hint(name))
@@ -279,6 +287,21 @@ class Checker:
 			params = self.param_types(t.params)
 			return FuncT(params, self.resolve_type(t.result, void_ok=True))
 		raise AssertionError(t)
+
+	def var_type(self, d):
+		"""The type of a variable: 'T[]' is 'T[N]' with N the number of
+		elements of its array literal (3.2)."""
+		if not isinstance(d.type, SliceType):
+			return self.resolve_type(d.type)
+		elem = self.resolve_type(d.type.elem)
+		if not isinstance(d.init, ArrayLit):
+			self.error(d.type.loc, "the length of 'T[]' comes from an array literal: "
+								   "write '= [...]' or give the length, 'T[N]'")
+			return ERROR
+		if not d.init.elems:
+			self.error(d.init.loc, "an array needs at least one element")
+			return ERROR
+		return ERROR if elem is ERROR else ArrT(elem, len(d.init.elems))
 
 	def type_of(self, sym):
 		"""The type a type symbol names; aliases are resolved here."""
@@ -405,7 +428,7 @@ class Checker:
 		sym.state = "busy"
 		d = sym.decl
 		saved = self.enter(sym.module, sym)
-		sym.type = self.resolve_type(d.type)
+		sym.type = self.var_type(d)
 		if d.init is not None:
 			self.check_value(d.init, sym.type)
 			if self.check_static(d.init) and not d.mut and d.init.type.kind in \
@@ -487,6 +510,7 @@ class Checker:
 		"""The value of a constant integer expression, or None after an
 		error."""
 		t = self.expr(e, want)
+		self.uses(e)    # a local 'let' constant is read here, too
 		if t is ERROR:
 			return None
 		if t is UNTYPED and want is not None:
@@ -576,11 +600,7 @@ class Checker:
 			return      # a second parameter of that name, already reported
 		old = self.visible_local(name)
 		if old is not None:
-			self.error(loc, f"parameter '{name}' has the name of the function at line "
-							f"{old.decl.loc.line}; there is no shadowing")
-		elif name in self.module.scope:
-			self.error(loc, f"parameter '{name}' has the name of a top-level declaration "
-							f"of this file; there is no shadowing")
+			self.warning(loc, f"parameter '{name}' shadows {self.what(old)} at line {old.decl.loc.line}")
 		self.scopes[-1][name] = var
 
 	def visible_local(self, name):
@@ -594,19 +614,34 @@ class Checker:
 		return None
 
 	def declare_local(self, var, loc):
+		"""Declares a local in the current block. It may shadow a local of a
+		block around, a parameter or a top-level name, but not a name of the
+		same block; the parameters and the body of a function are one block,
+		as in C (3.7)."""
 		name = var.name
-		old = self.visible_local(name)
+		top = len(self.scopes) == self.base + 2     # the body itself, after the parameters
+		old = self.scopes[-1].get(name)
 		if old is not None:
-			if old.storage == "param":
-				self.error(loc, f"'{name}' is a parameter; there is no shadowing")
-			else:
-				self.error(loc, f"'{name}' is already declared at line {old.decl.loc.line}; "
-								f"there is no shadowing")
-		elif name in self.module.scope:
-			self.error(loc, f"'{name}' is a top-level name of this file; there is no shadowing")
+			self.error(loc, f"'{name}' is already declared at line {old.decl.loc.line} "
+							f"in the same block")
+		elif top and name in self.scopes[self.base]:
+			self.error(loc, f"'{name}' is a parameter; a local of that name can only be "
+							f"in an inner block")
+		else:
+			old = self.visible_local(name)
+			if old is not None:
+				self.warning(loc, f"'{name}' shadows {self.what(old)} at line {old.decl.loc.line}")
 		var.owner = self.func.title
 		self.scopes[-1][name] = var
 		self.func.decl.locals.append(var)
+
+	@staticmethod
+	def what(sym):
+		"""A shadowed local, for messages."""
+		if sym.kind == "func":
+			return f"the function '{sym.name}'"
+		return {"param": "the parameter", "for": "the loop variable"}.get(sym.storage, "the local") \
+			+ f" '{sym.name}'"
 
 	def nested_label(self, last):
 		"""The label of a nested function without the module: the names of
@@ -680,7 +715,7 @@ class Checker:
 	def st_VarDecl(self, s):
 		var = Sym("var", s.name, s, self.module)
 		var.storage, var.mut = "local", s.mut
-		var.type = self.resolve_type(s.type)
+		var.type = self.var_type(s)
 		s.var = var
 		if getattr(s, "func_form", False):
 			# 'let mut f()': declared first, so its body sees 'f' and is told
@@ -691,6 +726,9 @@ class Checker:
 		if s.init is not None:
 			self.check_value(s.init, var.type)
 			self.uses(s.init)
+			if not s.mut and var.type.kind in ("int", "bool", "float", "enum", "ptr") and \
+					s.init.const is not None:
+				var.const = s.init.const    # never changes: a constant, like a global 'let' (4.2)
 		else:
 			var.uninit = True
 		self.declare_local(var, s.loc)
@@ -814,6 +852,7 @@ class Checker:
 			if t is ERROR:
 				continue
 			self.check_value(case.value, t)
+			self.uses(case.value)
 			if case.value.type is ERROR:
 				continue
 			if case.value.const is None:
@@ -1063,8 +1102,8 @@ class Checker:
 		if sym.kind == "var":
 			if sym.storage == "global":
 				self.global_var(sym)
-				if sym.const is not None:
-					e.const = sym.const
+			if sym.const is not None:
+				e.const = sym.const
 			return sym.type or ERROR
 		if sym.kind == "func":
 			return self.func_type(sym)
@@ -1513,7 +1552,7 @@ class Checker:
 		return want
 
 	def ex_TypeQuery(self, e, want):
-		t = self.resolve_type(e.type)
+		t = self.query_type(e)
 		if t is ERROR:
 			return ERROR
 		size, align = self.size_align(t)
@@ -1531,6 +1570,77 @@ class Checker:
 				return ERROR
 			e.const = f.offset
 		return UWORD
+
+	def query_type(self, e):
+		"""The type sizeof or alignof measures: a type, or the type of a
+		value, which isn't computed (7.2)."""
+		arg = e.type
+		if e.op != "offsetof" and isinstance(arg, (TypeName, PointerType, ArrayType)):
+			arg = self.type_as_expr(arg) or arg
+		if isinstance(arg, SliceType):
+			self.error(arg.loc, f"'{e.op}' of 'T[]': it is a pointer, and the length "
+								f"of what it points to isn't known")
+			return ERROR
+		if not isinstance(arg, (TypeName, PointerType, ArrayType, FuncType)):
+			t = self.expr(arg)
+			self.uses(arg, "addr")      # mentioned, not read
+			if t is ERROR:
+				return ERROR
+			if isinstance(arg, Name) and arg.sym is not None and arg.sym.storage == "param" \
+					and isinstance(arg.sym.decl.type, SliceType):
+				self.error(arg.loc, f"'{e.op}' of '{arg.name}': a 'T[]' parameter is a pointer, "
+									f"and the length of the array isn't known; pass it separately")
+				return ERROR
+			what = {"untyped": "an integer literal without a type", "null": "'null'",
+					"void": "'Void'", "varargs": "an argument pack"}.get(t.kind)
+			if what is not None:
+				self.error(arg.loc, f"'{e.op}' needs a type or a value of a known type, "
+									f"and '{show(arg)}' is {what}")
+				return ERROR
+			return t
+		return self.resolve_type(arg)
+
+	def type_as_expr(self, t):
+		"""'bar', 'bar[0]', '*p' in sizeof parse as types; if the name is a
+		variable or a function, they are that expression. None if t is a
+		type."""
+		root = t
+		while isinstance(root, (ArrayType, PointerType)):
+			if isinstance(root, PointerType) and (root.mut or root.volatile):
+				return None
+			root = root.elem if isinstance(root, ArrayType) else root.target
+		if not isinstance(root, TypeName) or root.name in SCALARS:
+			return None
+		sym = self.lookup(root.name, root.loc, report=False)
+		if sym is None or sym.kind not in ("var", "func"):
+			return None
+		return self.to_expr(t)
+
+	def to_expr(self, t):
+		"""A type tree of names, '*' and '[i]' read as an expression. In a
+		type '[N]' applies to everything on its left, in an expression '*'
+		applies to everything on its right: '*p[0]' is '*(p[0])'."""
+		indices = []                # the outermost first
+		base = t
+		while isinstance(base, ArrayType):
+			indices.append(base)
+			base = base.elem
+			if getattr(base, "grouped", False):
+				break
+		if indices and isinstance(base, PointerType) and not getattr(base, "grouped", False):
+			inner = base.target
+			for a in reversed(indices):
+				inner = ArrayType(a.loc, inner, a.size)
+			return Unary(base.loc, "*", self.to_expr(inner))
+		if isinstance(base, TypeName):
+			x = Name(base.loc, base.name)
+		elif isinstance(base, PointerType):
+			x = Unary(base.loc, "*", self.to_expr(base.target))
+		else:
+			x = self.to_expr(base)  # in parentheses: a whole
+		for a in reversed(indices):
+			x = Index(a.loc, x, a.size)
+		return x
 
 	def ex_BuiltinCall(self, e, want):
 		name, args = e.name, e.args

@@ -30,6 +30,12 @@ V, R, W, X = 1, 2, 4, 8
 SYNTHETIC_ARRAYS = 0x0A000000
 
 
+def reserved_end(ram, bss_end=0x98404):
+    """Image/BSS plus four installed-RAM word records, rounded to pages."""
+    metadata_start = (bss_end + 4095) & ~4095
+    return (metadata_start + (ram // 4096) * 16 + 4095) & ~4095
+
+
 def kernel_permissions(address, guard):
     """Expected W^X identity-map permissions of a RAM page, 0 if unmapped."""
     if address < 0x1000 or 0x2000 <= address < 0x10000 or address == guard:
@@ -47,6 +53,7 @@ class BootstrapM:
     binary = {
         "+": operator.add, "-": operator.sub, "*": operator.mul,
         "/": operator.floordiv, "&": operator.and_, "|": operator.or_,
+        "%": operator.mod, "<<": lambda a, b: a << (b & 31),
         "==": operator.eq, "!=": operator.ne, "<": operator.lt,
         "<=": operator.le, ">": operator.gt, ">=": operator.ge,
     }
@@ -55,22 +62,22 @@ class BootstrapM:
         modules = check_m(root or LAIX / "src/mmu.m")
         self.decls = {d.name: d for m in modules for d in m.decls
                       if isinstance(d, (s.VarDecl, s.FuncDecl))}
-        self.addresses = {"kernelStackGuard": guard, "__bss_end": bss_end,
-                          "kernelLowTable": bss_end - 0x4404,
-                          "kernelPageDirectory": bss_end - 0x3404,
-                          "kernelTailTable": bss_end - 0x1404}
+        self.addresses = {"kernelStackGuard": guard, "__bss_end": bss_end}
         self.addresses.update(SECTIONS)
         self.globals, self.memory, self.events = {}, {}, []
         self.ptbr = 0
+        self.controls = {0: 0}
+        array_address = SYNTHETIC_ARRAYS
         for name, decl in self.decls.items():
             if not isinstance(decl, s.VarDecl) or decl.extern:
                 continue
             if isinstance(decl.type, s.ArrayType):
                 # Arrays of modules a test doesn't place get their own pages.
                 if name not in self.addresses:
-                    self.addresses[name] = SYNTHETIC_ARRAYS + 0x1000 * len(self.addresses)
+                    self.addresses[name] = array_address
+                    array_address += (size_of(decl.sym.type) + 4095) & ~4095
                 self.globals[name] = self.addresses[name]
-                for i in range(1024):
+                for i in range(size_of(decl.sym.type) // 4):
                     self.memory[self.addresses[name] + 4 * i] = 0
             else:
                 self.globals[name] = decl.sym.const if decl.sym.const is not None else 0
@@ -85,6 +92,8 @@ class BootstrapM:
     def expr(self, node, local):
         if isinstance(node, (s.IntLit, s.BoolLit)):
             return node.value
+        if isinstance(node, s.NullLit):
+            return 0
         if isinstance(node, s.Name):
             return local[node.name] if node.name in local else self.globals[node.name]
         if isinstance(node, s.Index):
@@ -111,9 +120,14 @@ class BootstrapM:
         if isinstance(node, s.BuiltinCall):
             args = [self.expr(a, local) for a in node.args]
             if node.name == "mfcr":
+                if args == [0]:
+                    return self.controls[0]
                 assert args == [6]
                 return self.ptbr
             assert node.name in ("mtcr", "fence", "tlbi")
+            if node.name == "mtcr" and args[0] == 0:
+                self.controls[0] = args[1]
+                return None
             self.events.append((node.name, args))
             if node.name == "mtcr":
                 assert args[0] == 6
@@ -128,8 +142,9 @@ class BootstrapM:
         elif isinstance(node, s.VarDecl):
             local[node.name] = self.expr(node.init, local)
         elif isinstance(node, s.Assign):
-            assert node.op == "="
             value = self.expr(node.value, local)
+            if node.op != "=":
+                value = self.binary[node.op[:-1]](self.expr(node.target, local), value) & 0xFFFFFFFF
             if isinstance(node.target, s.Index):
                 self.memory[self.address(node.target, local)] = value
             else:
@@ -190,31 +205,27 @@ class BootstrapMemoryTests(unittest.TestCase):
                          [(".space", ["KERNEL_STACK_BYTES"])])
         self.assertEqual(constants["PAGE_SIZE"], 4096)
         self.assertEqual(constants["KERNEL_STACK_BYTES"], 8192)
-        module = check_m(LAIX / "src/mmu.m")[0]
-        for name in ("kernelPageDirectory", "kernelLowTable", "kernelTailTable"):
-            self.assertEqual(module.scope[name].decl.align.const, 4096)
-            self.assertEqual(size_of(module.scope[name].type), 4096)
 
     def test_free_pages_exclude_boot_image_bss_stack_and_guard(self):
         vm = BootstrapM()
         self.assertFalse(vm.call("physicalPageAvailable", 0x100000))
         self.assertTrue(vm.call("memoryInit", 0x200123))
-        self.assertEqual(vm.globals["kernelReservedEnd"], 0x99000)
+        self.assertEqual(vm.globals["kernelReservedEnd"], reserved_end(0x200123))
         self.assertEqual(vm.globals["kernelRamEnd"], 0x200000)
         for address in range(0, 0x201000, 4096):
             self.assertEqual(vm.call("physicalPageAvailable", address),
-                             0x99000 <= address < 0x200000, hex(address))
+                             reserved_end(0x200123) <= address < 0x200000, hex(address))
         for address in (0x99001, 0x200001, 0xFFFFFFFF):
             self.assertFalse(vm.call("physicalPageAvailable", address))
 
     def test_invalid_ram_and_no_free_pages(self):
-        for ram in (0, 0x98000, 0x98404, 0x08000001, 0xFFFFFFFF):
+        for ram in (0, 0x98000, 0x98404, 0x99000, 0x08000001, 0xFFFFFFFF):
             vm = BootstrapM()
             self.assertFalse(vm.call("memoryInit", ram), hex(ram))
             self.assertFalse(vm.call("physicalPageAvailable", 0x99000))
         vm = BootstrapM()
-        self.assertTrue(vm.call("memoryInit", 0x99000))
-        self.assertFalse(vm.call("physicalPageAvailable", 0x99000))
+        self.assertTrue(vm.call("memoryInit", 0x9A000))
+        self.assertFalse(vm.call("physicalPageAvailable", 0x9A000))
 
     def test_identity_map_is_wx_without_null_guard_or_ram_tail_mapping(self):
         # A guard near the end of the kernel superpage, a RAM tail in its own
@@ -224,9 +235,17 @@ class BootstrapMemoryTests(unittest.TestCase):
             with self.subTest(guard=hex(guard), ram=hex(ram)):
                 vm = BootstrapM(guard, guard + 0x8404)
                 self.assertTrue(vm.call("memoryInit", ram))
+                vm.events.clear()
                 self.assertTrue(vm.call("mmuInit"))
-                self.assertEqual(vm.events, [("fence", []), ("tlbi", [0, 2]),
-                    ("mtcr", [6, vm.addresses["kernelPageDirectory"] | 1])])
+                root = vm.globals["kernelPageDirectory"]
+                self.assertEqual(root & 4095, 0)
+                self.assertTrue(vm.call("physicalPageOwned", root, 0xFFFFFFFF, 3))
+                for slot in range(1024):
+                    entry = vm.memory[root + 4 * slot]
+                    if entry & V and not entry & (R | W | X):
+                        self.assertTrue(vm.call("physicalPageOwned", entry & ~4095, 0xFFFFFFFF, 4))
+                self.assertEqual([e for e in vm.events if e[0] != "fence"],
+                    [("tlbi", [0, 2]), ("mtcr", [6, root | 1])])
                 for address in range(0, ram & ~4095, 4096):
                     entry = vm.leaf(address)
                     expected = kernel_permissions(address, guard)
@@ -253,11 +272,13 @@ class BootstrapMemoryTests(unittest.TestCase):
                 vm = BootstrapM()
                 vm.addresses[name] = value
                 self.assertTrue(vm.call("memoryInit", 0x800000))
+                vm.events.clear()
                 self.assertFalse(vm.call("mmuInit"))
-                self.assertEqual(vm.events, [])
+                self.assertFalse([e for e in vm.events if e[0] != "fence"])
         # The whole kernel must fit in the page-mapped first superpage.
         vm = BootstrapM(0x3FF000, 0x3FF000 + 0x8404)
         self.assertTrue(vm.call("memoryInit", 0x800000))
+        vm.events.clear()
         self.assertFalse(vm.call("mmuInit"))
 
     def test_mmu_rejects_missing_accounting_and_invalid_guard(self):
@@ -266,8 +287,9 @@ class BootstrapMemoryTests(unittest.TestCase):
         for guard in (0x90001, 0x200000):
             vm = BootstrapM(guard)
             self.assertTrue(vm.call("memoryInit", 0x200000))
+            vm.events.clear()
             self.assertFalse(vm.call("mmuInit"))
-            self.assertEqual(vm.events, [])
+            self.assertFalse([e for e in vm.events if e[0] != "fence"])
 
     def test_task_directories_keep_entry_state_code_and_stacks_supervisor(self):
         vm = BootstrapM()
@@ -275,9 +297,10 @@ class BootstrapMemoryTests(unittest.TestCase):
         self.assertTrue(vm.call("mmuInit"))
         active = vm.ptbr
         constants = asm_constants(parse_asm(LAIX / "src/defs.inc"))
-        for directory in (0x100000, 0x101000):
+        for owner in (1, 2):
+            directory = vm.call("allocPage", owner, vm.globals["PAGE_DIRECTORY"])
             vm.memory[directory] = 0xDEADBEEF
-            self.assertTrue(vm.call("mmuInitAddressSpace", directory))
+            self.assertTrue(vm.call("mmuInitAddressSpace", directory, owner))
             for address in range(0, 0x800000, 4096):
                 entry = vm.leaf(address, directory)
                 self.assertEqual(entry, vm.leaf(address))
@@ -291,14 +314,14 @@ class BootstrapMemoryTests(unittest.TestCase):
         self.assertEqual(vm.ptbr, active)
         for directory in (0, 0x90000, active & ~4095, 0x100001, 0x800000):
             before = dict(vm.memory)
-            self.assertFalse(vm.call("mmuInitAddressSpace", directory))
+            self.assertFalse(vm.call("mmuInitAddressSpace", directory, 1))
             self.assertEqual(vm.memory, before)
         vm.ptbr = 0x100000 | 1
         before = dict(vm.memory)
-        self.assertFalse(vm.call("mmuInitAddressSpace", 0x100000))
+        self.assertFalse(vm.call("mmuInitAddressSpace", 0x100000, 1))
         self.assertEqual(vm.memory, before)
         vm.ptbr = 0
-        self.assertFalse(vm.call("mmuInitAddressSpace", 0x102000))
+        self.assertFalse(vm.call("mmuInitAddressSpace", 0x102000, 1))
 
 
 if __name__ == "__main__":

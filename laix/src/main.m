@@ -13,8 +13,6 @@ let main(argc: UWord, argv: *UByte[]): Word {
     setPanicStage("running")
     print("LA/IX\n")
 
-    // 
-
     hlt()
     return 0
 }

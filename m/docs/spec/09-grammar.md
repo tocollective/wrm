@@ -62,7 +62,8 @@ param_type  = [ "mut" ] type "[" "]"      (* только в параметре 
 ## Объявления
 
 ```ebnf
-var_decl    = "let" [ "mut" ] identifier ":" type [ "=" expr ] ;
+var_decl    = "let" [ "mut" ] identifier ":" ( type | type "[" "]" ) [ "=" expr ] ;
+              (* T[] — длина из литерала массива в "=" (3.2) *)
 func_decl   = "let" [ "mut" ] identifier "(" [ param { "," param } [ "," ] ] ")"
               ":" type block ;
               (* после 'let [mut] identifier': ':' — переменная,
@@ -169,7 +170,8 @@ struct_lit  = "{" [ field_init { "," field_init } [ "," ] ] "}" ;
 field_init  = "." identifier "=" expr ;
 array_lit   = "[" [ expr { "," expr } [ "," ] ] "]" ;
 
-builtin_call = ( "sizeof" | "alignof" ) "(" type ")"
+builtin_call = ( "sizeof" | "alignof" ) "(" ( type | expr ) ")"
+              (* имя переменной — значение, имя типа — тип (7.2) *)
              | "offsetof" "(" type "," identifier ")"
              | "vaArg" "(" expr "," expr "," type ")"
              | builtin_name call_suffix ;

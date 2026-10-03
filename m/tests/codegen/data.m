@@ -137,7 +137,7 @@ let values(): Void {
     shapes[1].origin.y = 100
     let sp: *mut Shape = &mut shapes[1]
     say(sp.origin.y)
-    let i: UWord = 1
+    let mut i: UWord = 1     // not a constant: the index is computed
     say(shapes[i].color.b as Word - 3)
     nl()
 }

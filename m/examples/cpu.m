@@ -66,7 +66,7 @@ let readCycles(): Cycles {
 }
 
 // Compile error: the register number must be a constant
-//     let n: UWord = 4
+//     let mut n: UWord = 4             // not a constant: it can change
 //     let x: UWord = mfcr(n)
 
 let write(fd: Word, buf: *UByte, len: UWord): Word {

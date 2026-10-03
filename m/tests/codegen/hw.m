@@ -1,5 +1,6 @@
 // Hardware and the rest: Float, packed structs, volatile copies, atomics,
-// control registers, asm, syscall (with the handler in hw.asm).
+// control registers, asm, syscall (with the handler in hw.asm). The Float
+// variables are 'let mut', so the arithmetic runs on the machine.
 // @output "float 2500 -2 7 2147483647 -2147483648 1 1 0 3 255 0 255 -128 0 1\n"
 // @output "packed 7 305419896 4660 2 7 | 12 4 | 9 3\n"
 // @output "volatile 1 2 3\n"
@@ -13,28 +14,28 @@ import { putd, say, sayu, nl } from "lib/print.m"
 
 let floats(): Void {
     puts("float")
-    let a: Float = 1.5
-    let b: Float = 3.5
-    let avg: Float = (a + b) / 2.0
+    let mut a: Float = 1.5
+    let mut b: Float = 3.5
+    let mut avg: Float = (a + b) / 2.0
     say((avg * 1000.0) as Word)
-    let h: Float = -2.75
+    let mut h: Float = -2.75
     say(h as Word)
-    let n: Word = 7
+    let mut n: Word = 7
     say((n as Float) as Word)
-    let big: Float = 3000000000.0
+    let mut big: Float = 3000000000.0
     say(big as Word)
     say(-big as Word)
-    let zero: Float = 0.0
-    let one: Float = 1.0
-    let inf: Float = one / zero
-    let nan: Float = zero / zero
+    let mut zero: Float = 0.0
+    let mut one: Float = 1.0
+    let mut inf: Float = one / zero
+    let mut nan: Float = zero / zero
     say((inf > big) as Word)
     say((nan != nan) as Word)
     say((nan == nan) as Word)
-    let u: UWord = 3
+    let mut u: UWord = 3
     say((u as Float) as Word)
     // Float to a narrow integer saturates to its range; NaN is the maximum
-    let f300: Float = 300.0
+    let mut f300: Float = 300.0
     say((f300 as UByte) as Word)
     say((-f300 as UByte) as Word)
     say((nan as UByte) as Word)

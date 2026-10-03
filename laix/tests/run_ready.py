@@ -23,8 +23,13 @@ FAULTS = {
     # Kernel W^X: .text is not writable, .data is not executable.
     "text_write": ("text-write-test", 10, "triggerTextWrite", "textWriteInstruction", None),
     "data_exec": ("data-exec-test", 8, "dataExecTarget", "dataExecTarget", "dataExecReturn"),
+    "rodata_write": ("rodata-write-test", 10, "rodataWriteTarget", "rodataWriteInstruction", None),
+    "mmu_unmap": ("mmu-unmap-test", 9, 0x40000000, "mmuLoadInstruction", None),
+    "mmu_protect": ("mmu-protect-test", 10, 0x40000000, "mmuStoreInstruction", None),
+    "asid_reuse": ("asid-reuse-test", 9, 0x40001000, "mmuLoadInstruction", None),
 }
-CASES = {"trap", "stack_overflow"} | FAULTS.keys()
+SUCCESS = {"trap": "trap runtime OK", "mmu_remap": "MMU remap runtime OK"}
+CASES = SUCCESS.keys() | {"stack_overflow"} | FAULTS.keys()
 MAP_SYMBOLS = set(LAYOUT_SYMBOLS) | {"main", "kernelInit", "bootInfoAddress", "kernelBootInfo",
                                   "panic", "panic__panicStage", "trapDispatch", "trap__expectedTrap",
                                   "trapBadStack", "trapEmergencyFrame", "trapEmergencyStack",
@@ -80,11 +85,11 @@ def field(output, name):
 def check_output(case, symbols, output, exit_code):
     if case not in CASES:
         raise ValueError(f"unknown case: {case}")
-    if case == "trap":
+    if case in SUCCESS:
         if exit_code != 0 or "PANIC" in output:
-            raise ValueError(f"trap test failed, exit={exit_code}")
+            raise ValueError(f"{case} test failed, exit={exit_code}")
         for marker in ("MMU enabled, kernel stack guard active, kernel W^X",
-                       "TrapFrame and syscall self-tests passed", "trap runtime OK"):
+                       "TrapFrame and syscall self-tests passed", SUCCESS[case]):
             if marker not in output:
                 raise ValueError(f"missing UART success marker: {marker}")
         return
@@ -96,11 +101,18 @@ def check_output(case, symbols, output, exit_code):
     if "origin=supervisor" not in output:
         raise ValueError("fault origin is not supervisor")
     stage, *expected = FAULTS[case]
+    if case == "asid_reuse" and "ASID replacement mapping OK" not in output:
+        raise ValueError("ASID reuse did not verify the replacement mapping")
     for value in expected:
         if isinstance(value, str) and value not in symbols:
             raise ValueError(f"map lacks {value}")
     cause, badaddr, epc, ra = (symbols[value] if isinstance(value, str) else value
                                for value in expected)
+    section = {"text_write": ("__start_text", "__stop_text"),
+               "rodata_write": ("__start_rodata", "__stop_rodata"),
+               "data_exec": ("__start_data", "__bss_start")}.get(case)
+    if section and not symbols[section[0]] <= badaddr < symbols[section[1]]:
+        raise ValueError(f"{case} target lies outside its expected kernel section")
     if f"stage={stage} " not in output:
         raise ValueError(f"wrong panic stage, expected {stage}")
     for name, expected in (("cause", cause), ("badaddr", badaddr), ("epc", epc), ("r31", ra)):
@@ -110,6 +122,8 @@ def check_output(case, symbols, output, exit_code):
         if actual != expected:
             raise ValueError(f"{name}: got {actual:08X}, expected {expected:08X}")
     check_full_dump(output)
+    if case in ("mmu_unmap", "mmu_protect", "asid_reuse") and field(output, "ptbr") >> 4 & 255 != 7:
+        raise ValueError("MMU probe fault occurred outside ASID 7")
 
 
 def check_full_dump(output):
@@ -185,7 +199,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--case", nargs=3, action="append", required=True,
                         metavar=("NAME", "IMAGE", "MAP"),
-                        help="trap, stack_overflow or a fault case (" + ", ".join(sorted(FAULTS)) + "); repeat for multiple images")
+                        help="case name (" + ", ".join(sorted(CASES)) + "); repeat for multiple images")
     parser.add_argument("--emulator", type=Path, default=ROOT / "bin/wrm081632")
     parser.add_argument("--rom", type=Path, default=ROOT / "bin/firmware.rom")
     parser.add_argument("--timeout", type=float, default=20)
