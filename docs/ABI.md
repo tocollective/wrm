@@ -248,6 +248,47 @@ write:  li r9, SYS_WRITE
         ret
 ```
 
+### LA/IX system calls
+
+The first LA/IX user ABI fixes these numbers. Dispatch reads the saved
+`r9`; argument words come from saved `r1`–`r6`. Unused arguments are
+ignored. These calls never read a user pointer or the user stack.
+
+No buffer syscall is assigned yet. The internal LA/IX helpers
+`copyFromUser` / `copyToUser` return 0 or -14 (`-EFAULT`) after checking
+the complete byte range, every page's user/access permissions and ownership,
+and the supervisor physical aliases under one memory lock. Invalid user
+buffers cause no partial destination writes. Zero-length copies do not access
+either buffer; the address-space identity must still be valid. Kernel buffers
+are trusted and must not overlap user frames or MMU metadata. See the
+[user-buffer contract](../laix/docs/03_USER_TASK_SYSCALLS.md#пользовательские-указатели-и-ошибки).
+
+| Number (`r9`) | Call | Arguments | Result (`r1`) / errors |
+|---|---|---|---|
+| 0 | `debugPutChar(code)` | `r1`: unsigned byte value, 0…255 | 0 on UART write; -22 (`-EINVAL`) for any other value, with no write |
+| 1 | `exit(code)` | `r1`: signed 32-bit task exit code | Does not return; retains the full code in the task record |
+| any other | unsupported | ignored | -38 (`-ENOSYS`) |
+
+On a returning LA/IX syscall only `r1` changes: `r2`–`r31` (including
+the argument words, `r9`, `tp`, `sp` and `ra`) and the complete `FCSR`
+are preserved. Saved `EPC` advances by exactly 4, including unsupported
+calls and invalid arguments. The saved exit context also records `EPC + 4`,
+but that context is never resumed. A user fault retains the faulting EPC.
+
+Before the first user entry LA/IX prepares an independent supervisor
+context with a trusted continuation and kernel stack, zeroed GPRs/FCSR,
+and IRQs and single-step disabled. Exit or a fatal user exception records
+the terminal user context, restores the kernel page directory and stack
+entry words, and replaces the return frame with that supervisor context.
+IRET leaves user mode; cleanup releases the task's address space only
+after leaving its kernel stack. The sole task then remains stopped while
+the kernel halts in its trusted continuation. Supervisor faults still panic.
+
+M user wrappers are in `laix/user/syscalls.m` and use the builtin
+`syscall()`. The boot runtime is not a user crt0. The temporary first-task
+entry uses `r1` = user data base, `r2` = data size, an empty 8-aligned user
+stack, and all other GPRs/FCSR zero; it has no TLS or process-start block.
+
 ### Entering the kernel
 
 The handler starts with no free register and must not trust the user's
@@ -384,9 +425,9 @@ see [INSTRUCTIONS.md](INSTRUCTIONS.md#formats).
   object file, section, offset and symbol.
 - The linker leaves the other bits of the instruction unchanged.
 
-`tools/asm.py -c` writes these object files: an address it can't know
+`mc/asm.py -c` writes these object files: an address it can't know
 becomes a relocation, and in a flat image (without `-c`) every value is
-known, except `%tprel*`, which needs the linker. `tools/ld.py` links
+known, except `%tprel*`, which needs the linker. `mc/ld.py` links
 them, adds the veneers and writes boot images, ROM images and
 executables.
 

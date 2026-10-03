@@ -19,12 +19,12 @@ import time
 
 from run_ready import ROOT, check_layout, check_output, read_symbols
 
-sys.path.insert(0, str(ROOT / "tools"))
+sys.path.insert(0, str(ROOT / "mc"))
 from disasm import disassemble
 from test_kernel import LAIX, parse_asm, asm_constants
 
 # The four entry-state words (KERNEL_SP first) in the boot info page.
-ENTRY_STATE = asm_constants(parse_asm(LAIX / "src/defs.inc"))["KERNEL_SP"]
+ENTRY_STATE = asm_constants(parse_asm(LAIX / "src/arch/wrm081632/defs.inc"))["KERNEL_SP"]
 
 
 def require(condition, message):
@@ -33,12 +33,14 @@ def require(condition, message):
 
 
 @contextmanager
-def ready_monitor(data, emulator, rom, timeout):
+def ready_monitor(data, emulator, rom, timeout, full_image=False):
     """Open a temporary, paused machine using existing executable bytes only."""
     with tempfile.TemporaryDirectory(prefix="laix-ready-monitor-") as directory:
         disk = Path(directory) / "boot.img"
         sectors = struct.unpack_from("<I", data, 4)[0]
-        disk.write_bytes(data[:sectors * 512])
+        # The natural task boot also initializes the console and reads the
+        # appended font. API-only probes keep the boot-only disk by default.
+        disk.write_bytes(data if full_image else data[:sectors * 512])
         with socket.socket() as reservation:
             reservation.bind(("127.0.0.1", 0))
             port = reservation.getsockname()[1]

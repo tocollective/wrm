@@ -410,7 +410,7 @@ IRQ может быть принят сразу после разрешающе�
 без загрузки адреса в temporary register. [ABI рекомендует](ABI.md#entering-the-kernel)
 хранить текущий kernel stack pointer в таком низком слове.
 
-В текущем LA/IX [defs.inc](../laix/src/defs.inc) выделяет:
+В текущем LA/IX [defs.inc](../laix/src/arch/wrm081632/defs.inc) выделяет:
 
 | Virtual address | Назначение LA/IX |
 | --- | --- |
@@ -446,12 +446,12 @@ output должны быть доступны в **каждом активном
 ### Frame и пределы текущего entry
 
 `TrapFrame` — программная структура ОС, не формат CPU. Текущий
-[layout LA/IX](../laix/src/trap_layout.inc): 32 GPR (128 байт),
+[layout LA/IX](../laix/src/trap/trap_layout.inc): 32 GPR (128 байт),
 `EPC/STATUS/CAUSE/BADADDR/FCSR/PTBR` (24 байта), два reserved words;
 итого **160 байт**, кратно 8. `r30` в frame — прерванный stack pointer,
 а не адрес frame. `r0` сохраняется явно как 0 для диагностики.
 
-[trap.asm](../laix/src/trap.asm) сначала сохраняет `sp` в `SCRATCH`,
+[trap.asm](../laix/src/trap/trap.asm) сначала сохраняет `sp` в `SCRATCH`,
 проверяет `PUM`, выбирает trusted kernel stack для user origin либо
 прерванный stack для supervisor. Он сохраняет `r1` через низкое слово,
 проверяет alignment и границы с запасом под frame, bottom canary и
@@ -601,7 +601,7 @@ MMIO, descriptor publication и `OWN`. В M для MMIO используются
 ширины, в исходном порядке относительно других volatile accesses.
 Обычная память может переставляться относительно volatile; `fence()`
 упорядочивает их. `mtcr`, `tlbi`, atomics и `asm` тоже имеют compiler
-ordering contract. Подробнее — [hardware API M](../m/docs/spec/07-hardware.md).
+ordering contract. Подробнее — [hardware API M](../mc/docs/spec/07-hardware.md).
 `atomicCompareSwap` в M возвращает старое значение, а не код SC.
 `asm` не имеет operands и не разрешает менять stack/callee-saved registers
 или передавать управление за пределы вставки: полноценный trap entry
@@ -1339,7 +1339,7 @@ Native shutdown/host filesystem поведение нельзя автомати
 | Тема | Уточнение и источник |
 | --- | --- |
 | Multi-core section | [Cores](INSTRUCTIONS.md#cores) — направление расширения. HARTID=0, один CPU; AP start, работающий shootdown и SMP scheduler отсутствуют. |
-| LA/IX low words/frame | `0x1FF0…0x1FFC`, page zero без mapping, frame 160, stack 8192 и headroom 512 — [решения LA/IX](../laix/src/defs.inc), не обязательные hardware constants. |
+| LA/IX low words/frame | `0x1FF0…0x1FFC`, page zero без mapping, frame 160, stack 8192 и headroom 512 — [решения LA/IX](../laix/src/arch/wrm081632/defs.inc), не обязательные hardware constants. |
 | Kernel features | Наличие machine instruction/branch в assembly не означает готовность user launcher, allocator, scheduler, IPC или isolated driver. Проверять [план и критерии этапов](../laix/docs/KERNEL.md). |
 
 CPU ISA не задаёт syscall numbers, policies IPC/capabilities, fault fixup

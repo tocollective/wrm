@@ -29,10 +29,10 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Build the demo firmware
-        run: python3 tools/m.py --rom firmware/main.m -o build/firmware.rom
+        run: python3 mc/mc.py --rom firmware/main.m -o build/firmware.rom
 
       - name: Test the M compiler
-        run: python3 m/tests/run.py --emulator bin/wrm081632
+        run: python3 mc/tests/run.py --emulator bin/wrm081632
 
       - name: Test
         run: ctest --test-dir build --output-on-failure --parallel 4
@@ -63,10 +63,10 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Build the demo firmware
-        run: python3 tools/m.py --rom firmware/main.m -o build/firmware.rom
+        run: python3 mc/mc.py --rom firmware/main.m -o build/firmware.rom
 
       - name: Test the M compiler
-        run: python3 m/tests/run.py --emulator bin/wrm081632
+        run: python3 mc/tests/run.py --emulator bin/wrm081632
 
       - name: Test
         run: ctest --test-dir build --output-on-failure --parallel 4

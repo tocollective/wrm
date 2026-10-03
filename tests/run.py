@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 r"""Runs the WRM.081632 test ROMs.
 
-Each tests/<group>/<name>.asm is assembled with tools/asm.py and run in the
+Each tests/<group>/<name>.asm is assembled with mc/asm.py and run in the
 emulator with --headless. The harness (tests/common/harness.asm) prints
 "PASS" and powers the machine off with exit code 0, or prints "FAIL ..."
 and uses the number of the failed check as the exit code.
@@ -41,8 +41,8 @@ import tempfile
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TESTS = os.path.join(ROOT, "tests")
-ASSEMBLER = os.path.join(ROOT, "tools", "asm.py")
-COMPILER = os.path.join(ROOT, "tools", "m.py")
+ASSEMBLER = os.path.join(ROOT, "mc", "asm.py")
+COMPILER = os.path.join(ROOT, "mc", "mc.py")
 EMULATOR = os.path.join(ROOT, "bin", "wrm081632.exe" if os.name == "nt" else "wrm081632")
 
 EXIT_TRAP = 254  # tests/common/harness.asm

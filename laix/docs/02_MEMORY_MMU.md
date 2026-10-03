@@ -9,7 +9,7 @@
 
 ## Что уже есть
 
-[`memory.m`](../src/memory.m) резервирует память от нуля до округлённого
+[`memory.m`](../src/mm/memory.m) резервирует память от нуля до округлённого
 вверх `__bss_end`, затем область учёта страниц за BSS, до первой выдачи RAM.
 В BSS находятся только bitmap распределителя и битовая карта инициализированных
 каталогов `spaceInitialized` — по 4 КиБ для максимальных 128 МиБ RAM.
@@ -57,7 +57,7 @@ owner, purpose)` возвращает Bool: чужая, резервная, не
 для одного CPU до вытеснения, а не блокировка для SMP. Проверки доступности
 и владения дают снимок; резервировать страницу нужно через `allocPage()`.
 
-[`mmu.m`](../src/mmu.m) создаёт supervisor identity map RAM, VRAM и MMIO
+[`mmu.m`](../src/mm/mmu.m) создаёт supervisor identity map RAM, VRAM и MMIO
 с W^X и включает MMU. Права без `U`: `.text` — RX, `.rodata` — R, страница
 boot info со словами входа, `.data`, `.bss` и остальная RAM — RW без X.
 Страница 0 (NULL), бывший стек firmware `0x2000…0xFFFF` и guard page не

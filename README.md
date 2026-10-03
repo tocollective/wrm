@@ -22,7 +22,7 @@ as the host can instead (see [Speed and determinism](#speed-and-determinism)).
 ## Running
 
 ```sh
-python3 tools/m.py --rom firmware/main.m -o firmware.rom
+python3 mc/mc.py --rom firmware/main.m -o firmware.rom
 bin/wrm081632 [--rom PATH] [--ram SIZE[,...]] [--clock HZ]
               [--hdd PATH] [--hdd-serial N=SERIAL] [--floppy PATH]
               [--share PATH[:ro]] [--mute] [--headless]
@@ -221,7 +221,7 @@ emulator already has is attached read-only, with a warning, and one it
 writes isn't attached at all, so two machines never write one image.
 
 The firmware (`firmware/`, written in M: see
-[m/docs/spec](m/docs/spec/README.md)) boots from the floppy, or else from
+[mc/docs/spec](mc/docs/spec/README.md)) boots from the floppy, or else from
 disk 0, when it holds a boot image. A boot image starts with a small
 header and is loaded to `0x00010000`
 ([docs/SPECIFICATION.md](docs/SPECIFICATION.md#boot-protocol)). The M
@@ -229,7 +229,7 @@ compiler makes one by default; padded to whole sectors, it is itself a
 bootable disk image:
 
 ```sh
-python3 tools/m.py m/examples/example.m -o hdd0.img
+python3 mc/mc.py mc/examples/example.m -o hdd0.img
 bin/wrm081632 --hdd hdd0.img
 bin/wrm081632 --floppy hdd0.img     # the same image boots from the floppy
 ```
@@ -248,10 +248,10 @@ The calling conventions for code on the machine are in
 
 | Tool              | What it does                                              |
 |-------------------|-----------------------------------------------------------|
-| `tools/asm.py`    | assembler: a flat image at `--base` (the test ROMs), or with `-c` an ELF object file |
-| `tools/ld.py`     | linker: object files and `ar` archives to a boot image, a ROM image or an ELF executable (`--layout boot\|rom\|exec`), with veneers for far calls and a symbol map (`--map`) |
-| `tools/m.py`      | the M compiler: each module to an object file of its own, linked with the runtime |
-| `tools/disasm.py` | disassembler for flat images                              |
+| `mc/asm.py`    | assembler: a flat image at `--base` (the test ROMs), or with `-c` an ELF object file |
+| `mc/ld.py`     | linker: object files and `ar` archives to a boot image, a ROM image or an ELF executable (`--layout boot\|rom\|exec`), with veneers for far calls and a symbol map (`--map`) |
+| `mc/mc.py`        | the M compiler: each module to an object file of its own, linked with the runtime |
+| `mc/disasm.py` | disassembler for flat images                              |
 
 Object files and executables are ELF32 with `e_machine` = `0x0816`
 ([docs/ABI.md](docs/ABI.md#object-files)), so `llvm-readelf` and
@@ -259,13 +259,13 @@ Object files and executables are ELF32 with `e_machine` = `0x0816`
 Modules can be compiled one by one and linked later:
 
 ```sh
-python3 tools/m.py -c lib.m -o lib.o          # one module (imports are read, not compiled)
-python3 tools/m.py -c main.m -o main.o
-python3 tools/m.py main.o lib.o -o prog.img   # linked with the runtime: a boot image
-python3 tools/m.py -S lib.m -o lib.s          # the assembly asm.py -c gets
+python3 mc/mc.py -c lib.m -o lib.o          # one module (imports are read, not compiled)
+python3 mc/mc.py -c main.m -o main.o
+python3 mc/mc.py main.o lib.o -o prog.img   # linked with the runtime: a boot image
+python3 mc/mc.py -S lib.m -o lib.s          # the assembly asm.py -c gets
 
-python3 tools/asm.py -c start.s -o start.o    # assembly by hand
-python3 tools/ld.py --layout exec start.o lib.o -o prog.elf --map prog.map
+python3 mc/asm.py -c start.s -o start.o    # assembly by hand
+python3 mc/ld.py --layout exec start.o lib.o -o prog.elf --map prog.map
 ```
 
 In an object file a label is an offset in its section; `.text`, `.data`,
@@ -315,13 +315,13 @@ Tracing is slow (the host usually falls behind the clock rate, and the
 machine just runs slower) and the log grows by about 80 bytes per
 instruction, so it suits short test ROMs best.
 
-**Disassembler.** `tools/disasm.py` prints a ROM image in the same
+**Disassembler.** `mc/disasm.py` prints a ROM image in the same
 syntax as the trace; the output assembles back to the same bytes.
 Words the assembler can't produce (data, reserved bits set) are shown as
 `.word`, and runs of the same word are folded into `*` unless `--all`:
 
 ```sh
-python3 tools/disasm.py firmware.rom [--base 0xFE000000] [--start ADDR] [-n WORDS]
+python3 mc/disasm.py firmware.rom [--base 0xFE000000] [--start ADDR] [-n WORDS]
 ```
 
 ### Monitor

@@ -9,7 +9,7 @@
 > self-test `BREAK`/`SYSCALL`, слова входа перенесены в `[0x1FF0, 0x2000)`,
 > страница 0 больше не отображается. Отчёт относится к образам до этих
 > изменений; для них нужен повторный прогон. Добавлен образ `null_call`
-> (`LAIX_MAIN=laix/tests/null_call.m`): вызов по NULL должен дать
+> (`LAIX_MAIN=laix/tests/programs/mm/null_call.m`): вызов по NULL должен дать
 > CAUSE=8, EPC=0, BADADDR=0, `r31` = `nullCallReturn`, exit 254. Для W^X
 > добавлены `text_write` (store в `.text`: CAUSE=10) и `data_exec` (вызов в
 > `.data`: CAUSE=8). Маркер `trap` теперь требует `kernel W^X`, а runner
@@ -88,7 +88,7 @@ UART, вывод эмулятора и monitor для каждого случа�
 
 Вывод проверен функцией `check_output("null_call", ...)` из `run_ready.py`:
 точный адрес возврата fixture передан как ожидаемый `nullCallReturn`.
-Отдельный образ `tests/null_call.m` этим прогоном не запускался.
+Отдельный образ `tests/programs/mm/null_call.m` этим прогоном не запускался.
 SHA-256 образа, карты, эмулятора и ROM совпадают с таблицами выше.
 UART, вывод эмулятора, monitor и `results.json` сохранены в
 `laix/build/acceptance/null_page/` (вне Git).
@@ -104,7 +104,7 @@ python3 -B laix/tests/probe_null_page.py laix/build/laix.img laix/build/laix.map
 
 На том же готовом `laix/build/laix.img` выполнен
 `tests/probe_stack_overflow.py`, без сборки и изменения инструкций/PTE.
-Готового `stack_overflow.img` нет; рекурсивный `tests/stack_overflow.m`
+Готового `stack_overflow.img` нет; рекурсивный `tests/programs/mm/stack_overflow.m`
 не запускался. Проверен аппаратный аварийный путь при контролируемом
 исчерпании стека через monitor.
 

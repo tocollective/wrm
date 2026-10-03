@@ -69,7 +69,7 @@ python3 -B laix/tests/probe_mmu_cpu.py laix/build/laix.img laix/build/laix.map
 | `bin/wrm081632` | `a38d4d6b60fd24df495f9a2af0b2f5409d1de6eccabc64f4abd26735a5cf96dd` |
 | `bin/firmware.rom` | `6693e6349d322f516b61b6954c60a7ed3148e1f64e82d25031c0332f6179846f` |
 
-Отдельные образы `tests/mmu_remap.m`, `mmu_unmap.m`, `mmu_protect.m`,
+Отдельные образы `tests/programs/mm/mmu_remap.m`, `mmu_unmap.m`, `mmu_protect.m`,
 `asid_reuse.m`, `text_write.m`, `rodata_write.m` и `data_exec.m` этим
 прогоном не собирались и не запускались. Подтверждение относится к готовому
 образу с указанным хешем и monitor-сценариям. User faults не означают,

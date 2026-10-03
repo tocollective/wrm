@@ -1,6 +1,6 @@
 # WRM.081632 ROM firmware
 
-Create a ROM image with `python3 tools/m.py --rom firmware/main.m -o firmware.rom`.
+Create a ROM image with `python3 mc/mc.py --rom firmware/main.m -o firmware.rom`.
 The CPU enters it at `0xFE000000` after reset. The M ROM runtime initializes
 the stack and data and clears BSS. A local `romtrap.asm` handles faults
 before the screen is ready without using the UART. The firmware installs

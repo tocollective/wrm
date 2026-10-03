@@ -22,7 +22,7 @@ EARLY_STOPS = ("earlyStop", "earlyPanic", "earlyTrapPanic")
 class EntryMachine:
     def __init__(self, user, interrupted_sp, kernel_sp=0x92000, bottom=0x90000,
                  top=0x92000, cause=13):
-        self.parser = parse_asm(LAIX / "src/trap.asm")
+        self.parser = parse_asm(LAIX / "src/trap/trap.asm")
         self.code = self.parser.stmts
         self.constants = asm_constants(self.parser)
         self.labels = {label: i for i, st in enumerate(self.code) for label in st.labels}
@@ -46,7 +46,7 @@ class EntryMachine:
         self.traps = []
         self.early = []  # simulated early UART output: (routine or label, value)
         self.memory[bottom] = self.constants["STACK_CANARY"]
-        self.dispatch = SourceM(LAIX / "src/trap.m", self.memory)
+        self.dispatch = SourceM(LAIX / "src/trap/trap.m", self.memory)
         self.dispatcher = self.dispatch.call
 
     def symbol(self, name, scope=None):
@@ -192,8 +192,8 @@ class EntryMachine:
 def future_user_handler(machine):
     """Stage 3 stand-in that completes a user BREAK/SYSCALL.
 
-    These tests cover the entry path with user stacks; the real dispatcher
-    still rejects every user trap (test_unexpected_* below).
+    These tests cover the entry path without a running task; test_task.py
+    exercises the real user dispatcher with its prepared task.
     """
     c = machine.constants
     def handler(name, frame):
@@ -330,14 +330,14 @@ class TrapEntryTests(unittest.TestCase):
                     machine.dispatch.call("trapExpect", armed)
                 self.assert_rejected(machine, message)
 
-    def test_unexpected_user_break_or_syscall_panics_even_when_armed(self):
-        for cause, message in ((13, "unexpected breakpoint"), (12, "unexpected syscall")):
+    def test_user_trap_without_running_task_panics_even_when_armed(self):
+        for cause in (13, 12):
             for armed in (None, cause, 12 if cause == 13 else 13):
                 with self.subTest(cause=cause, armed=armed):
                     machine = EntryMachine(True, 0xFFFFFFF8, cause=cause)
                     if armed is not None:
                         machine.dispatch.call("trapExpect", armed)
-                    self.assert_rejected(machine, message)
+                    self.assert_rejected(machine, "user trap without running task")
                     self.assertEqual(machine.dispatch.call("trapExpectationMet"), armed is None)
 
     def test_expectation_is_one_shot(self):

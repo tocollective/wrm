@@ -7,7 +7,7 @@ import sys
 import unittest
 
 LAIX = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(LAIX.parent / "tools"))
+sys.path.insert(0, str(LAIX.parent / "mc"))
 import asm
 from mlang.check import Checker
 from mlang.diag import Diagnostics
@@ -48,8 +48,8 @@ def asm_constants(parser):
 
 class KernelContractTests(unittest.TestCase):
     def test_m_and_assembly_constants_match(self):
-        for m_name, asm_name in (("defs.m", "defs.inc"),
-                                 ("trap_frame.m", "trap_layout.inc")):
+        for m_name, asm_name in (("arch/wrm081632/defs.m", "arch/wrm081632/defs.inc"),
+                                 ("trap/trap_frame.m", "trap/trap_layout.inc")):
             with self.subTest(module=m_name):
                 module = check_m(LAIX / "src" / m_name)[0]
                 constants = asm_constants(parse_asm(LAIX / "src" / asm_name))
@@ -60,7 +60,7 @@ class KernelContractTests(unittest.TestCase):
     def test_handled_traps_do_not_fall_through(self):
         # M switches have C-style fallthrough. BREAK must neither overwrite
         # r1 with -ENOSYS nor reach panic; SYSCALL must also return normally.
-        module = check_m(LAIX / "src/trap.m")[0]
+        module = check_m(LAIX / "src/trap/trap.m")[0]
         handler = module.scope["trapDispatch"].decl
         dispatch = next(st for st in handler.body.stmts if isinstance(st, Switch))
         handled = [case for case in dispatch.cases if case.value is not None]
@@ -73,41 +73,53 @@ class KernelContractTests(unittest.TestCase):
                 self.assertIsInstance(last, (Return, Break))
 
     def test_frame_layout_matches_m_type_checker(self):
-        module = check_m(LAIX / "src/trap_frame.m")[0]
+        module = check_m(LAIX / "src/trap/trap_frame.m")[0]
         frame = module.scope["TrapFrame"].type
-        constants = asm_constants(parse_asm(LAIX / "src/trap_layout.inc"))
+        constants = asm_constants(parse_asm(LAIX / "src/trap/trap_layout.inc"))
         self.assertEqual(frame.size, constants["TF_SIZE"])
         self.assertEqual(frame.size % 8, 0)
         for field in frame.fields:
             self.assertEqual(field.offset, constants["TF_" + field.name.upper()])
         self.assertEqual(frame.field("regs").type.n, 32)
 
+    def test_user_syscalls_do_not_fall_through_and_wrappers_type_check(self):
+        module = check_m(LAIX / "src/trap/trap.m")[0]
+        handler = module.scope["userSyscall"].decl
+        dispatch = next(st for st in handler.body.stmts if isinstance(st, Switch))
+        self.assertEqual({case.value.const for case in dispatch.cases if case.value is not None}, {0, 1})
+        for case in dispatch.cases:
+            last = case.body[-1]
+            while isinstance(last, Block):
+                last = last.stmts[-1]
+            self.assertIsInstance(last, Return)
+        check_m(LAIX / "user/syscalls.m")
+
     def test_build_includes_every_imported_module(self):
-        modules = check_m(LAIX / "src/main.m")
+        modules = check_m(LAIX / "src/kernel/main.m")
         script = (LAIX / "build.sh").read_text()
         names = re.search(r"for module in (.*); do", script).group(1).split()
         linked = {(LAIX / "src" / (name + ".m")).resolve() for name in names}
-        linked.add((LAIX / "src/main.m").resolve())
+        linked.add((LAIX / "src/kernel/main.m").resolve())
         # The demo may stop importing a module that is still linked by the
         # build script. Require every dependency, but allow unused modules.
         self.assertLessEqual({Path(module.path).resolve() for module in modules}, linked)
         self.assertIn('set -- "$obj_dir/start.o"', script)
-        self.assertIn('"$repo_dir/m/runtime/mem.asm"', script)
+        self.assertIn('"$repo_dir/mc/runtime/mem.asm"', script)
 
     def test_runtime_test_programs_type_check(self):
-        for path in sorted((LAIX / "tests").glob("*.m")):
+        for path in sorted((LAIX / "tests/programs").rglob("*.m")):
             with self.subTest(name=path.name):
                 check_m(path)
 
     def test_assembly_opcodes_and_jump_targets(self):
-        paths = (LAIX / "src/start.asm", LAIX / "src/trap.asm", LAIX / "src/font/data.asm",
-                 LAIX / "tests/trap_fault.asm", LAIX / "tests/stack_guard.asm",
-                 LAIX / "tests/null_call.asm", LAIX / "tests/text_write.asm",
-                 LAIX / "tests/data_exec.asm")
+        paths = (LAIX / "src/arch/wrm081632/start.asm", LAIX / "src/trap/trap.asm", LAIX / "src/task/task.asm", LAIX / "src/console/font/data.asm",
+                 LAIX / "tests/programs/trap/trap_fault.asm", LAIX / "tests/programs/mm/stack_guard.asm",
+                 LAIX / "tests/programs/mm/null_call.asm", LAIX / "tests/programs/mm/text_write.asm",
+                 LAIX / "tests/programs/mm/data_exec.asm")
         parsers = [parse_asm(path) for path in paths]
         labels = {label for parser in parsers for statement in parser.stmts
                   for label in statement.labels}
-        labels.update(("main", "trapDispatch", "trapExpect", "trapBadStack"))
+        labels.update(("main", "trapDispatch", "trapExpect", "trapBadStack", "taskReap"))
         jumps = {"j", "call", "beq", "bne", "blt", "bge", "bltu", "bgeu",
                  "beqz", "bnez", "bltz", "bgez", "bgtz", "blez"}
         for parser in parsers:
@@ -121,7 +133,7 @@ class KernelContractTests(unittest.TestCase):
                         self.assertIn(target, labels)
 
     def test_complete_gpr_save_restore_and_sp_last(self):
-        statements = parse_asm(LAIX / "src/trap.asm").stmts
+        statements = parse_asm(LAIX / "src/trap/trap.asm").stmts
         # Limit to the entry body, excluding the boot-time self-test.
         begin = next(i for i, st in enumerate(statements) if "trapEntry" in st.labels)
         end = next(i for i, st in enumerate(statements[begin:], begin) if st.op == "iret")
@@ -152,17 +164,17 @@ class KernelContractTests(unittest.TestCase):
         self.assertLess(branch, next(i for i, st in enumerate(body) if st.op == "sw"))
 
     def test_fatal_output_has_no_screen_or_disk_dependency(self):
-        modules = check_m(LAIX / "src/panic.m")
+        modules = check_m(LAIX / "src/kernel/panic.m")
         self.assertEqual({Path(module.path).name for module in modules},
                          {"panic.m", "trap_frame.m", "debug_uart.m", "defs.m"})
-        start = parse_asm(LAIX / "src/start.asm")
+        start = parse_asm(LAIX / "src/arch/wrm081632/start.asm")
         begin = next(i for i, st in enumerate(start.stmts) if "earlyTrapEntry" in st.labels)
         early = start.stmts[begin:]
         self.assertFalse(any(st.op == "call" for st in early))
         self.assertFalse(any("sp" in arg for st in early for arg in st.args))
 
     def test_early_panic_prints_trap_registers_only_after_a_trap(self):
-        start = parse_asm(LAIX / "src/start.asm")
+        start = parse_asm(LAIX / "src/arch/wrm081632/start.asm")
         statements = [st for st in start.stmts if st.op or st.labels]
         def block(label):
             # A routine runs to the next global label, a local label to the next label.
@@ -186,7 +198,7 @@ class KernelContractTests(unittest.TestCase):
         self.assertEqual(reported, {"cause", "epc", "badaddr"})
 
     def test_stack_bounds_checked_before_frame_allocation(self):
-        statements = parse_asm(LAIX / "src/trap.asm").stmts
+        statements = parse_asm(LAIX / "src/trap/trap.asm").stmts
         allocate = next(i for i, st in enumerate(statements)
                         if st.op == "addi" and st.args == ["sp", "sp", "-TF_SIZE"])
         checks = [st for st in statements[:allocate] if st.op in ("bltu", "bnez")
@@ -202,7 +214,7 @@ class KernelContractTests(unittest.TestCase):
         # the .rodata and .data output sections on fresh pages (mmu.m W^X).
         script = (LAIX / "build.sh").read_text()
         self.assertIn('set -- "$obj_dir/start.o"', script)
-        statements = [st for st in parse_asm(LAIX / "src/start.asm").stmts if st.op]
+        statements = [st for st in parse_asm(LAIX / "src/arch/wrm081632/start.asm").stmts if st.op]
         for name in (".rodata", ".data"):
             with self.subTest(section=name):
                 i = next(i for i, st in enumerate(statements)
@@ -211,7 +223,7 @@ class KernelContractTests(unittest.TestCase):
                                  (".align", ["PAGE_SIZE"]))
 
     def test_low_entry_state_reserved_and_initialized_before_ivec(self):
-        parser = parse_asm(LAIX / "src/start.asm")
+        parser = parse_asm(LAIX / "src/arch/wrm081632/start.asm")
         constants = asm_constants(parser)
         slots = [constants[name] for name in ("KERNEL_SP", "KERNEL_STACK_BOTTOM",
                                               "KERNEL_STACK_TOP", "TRAP_SAVED_R1")]

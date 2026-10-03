@@ -9,7 +9,7 @@ import unittest
 from test_kernel import LAIX, parse_asm, asm_constants
 from source_m import SourceM
 
-C = asm_constants(parse_asm(LAIX / "src/defs.inc"))
+C = asm_constants(parse_asm(LAIX / "src/arch/wrm081632/defs.inc"))
 VIDEO = C["VIDEO_BASE"]
 # Register offsets from docs/SPECIFICATION.md (Video card).
 STATUS, MODE, WIDTH, HEIGHT, BPP, PITCH, VRAM_SIZE = 0x00, 0x08, 0x0C, 0x10, 0x14, 0x18, 0x1C
@@ -42,7 +42,7 @@ class VideoRegisters(dict):
 
 class ConsoleM(SourceM):
     def __init__(self):
-        super().__init__(LAIX / "src/console.m", VideoRegisters())
+        super().__init__(LAIX / "src/console/console.m", VideoRegisters())
         self.globals["video"] = VIDEO
         self.addresses.update(font=FONT, fontData=0x300000, fontDataEnd=0x300100)
         self.memory.update({VIDEO + STATUS: 0, VIDEO + VRAM_SIZE: 0x400000,

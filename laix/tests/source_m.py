@@ -9,7 +9,7 @@ from test_memory import BootstrapM
 from mlang import syntax as s
 from mlang.typesys import size_of
 
-LAYOUT = asm_constants(parse_asm(LAIX / "src/trap_layout.inc"))
+LAYOUT = asm_constants(parse_asm(LAIX / "src/trap/trap_layout.inc"))
 # Synthetic kernel stack for supervisor traps raised by M builtins.
 TRAP_STACK_BOTTOM = 0x9E000
 TRAP_FRAME = 0x9F000
@@ -36,6 +36,18 @@ class SourceM(BootstrapM):
         super().__init__(root=root)
         if memory is not None:
             self.memory = memory
+        # Checked global structs need backing storage just like global arrays.
+        struct_address = 0x0C000000
+        for name, decl in self.decls.items():
+            if isinstance(decl, s.VarDecl) and not decl.extern and decl.sym.type.kind == "struct":
+                self.addresses[name] = struct_address
+                for offset in range(0, size_of(decl.sym.type), 4):
+                    self.memory[struct_address + offset] = 0
+                struct_address += (size_of(decl.sym.type) + 7) & ~7
+        for name, decl in self.decls.items():
+            if isinstance(decl, s.VarDecl) and isinstance(decl.init, s.ArrayLit):
+                for i, elem in enumerate(decl.init.elems):
+                    self.memory[self.addresses[name] + i * size_of(elem.type)] = self.expr(elem, {})
         self.controls = {0: 0, 6: 0}
         self.output = []
 
@@ -57,6 +69,8 @@ class SourceM(BootstrapM):
         return super().address(node, local)
 
     def expr(self, node, local):
+        if isinstance(node, s.Name) and node.type.kind == "struct":
+            return self.address(node, local)
         if isinstance(node, s.StringLit):
             return node.value
         if isinstance(node, s.NullLit):

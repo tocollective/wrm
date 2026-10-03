@@ -81,10 +81,10 @@ class ReadyRunnerTests(unittest.TestCase):
         for name in ("mmu_remap", "mmu_unmap", "mmu_protect", "asid_reuse",
                      "text_write", "rodata_write", "data_exec"):
             with self.subTest(source=name):
-                check_m(LAIX / "tests" / (name + ".m"))
+                check_m(LAIX / "tests/programs/mm" / (name + ".m"))
         for name in ("mmu_probe", "text_write", "rodata_write", "data_exec"):
             with self.subTest(assembly=name):
-                parse_asm(LAIX / "tests" / (name + ".asm"))
+                parse_asm(LAIX / "tests/programs/mm" / (name + ".asm"))
 
     def test_mmu_faults_require_exact_access_and_active_asid(self):
         for case in ("mmu_unmap", "mmu_protect", "asid_reuse"):

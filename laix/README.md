@@ -2,9 +2,42 @@
 
 Первый этап микроядра на M для WRM.081632: собственный старт, стек ядра,
 сохранение контекста исключений и аварийная диагностика через UART.
-После самопроверки входа ядро запускает экранную демонстрацию.
+После самопроверки входа и инициализации консоли ядро запускает одну user-задачу.
 Есть bitmap-распределитель физических страниц с владением и отображение MMU
-с защитой стека. Планировщика, IPC и пользовательских процессов ещё нет.
+с защитой стеков. Task, IRET, user syscall/exit и user fault подтверждены
+[11 CPU-сценариями](tests/USER_ACCEPTANCE.md) на обновлённом образе.
+Копирование user-буферов подтверждено
+[9 CPU-сценариями при EXL=1](tests/USER_BUFFERS_ACCEPTANCE.md).
+Планировщика и IPC пока нет.
+
+Исходники сгруппированы по подсистемам:
+
+```text
+laix/
+├── src/
+│   ├── arch/wrm081632/  # аппаратные константы, boot-заголовок и старт
+│   ├── kernel/         # main, инициализация ядра и panic
+│   ├── mm/             # физические страницы, MMU и user-буферы
+│   ├── task/           # задача, TCB и вход в user mode
+│   ├── trap/           # обработчики, TrapFrame и самопроверка контекста
+│   ├── drivers/        # UART и RNG
+│   └── console/        # экранная консоль и font/ с загрузчиком и кешем
+├── user/               # пользовательские M-обёртки syscall
+├── tests/
+│   ├── programs/       # M/ASM-сценарии: trap/, mm/, console/, drivers/
+│   └── *.py, *.md      # проверки исходников, CPU probes и отчёты приёмки
+├── tools/              # упаковка и добавление шрифтов
+├── fonts/              # бинарные шрифты и лицензия
+├── docs/               # контракты и этапы разработки
+├── build/              # генерируемые объекты, образ и карта символов
+├── build.sh
+└── run.sh
+```
+
+M-модуль и одноимённый ASM-файл находятся рядом: компилятор подключает
+ассемблерную часть автоматически. Импорты, `.include` и `.incbin` используют
+пути относительно своего исходника. Точка входа ядра — `src/kernel/main.m`;
+`LAIX_MAIN` позволяет выбрать программу из `tests/programs/`.
 
 Из корня репозитория:
 
@@ -23,7 +56,7 @@
 ```
 
 `build.sh` создаёт загрузочный образ `build/laix.img` и карту
-символов `build/laix.map`. Собственный `src/start.asm` задаёт заголовок
+символов `build/laix.map`. Собственный `src/arch/wrm081632/start.asm` задаёт заголовок
 `WRMB`, линкер выравнивает образ до секторов по 512 байт; файловая система и отдельный
 загрузочный сектор не нужны. Это образ для WRM.081632, не для x86 BIOS.
 `run.sh` подключает его как флоппи (`--floppy`); прошивка загружает ядро
@@ -31,14 +64,14 @@
 образа и читаются ядром по необходимости. Флоппи сохраняет исходную
 скорость 62 500 байт/с. Для запуска с диска 0: `LAIX_BOOT=hdd ./laix/run.sh`.
 
-- `src/main.m` — точка входа, начинайте писать ядро здесь.
-- `src/defs.m` и `src/defs.inc` — именованные значения аппаратных регистров,
+- `src/kernel/main.m` — точка входа, начинайте писать ядро здесь.
+- `src/arch/wrm081632/defs.m` и `src/arch/wrm081632/defs.inc` — именованные значения аппаратных регистров,
   флагов, адресов устройств, протокола загрузки и размеров страниц.
   Тесты сверяют значения M и ассемблера без сборки.
-- `src/start.asm` — boot-заголовок, проверка RAM, обнуление BSS,
+- `src/arch/wrm081632/start.asm` — boot-заголовок, проверка RAM, обнуление BSS,
   стек 8 КиБ, ранний обработчик без стека и вызов `main(0, null)`.
-- `src/boot.m` — проверка и сохранение boot info, запуск самопроверок.
-- `src/memory.m` — резервирование низкой памяти, образа и всей BSS,
+- `src/kernel/boot.m` — проверка и сохранение boot info, запуск самопроверок.
+- `src/mm/memory.m` — резервирование низкой памяти, образа и всей BSS,
   включая стек, guard page и две битовые карты. Метаданные страниц
   резервируются за BSS по фактическому размеру RAM (4 КиБ при 1 МиБ RAM).
   `allocPage()`/`freePage()` учитывают владельца и назначение; пользовательские
@@ -46,7 +79,7 @@
   `freeTaskPages()` возвращает набор при дальнейшей ошибке подготовки задачи.
   `physicalPageAvailable()` проверяет свободу, `physicalPageOwned()` — владение.
   Ссылки MMU запрещают освобождение отображённых кадров и живых таблиц.
-- `src/mmu.m` — начальное тождественное отображение RAM, VRAM и MMIO
+- `src/mm/mmu.m` — начальное тождественное отображение RAM, VRAM и MMIO
   для supervisor mode; страница под стеком остаётся недоступной.
   Каталог и таблицы выдаются распределителем. `mmuCreateAddressSpace(owner)`
   создаёт каталог с общими supervisor-отображениями; `mmuInitAddressSpace()`
@@ -58,16 +91,33 @@
   пока кадр исполняемый; общие таблицы RAM распространяют права на все каталоги.
   Пользовательский стек не получает X, MMIO/VRAM остаются без U/X.
   Контракты — в [этапе 2](docs/02_MEMORY_MMU.md).
-- `src/trap_frame.m` и `src/trap_layout.inc` — общий формат контекста
+- `src/trap/trap_frame.m` и `src/trap/trap_layout.inc` — общий формат контекста
   на 160 байт и соответствующие ассемблерные смещения.
-- `src/trap.m` и `src/trap.asm` — сохранение регистров, обработка
-  `BREAK`/`SYSCALL`, восстановление и `IRET`. Принимаются только
-  `BREAK`/`SYSCALL` self-test, заранее взведённые `trapExpect`; любой
-  другой вызывает panic. Вход из user mode загружает
+- `src/task/task.m` и `src/task/task.asm` — одна задача с отдельными RXU-кодом,
+  RWU-данными и user-стеком, каталогом, kernel-стеком с guard/canary и TCB.
+  Подготовка откатывает ошибки выделения и отображения. Первый вход использует
+  общий restore/IRET при PIE=0; небольшой автономный user entry записывает 1
+  в свои данные, выводит `U\n` через syscall и вызывает exit. Exit/user fault
+  восстанавливают отдельный доверенный kernel-контекст; память задачи
+  освобождается после IRET на boot-стек. Ядро затем остаётся в HLT-цикле.
+  `user/syscalls.m` предоставляет M-обёртки через встроенный `syscall()`.
+  Контракт и проверки — в [этапе 3](docs/03_USER_TASK_SYSCALLS.md).
+- `src/mm/mmu.m:copyFromUser/copyToUser` — проверка полного байтового диапазона,
+  V/U/R/W и владельца каждой страницы перед копированием через supervisor-алиасы.
+  Блокировка удерживает отображения до конца копирования; неверный user-буфер
+  возвращает `-EFAULT` без частичной записи. Невыровненные адреса и границы
+  страниц проверены по исходникам в `tests/test_user_memory.py` и
+  [на CPU при EXL=1](tests/USER_BUFFERS_ACCEPTANCE.md).
+- `src/trap/trap.m` и `src/trap/trap.asm` — сохранение регистров, обработка
+  `BREAK`/`SYSCALL`, восстановление и `IRET`. Supervisor
+  `BREAK`/`SYSCALL` принимаются только как self-test с `trapExpect`;
+  остальные supervisor exceptions вызывают panic. User SYSCALL использует
+  r9/r1–r6 из кадра, сохраняет r2–r31/FCSR и продвигает EPC на 4;
+  user fault завершает задачу. Вход из user mode загружает
   доверенный стек через `KERNEL_SP(r0)`, вход из supervisor сохраняет текущий.
-- `src/trap_test.asm` — самопроверка GPR (включая `tp` и `ra`), `sp` и `FCSR`
+- `src/trap/trap_test.asm` — самопроверка GPR (включая `tp` и `ra`), `sp` и `FCSR`
   через `BREAK` и неизвестный `SYSCALL`; syscall проверяет также сохранение `r2`–`r31`.
-- `src/panic.m` и `src/debug_uart.m` — дамп исключения без экрана,
+- `src/kernel/panic.m` и `src/drivers/debug_uart.m` — дамп исключения без экрана,
   диска и распределителя памяти; аварийный выход с кодом 254.
   `debugPrint(format, ...)` поддерживает `$s`, `$i`, `$u`, `$h` и `$$`;
   `$h` выводит восемь заглавных hex-цифр без префикса.
@@ -76,25 +126,29 @@
   без аргумента остаются в тексте. `panic(format, frame, ...)` передаёт
   аргументы в UART-форматирование, например
   `panic("invalid address=$h", frame, address)`.
-- `src/console.m` — собственная экранная консоль: 640×480, белый текст
+- `src/drivers/videocard.m` — драйвер видеокарты: настройка режима и палитры,
+  чтение параметров экрана и размера VRAM, FILL/COPY/EXPAND, загрузка слов
+  через окно VRAM и ожидание кадра. Регистры остаются внутри драйвера;
+  команды рисования возвращают аппаратный `ERROR`, без вывода в UART.
+- `src/console/console.m` — экранная консоль через драйвер видеокарты: 640×480, белый текст
   на чёрном фоне, перенос строк и прокрутка, без прерываний. Проверяет,
   что видеокарта приняла режим, и `ERROR` после каждой команды engine.
   При первом отказе (режим, engine, шрифт, VRAM, кеш глифов) консоль
   перестаёт рисовать и один раз пишет причину в UART:
   `LA/IX: console failed: …`; ядро продолжает работу.
-- `src/font/font.m` — загрузчик бинарного шрифта и двоичный поиск по Unicode;
+- `src/console/font/font.m` — загрузчик бинарного шрифта и двоичный поиск по Unicode;
   консоль 80×30, ячейка 8×16, широкий символ занимает две ячейки.
-- `src/font/data.m` и `src/font/data.asm` — подключение шрифта через
+- `src/console/font/data.m` и `src/console/font/data.asm` — подключение шрифта через
   `.incbin`, только заголовок и индекс, без растров в ядре.
-- `src/font/glyph_cache.m` — чтение страниц растров с загрузочного диска и
-  кеш на 256 глифов в VRAM, с вытеснением по FIFO.
-- `src/rnd.m` — драйвер RNG: чтение 32-битного слова, заполнение
+- `src/console/font/glyph_cache.m` — чтение страниц растров с загрузочного диска и
+  кеш на 256 глифов в VRAM, с вытеснением по FIFO; загрузка в VRAM через драйвер видеокарты.
+- `src/drivers/rnd.m` — драйвер RNG: чтение 32-битного слова, заполнение
   байтового буфера и проверка воспроизводимого режима.
 - `fonts/unifont-console.laf` — все 57 084 глифа Unifont 15.1.05 из
   `vendor/SDL/test/unifont-15.1.05.hex`, независимо от текста программы.
   Лицензия: `fonts/LICENSE-Unifont.txt`.
 - Исходники LA/IX не импортируют и не собирают исходники прошивки.
-  Консоль напрямую управляет видеокартой; сообщения ядра и аварийные дампы
+  Консоль обращается к драйверу видеокарты; сообщения ядра и аварийные дампы
   идут отдельно в UART (stdout эмулятора).
   Для отображения текста запускайте эмулятор с окном, без `--headless`.
 - Сборочный сценарий компилирует модули по отдельности и компонует их
@@ -110,8 +164,8 @@ guard page не отображается. Прерывания пока откл
 `KERNEL_SP`, границ текущего стека и временного `r1`; boot info и таблица
 устройств должны заканчиваться ниже `0x1FF0`. Страница 0 не отображается,
 поэтому NULL в ядре после включения MMU даёт page fault.
-Старт инициализирует их загрузочным стеком. Будущий планировщик обновляет
-доверенный стек и его границы перед запуском задачи с выключенными IRQ.
+Старт инициализирует их загрузочным стеком. `taskStart()` обновляет
+доверенный стек и его границы перед запуском первой задачи с выключенными IRQ.
 `kernelInit()` отдельно проверяет возврат из встроенного `breakpoint()` и
 контролирует `IE = 0`, PIC `ENABLE = 0` до и после самопроверок.
 
@@ -121,8 +175,8 @@ guard page не отображается. Прерывания пока откл
 python3 -B -m unittest discover -s laix/tests -p 'test_*.py'
 ```
 
-`tests/run_ready.py` проверяет уже готовые образы `tests/trap.m`,
-`tests/trap_fault.m` и `tests/stack_guard.m` с их картами символов. Он не
+`tests/run_ready.py` проверяет уже готовые образы `tests/programs/trap/trap.m`,
+`tests/programs/trap/trap_fault.m` и `tests/programs/mm/stack_guard.m` с их картами символов. Он не
 собирает код и запускает тесты без добавленных растров шрифта. Например:
 
 ```sh
@@ -143,7 +197,8 @@ python3 -B laix/tests/probe_mmu_cpu.py laix/build/laix.img laix/build/laix.map
 ```
 
 Для отдельных образов `LAIX_MAIN` выбирает соответствующий
-`tests/<case>.m`; сборочный сценарий подключает общий `mmu_probe.m/.asm`
+`tests/programs/<подсистема>/<case>.m`; сборочный сценарий подключает общий
+`tests/programs/mm/mmu_probe.m/.asm`
 для четырёх тестов MMU. Runner принимает следующие case:
 
 | Case | Проверка | Ожидание |
@@ -191,7 +246,7 @@ Probe временно отображает существующую инстр�
 нулевой адрес в сохранённом контексте; код ядра и PTE страницы 0 не меняет.
 Использует UART-проверки case `null_call` из `run_ready.py` с адресом возврата
 тестового вызова: CAUSE=8, EPC=BADADDR=0, exit 254. Логи и SHA-256 находятся
-в `laix/build/acceptance/null_page/`. Отдельный `tests/null_call.m` по-прежнему
+в `laix/build/acceptance/null_page/`. Отдельный `tests/programs/mm/null_call.m` по-прежнему
 проверяется через `run_ready.py`, когда готов его образ и карта.
 
 `tests/probe_stack_overflow.py` проверяет аварийный путь при исчерпанном
@@ -208,19 +263,22 @@ Probe сверяет раннюю строку со SP, полный dump, вс�
 и выход 254. Guard и обычный стек не изменены входом в обработчик.
 Логи и SHA-256 — в `laix/build/acceptance/stack_overflow_probe/`.
 Это проверка аварийного пути; отдельный рекурсивный образ
-`tests/stack_overflow.m` запускается через case `stack_overflow`, когда готов.
+`tests/programs/mm/stack_overflow.m` запускается через case `stack_overflow`, когда готов.
 
 Критерии первого этапа для supervisor mode подтверждены на эмуляторе;
 результаты и команды — в [tests/ACCEPTANCE.md](tests/ACCEPTANCE.md).
 Пролог user entry выбирает доверенный стек по `KERNEL_SP`, не обращаясь
-к памяти через пользовательский `sp`. Реальная user-задача пока не запускается.
+к памяти через пользовательский `sp`. Реальный запуск готовой user-задачи,
+возвраты syscall, exit и user faults подтверждены
+[CPU-приёмкой](tests/USER_ACCEPTANCE.md). Случаи SP=0, невыровненного SP и
+SP в guard возвращаются из восьми последовательных syscall без аварии ядра.
 Вложенные исключения не поддерживаются: `EXL` остаётся установленным
 до `IRET`, а ошибка самого обработчика приводит к double fault CPU.
 Блок сведений о машине находится по адресу `0x00001000`; старт сохраняет
 его адрес из `r1`, а `kernelInit()` копирует проверенный блок в
 `kernelBootInfo`. Формат описан в
 [протоколе загрузки](../docs/SPECIFICATION.md#boot-protocol), соглашения
-о вызовах — в [ABI](../docs/ABI.md), язык — в [спецификации M](../m/docs/spec/README.md).
+о вызовах — в [ABI](../docs/ABI.md), язык — в [спецификации M](../mc/docs/spec/README.md).
 План и состояние реализации описаны в [docs/KERNEL.md](docs/KERNEL.md).
 Каждый из шести этапов имеет отдельный документ с чек-листами реализации
 и проверки; первый этап — [docs/01_BOOT_TRAPS.md](docs/01_BOOT_TRAPS.md).
@@ -232,9 +290,10 @@ Probe сверяет раннюю строку со SP, полный dump, вс�
 ```sh
 python3 -B -m unittest discover -s laix/tests -p test_kernel.py -v
 python3 -B -m unittest discover -s laix/tests -p test_memory.py -v
-python3 -B tools/m.py --check laix/src/main.m
-python3 -B tools/m.py --check laix/tests/trap.m
-python3 -B tools/m.py --check laix/tests/trap_fault.m
+python3 -B -m unittest discover -s laix/tests -p test_user_memory.py -v
+python3 -B mc/mc.py --check laix/src/kernel/main.m
+python3 -B mc/mc.py --check laix/tests/programs/trap/trap.m
+python3 -B mc/mc.py --check laix/tests/programs/trap/trap_fault.m
 sh -n laix/build.sh
 ```
 
@@ -244,12 +303,12 @@ sh -n laix/build.sh
 `LA/IX: TrapFrame and syscall self-tests passed`.
 
 Для отдельного runtime-сценария сборочный сценарий принимает `LAIX_MAIN`
-с путём к `tests/trap.m` или `tests/trap_fault.m`. Первый завершает
+с путём к `tests/programs/trap/trap.m` или `tests/programs/trap/trap_fault.m`. Первый завершает
 машину с кодом 0 после самопроверок. Второй вызывает невыровненную
 загрузку и ожидает дамп `CAUSE=3`, `BADADDR=00001001`,
 `stage=trap-fault-test` и выход 254; адрес `EPC` должен совпасть с
 `trapFaultInstruction` в карте символов. Оба сценария используют собственный
-runtime LA/IX; обычный `m/tests/run.py` для них не подходит.
+runtime LA/IX; обычный `mc/tests/run.py` для них не подходит.
 Сценарии не инициализируют экран и пригодны для headless-запуска.
 Статические проверки не заменяют исполнение этих сценариев на готовом образе.
 
@@ -259,7 +318,7 @@ runtime LA/IX; обычный `m/tests/run.py` для них не подходи
 `tests/test_address_space.py` дополнительно проверяет операции отображения,
 владение, откат, ссылки и порядок инвалидации/переключения PTBR/ASID.
 Это проверка таблиц страниц, а не исполнения исключений CPU.
-`tests/stack_guard.m`, выбираемый через `LAIX_MAIN`, намеренно пишет
+`tests/programs/mm/stack_guard.m`, выбираемый через `LAIX_MAIN`, намеренно пишет
 в guard page при исправном `sp`; ожидаются `CAUSE=10`,
 `BADADDR=&kernelStackGuard`, `EPC=&stackGuardFaultInstruction`,
 `stage=stack-guard-test` и код выхода 254. Готовый образ из
@@ -360,16 +419,16 @@ prints("answer = $i or $f, $h is also $s\n", 42, 42.0, 0x42, "correct")
 
 ```sh
 python3 -B -m unittest discover -s laix/tests
-python3 -B tools/m.py --check laix/src/main.m
-python3 -B tools/m.py --check laix/tests/font.m
-python3 -B tools/m.py --check laix/tests/cache.m
-python3 -B tools/m.py --check laix/tests/rnd.m
+python3 -B mc/mc.py --check laix/src/kernel/main.m
+python3 -B mc/mc.py --check laix/tests/programs/console/font.m
+python3 -B mc/mc.py --check laix/tests/programs/console/cache.m
+python3 -B mc/mc.py --check laix/tests/programs/drivers/rnd.m
 ```
 
-`tests/font.m` также содержит runtime-тест загрузчика и поиска; `--check`
+`tests/programs/console/font.m` также содержит runtime-тест загрузчика и поиска; `--check`
 проверяет только его синтаксис и типы. Для отдельного запуска после сборки
-можно использовать `python3 -B m/tests/run.py laix/tests/font.m`.
-Для runtime-теста кеша сначала собирают `tests/cache.m` в boot-образ,
+можно использовать `python3 -B mc/tests/run.py laix/tests/programs/console/font.m`.
+Для runtime-теста кеша сначала собирают `tests/programs/console/cache.m` в boot-образ,
 добавляют к нему растры через `tools/append_font.py`, затем запускают
 полученный образ на флоппи или диске 0. Этот тест не запускается обычным
 `run.py`: ему нужны дополнительные секторы шрифта.
@@ -402,6 +461,6 @@ let ok: Bool = rngFill(bytes, 16)
 поступают из криптографического генератора хоста. Драйвер не меняет режим
 и не устанавливает seed.
 
-`tests/rnd.m` содержит runtime-тест с `--seed=0`: эталонный поток ChaCha20,
+`tests/programs/drivers/rnd.m` содержит runtime-тест с `--seed=0`: эталонный поток ChaCha20,
 размеры буфера 0–5 и 32 байта, границы записи и переход между блоками RNG.
 Команда `--check` выше проверяет только синтаксис и типы этого теста.

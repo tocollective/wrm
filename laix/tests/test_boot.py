@@ -9,7 +9,7 @@ from source_m import SourceM, KernelPanic
 
 def start_machine():
     vm = EntryMachine(False, 0x10000)
-    vm.parser = parse_asm(LAIX / "src/start.asm")
+    vm.parser = parse_asm(LAIX / "src/arch/wrm081632/start.asm")
     vm.code = vm.parser.stmts
     vm.constants = asm_constants(vm.parser)
     vm.labels = {label: i for i, st in enumerate(vm.code) for label in st.labels}
@@ -27,7 +27,7 @@ def start_machine():
 
 
 def boot_m():
-    vm = SourceM(LAIX / "src/boot.m")
+    vm = SourceM(LAIX / "src/kernel/boot.m")
     vm.addresses.update(__image_start=0x10000, __image_end=0x80000,
                         kernelStackBottom=0x91000, kernelStackTop=0x93000,
                         kernelBootInfo=0x98000)  # after the synthetic MMU tables
@@ -101,7 +101,7 @@ class BootAcceptanceTests(unittest.TestCase):
 
     def test_device_table_may_end_right_below_entry_state(self):
         vm, info = boot_m()
-        constants = asm_constants(parse_asm(LAIX / "src/defs.inc"))
+        constants = asm_constants(parse_asm(LAIX / "src/arch/wrm081632/defs.inc"))
         table = constants["BOOT_INFO_LIMIT"] - 2 * constants["DEVICE_ENTRY_BYTES"]
         vm.memory[0x1000 + info.field("deviceTable").offset] = table
         vm.call("kernelInit")

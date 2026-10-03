@@ -76,7 +76,7 @@ const char* disasm_cr_name(const uint32_t cr) {
 	return cr < CPU_CR_COUNT ? disasm_cr_names[cr] : NULL;
 }
 
-// false for words tools/asm.py can't produce: reserved bits set, a control
+// false for words mc/asm.py can't produce: reserved bits set, a control
 // register MFCR/MTCR can't name, a shift by more than 31
 static bool disasm_is_encodable(const cpu_instruction_t* in) {
 	switch (in->format) {

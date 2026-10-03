@@ -22,7 +22,7 @@ import time
 from probe_boot import Monitor, require, disassemble, LAIX, parse_asm, asm_constants
 from run_ready import ROOT, check_layout, read_symbols, field
 
-LAYOUT = asm_constants(parse_asm(LAIX / "src/trap_layout.inc"))
+LAYOUT = asm_constants(parse_asm(LAIX / "src/trap/trap_layout.inc"))
 USER_ALIAS = 0x400000
 USER_SP = 0xFFFFFFF8  # unmapped, and outside the trusted kernel stack
 

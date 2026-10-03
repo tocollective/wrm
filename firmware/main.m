@@ -1,7 +1,7 @@
 // WRM.081632 ROM firmware. Build with:
-//   python3 tools/m.py --rom firmware/main.m -o firmware.rom
+//   python3 mc/mc.py --rom firmware/main.m -o firmware.rom
 //
-// Reset is in m/runtime/rom0.asm. The firmware installs its own screen
+// Reset is in mc/runtime/rom0.asm. The firmware installs its own screen
 // trap handler as soon as main starts.
 // The boot hand-off and safe hardware probes are in boot.asm.
 
