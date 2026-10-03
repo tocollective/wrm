@@ -7,3 +7,6 @@
 [submodule "mc"]
 	path = mc
 	url = https://github.com/tocollective/mc.git
+[submodule "laix"]
+	path = laix
+	url = https://github.com/tocollective/laix.git
