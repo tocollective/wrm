@@ -1,6 +1,6 @@
 ; ============================================================================
 ;  Hardware constants and a RAM layout for the test ROMs (the firmware,
-;  now in M, has its own in firmware/defs.m). Constants only, no code or
+;  now in M, has its own in wfw/src/arch/wrm081632/defs.m). Constants only, no code or
 ;  data.
 ; ============================================================================
 

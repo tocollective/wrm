@@ -1,6 +1,6 @@
 // Screen-only firmware console. UART belongs to booted software and tests.
 
-import { videoInit, conPutc } from "video.m"
+import { videoInit, conPutc } from "../video/video.m"
 
 let mut screenReady: Bool
 let HEX: *UByte = "0123456789ABCDEF"

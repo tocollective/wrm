@@ -6,7 +6,7 @@ runtime functions and the object file format. They are meant
 for compilers, libraries and operating systems. The hardware itself fixes
 only `r0` = 0; `JAL` and `JALR` can link through any register.
 
-The firmware in `firmware/` follows these register roles and keeps its
+The firmware in `wfw/` follows these register roles and keeps its
 stack 8-byte aligned at calls.
 
 ## Data types

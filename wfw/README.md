@@ -1,8 +1,8 @@
 # WRM.081632 ROM firmware
 
-Create a ROM image with `python3 mc/mc.py --rom firmware/main.m -o firmware.rom`.
+Create a ROM image with `python3 mc/mc.py --rom wfw/src/main.m -o firmware.rom`.
 The CPU enters it at `0xFE000000` after reset. The M ROM runtime initializes
-the stack and data and clears BSS. A local `romtrap.asm` handles faults
+the stack and data and clears BSS. A local `src/romtrap.asm` handles faults
 before the screen is ready without using the UART. The firmware installs
 a screen-only fatal trap handler when `main` starts.
 
@@ -15,6 +15,18 @@ and CPU state specified in [the boot protocol](../docs/SPECIFICATION.md#boot-pro
 Invalid images and disk errors are shown on the screen. The firmware does
 not read or write the UART.
 
+Sources are organized under `src/`:
+
+| Path | Purpose |
+| --- | --- |
+| `main.m` | Startup and diagnostic menu |
+| `romtrap.asm` | Early trap handler, kept beside the entry module |
+| `arch/wrm081632/` | Hardware registers and boot structures |
+| `boot/` | Disk boot, hardware probes and boot hand-off |
+| `console/` | Console output and font data |
+| `video/` | Video setup, text drawing, BMP decoding and logo embedding |
+| `trap/` | Screen fatal trap handler and assembly entry |
+
 [`images/logo.bmp`](images/logo.bmp) is embedded unchanged in ROM and drawn
 at the upper right with an 8-pixel margin. The console width is calculated
 from the image width, so scrolling leaves the image in place. The full
@@ -22,13 +34,13 @@ standard palette is restored before boot hand-off.
 
 ### Drawing another BMP
 
-[`bmp.m`](bmp.m) provides `bmpInfo(data, length, &mut info)` to read the
+[`bmp.m`](src/video/bmp.m) provides `bmpInfo(data, length, &mut info)` to read the
 dimensions and `bmpDraw(data, length, x, y, zeroIndex, oneIndex)` to draw at
 any screen position. Both return `false` for invalid or unsupported input;
 `bmpDraw` also returns `false` if the image does not fit on screen or DMA
 fails. The functions accept a pointer and byte length, so images can come
-from ROM or RAM. For a ROM image, use [`logo.asm`](logo.asm) and
-[`logo.m`](logo.m) as the embedding pattern: `.incbin` the file between two
+from ROM or RAM. For a ROM image, use [`logo.asm`](src/video/logo.asm) and
+[`logo.m`](src/video/logo.m) as the embedding pattern: `.incbin` the file between two
 labels, then subtract the label addresses to get its length.
 
 For example, after declaring and importing `pictureBmp` and
@@ -67,6 +79,6 @@ emulated keyboard:
 
 The menu also handles the host power button. Interrupts stay disabled; the
 menu polls the keyboard and power controller. The device probe and RAM
-probe are in `boot.asm` because they must recover from bus errors. The boot
-transfer and temporary stack switch are there too. `video.m` and `font.m`
+probe are in [`boot.asm`](src/boot/boot.asm) because they must recover from bus errors. The boot
+transfer and temporary stack switch are there too. [`video.m`](src/video/video.m) and [`font.m`](src/console/font.m)
 provide the screen state inherited by a boot image.

@@ -29,7 +29,7 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Build the demo firmware
-        run: python3 mc/mc.py --rom firmware/main.m -o build/firmware.rom
+        run: python3 mc/mc.py --rom wfw/src/main.m -o build/firmware.rom
 
       - name: Test the M compiler
         run: python3 mc/tests/run.py --emulator bin/wrm081632
@@ -63,7 +63,7 @@ jobs:
         run: cmake --build build --parallel
 
       - name: Build the demo firmware
-        run: python3 mc/mc.py --rom firmware/main.m -o build/firmware.rom
+        run: python3 mc/mc.py --rom wfw/src/main.m -o build/firmware.rom
 
       - name: Test the M compiler
         run: python3 mc/tests/run.py --emulator bin/wrm081632

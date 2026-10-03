@@ -1,6 +1,6 @@
 ; ============================================================================
 ;  UART output and helpers for the test ROMs (the firmware, now in M, has
-;  its own in firmware/lib.m)
+;  its own in wfw/src/console/console.m)
 ; ============================================================================
 
 NAME_WIDTH      = 24            ; column where show() prints values

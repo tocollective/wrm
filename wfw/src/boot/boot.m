@@ -5,9 +5,9 @@ import {
     DISK_PRESENT, DISK_DONE, DISK_READ, SECTOR_SIZE,
     BOOT_MAGIC, BOOT_INFO_MAGIC, BOOT_INFO, BOOT_INFO_END, BOOT_STACK_TOP, BOOT_LOAD,
     CR_PTBR, CR_IVEC, CR_STATUS, STATUS_EXL,
-} from "defs.m"
-import { write, writeHex } from "console.m"
-import { videoPalette } from "video.m"
+} from "../arch/wrm081632/defs.m"
+import { write, writeHex } from "../console/console.m"
+import { videoPalette } from "../video/video.m"
 
 extern let ramSize(): UWord
 extern let probeDevices(table: UWord, max: UWord): UWord

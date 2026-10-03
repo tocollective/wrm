@@ -3,7 +3,7 @@
 
 import {
     video, VIDEO_BUSY, VIDEO_DONE, VIDEO_EXPAND, VIDEO_MEMORY,
-} from "defs.m"
+} from "../arch/wrm081632/defs.m"
 
 type BmpInfo {
     width: UWord,

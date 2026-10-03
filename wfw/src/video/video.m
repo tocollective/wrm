@@ -1,7 +1,7 @@
 // Video card: setup, text and the screen console.
 //
 // The CPU can't reach VRAM: everything goes through the drawing engine.
-// The font (font.m) is loaded by DMA from ROM into the end of VRAM once,
+// The font (../console/font.m) is loaded by DMA from ROM into the end of VRAM once,
 // and a character is then one EXPAND command from there (a glyph cache,
 // as on the 2D accelerators of the 90s).
 //
@@ -11,8 +11,8 @@
 import {
     video, VIDEO_DONE, VIDEO_ENABLE, VIDEO_640X480, VIDEO_8BPP,
     VIDEO_FILL, VIDEO_COPY, VIDEO_EXPAND, VIDEO_LOAD, VRAM_SIZE,
-} from "defs.m"
-import { FontData, FONT } from "font.m"
+} from "../arch/wrm081632/defs.m"
+import { FontData, FONT } from "../console/font.m"
 import { BmpInfo, bmpInfo, bmpDraw } from "bmp.m"
 import { logoBmp, logoBmpEnd } from "logo.m"
 

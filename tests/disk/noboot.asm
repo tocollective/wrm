@@ -1,9 +1,9 @@
 ; ============================================================================
-;  Boot protocol: the firmware (firmware/main.m) skips a floppy without a
+;  Boot protocol: the firmware (wfw/src/main.m) skips a floppy without a
 ;  boot image (it shows the error on the screen) and boots disk 0,
 ;  where tests/common/boot_image.asm checks the state and reports
 ; ============================================================================
-; @rom ../../firmware/main.m
+; @rom ../../wfw/src/main.m
 ; @floppy 4
 ; @hdd ../common/boot_image.asm
 ; @args --ram 4M,2M

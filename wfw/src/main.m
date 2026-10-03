@@ -1,18 +1,18 @@
 // WRM.081632 ROM firmware. Build with:
-//   python3 mc/mc.py --rom firmware/main.m -o firmware.rom
+//   python3 mc/mc.py --rom wfw/src/main.m -o firmware.rom
 //
 // Reset is in mc/runtime/rom0.asm. The firmware installs its own screen
 // trap handler as soon as main starts.
-// The boot hand-off and safe hardware probes are in boot.asm.
+// The boot hand-off and safe hardware probes are in boot/boot.asm.
 
 import {
     pic, kbd, timer, power, beeper,
     KBD_READY, POWER_OFF_REQUEST, IRQ_POWER, BEEPER_ON,
     BOOT_INFO, BOOT_INFO_END, DeviceEntry,
-} from "defs.m"
-import { consoleInit, write, writeChar, writeHex } from "console.m"
-import { boot, machineRamSize, machineDevices } from "boot.m"
-import { installTrap } from "trap.m"
+} from "arch/wrm081632/defs.m"
+import { consoleInit, write, writeChar, writeHex } from "console/console.m"
+import { boot, machineRamSize, machineDevices } from "boot/boot.m"
+import { installTrap } from "trap/trap.m"
 
 let VERSION: *UByte = "WRM.081632 ROM 1.0.0\n"
 

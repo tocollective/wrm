@@ -1,4 +1,4 @@
-; Used by the ROM runtime before firmware/main.m has initialized the screen.
+; Used by the ROM runtime before wfw/src/main.m has initialized the screen.
 ; If early startup faults, stop without touching the UART.
 
 __EARLY_POWER_OFF = 0xFD004000

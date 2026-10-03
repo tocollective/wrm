@@ -22,7 +22,7 @@ as the host can instead (see [Speed and determinism](#speed-and-determinism)).
 ## Running
 
 ```sh
-python3 mc/mc.py --rom firmware/main.m -o firmware.rom
+python3 mc/mc.py --rom wfw/src/main.m -o firmware.rom
 bin/wrm081632 [--rom PATH] [--ram SIZE[,...]] [--clock HZ]
               [--hdd PATH] [--hdd-serial N=SERIAL] [--floppy PATH]
               [--share PATH[:ro]] [--mute] [--headless]
@@ -220,7 +220,7 @@ read-only. The emulator locks the images it uses: an image another
 emulator already has is attached read-only, with a warning, and one it
 writes isn't attached at all, so two machines never write one image.
 
-The firmware (`firmware/`, written in M: see
+The firmware (`wfw/`, written in M: see
 [mc/docs/spec](mc/docs/spec/README.md)) boots from the floppy, or else from
 disk 0, when it holds a boot image. A boot image starts with a small
 header and is loaded to `0x00010000`
@@ -422,7 +422,7 @@ Comment lines in a test set up the machine it runs on:
 | `; @hdd FILE.asm` | attach a boot image assembled from `FILE.asm` (relative to the test) at `0x00010000` |
 | `; @floppy SPEC`  | put a disk in the floppy drive, `N` or `FILE.asm` as for `@hdd` |
 | `; @args ARGS`    | more emulator options, e.g. `--ram 4M,2M`               |
-| `; @rom FILE.m`   | run a ROM compiled from M (e.g. `../../firmware/main.m`) instead of the test itself |
+| `; @rom FILE.m`   | run a ROM compiled from M (e.g. `../../wfw/src/main.m`) instead of the test itself |
 | `; @input EVENT`  | a line of the [input script](#input-scripts), e.g. `; @input 1000 key 4 down` |
 | `; @stdin TEXT`   | bytes on the emulator's stdin (the UART), with `\n`, `\t`, `\\` and `\xNN` escapes |
 | `; @share [ro]`   | share a fresh folder holding `hello.txt` and `sub/data.bin` (see `tests/run.py`); `ro` makes it read-only |

@@ -47,7 +47,7 @@ EMULATOR = os.path.join(ROOT, "bin", "wrm081632.exe" if os.name == "nt" else "wr
 
 EXIT_TRAP = 254  # tests/common/harness.asm
 SECTOR_SIZE = 512
-BOOT_LOAD = 0x00010000  # firmware/defs.asm
+BOOT_LOAD = 0x00010000  # wfw/src/arch/wrm081632/defs.m
 
 DIRECTIVE = re.compile(r"^\s*;\s*@(\w+)\b\s*(.*?)\s*$")
 

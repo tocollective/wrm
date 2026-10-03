@@ -1092,7 +1092,7 @@ write that were already written. VRAM is zero at power-on.
 
 ## Boot protocol
 
-After reset the firmware in ROM runs. The firmware in `firmware/` beeps,
+After reset the firmware in ROM runs. The firmware in `wfw/` beeps,
 initializes the screen console, then checks the floppy and disk 0 for a
 boot image. It loads the first one it finds and jumps to it; if there is
 none, it opens a diagnostic menu. This section is the contract between the

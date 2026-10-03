@@ -2,7 +2,7 @@
 
 This project is a virtual machine for WRM.
 
-firmware/ - firmware itself
+wfw/ - firmware itself (sources in wfw/src/)
 laix/ - OS
 mc/ - programming language
 
