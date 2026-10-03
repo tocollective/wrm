@@ -122,6 +122,48 @@ Runner сверяет код выхода, полный UART-дамп и точ�
 `tests/probe_boot.py` проверяет тот же готовый `trap.img` через локальный
 monitor: грязную BSS, копию boot info, стек, выключенные IRQ и точные
 регистры/адрес продолжения для каждого `BREAK` и `SYSCALL`.
+`tests/probe_unexpected_traps.py` проверяет неожиданные BREAK/SYSCALL на
+готовом образе с `trapExpect`, включая реальные исключения CPU из user mode:
+
+```sh
+python3 -B laix/tests/probe_unexpected_traps.py laix/build/laix.img laix/build/laix.map
+```
+
+Monitor меняет ожидание и сохранённый контекст во временной машине; для
+user mode добавляет временный RXU alias и выполняет IRET с недоступным SP.
+Все 10 сценариев требуют panic, исходный EPC, сохранённые GPR и выход 254;
+сам образ и инструкции обработчика не изменяются. Логи и SHA-256 сохраняются
+в `laix/build/acceptance/unexpected_traps/`. Нужен локальный сокет monitor.
+`tests/probe_null_page.py` проверяет слова входа `0x1FF0–0x1FFC`, отсутствие
+PTE страницы 0 и supervisor RW страницы 1, затем настоящий NULL call:
+
+```sh
+python3 -B laix/tests/probe_null_page.py laix/build/laix.img laix/build/laix.map
+```
+
+Probe временно отображает существующую инструкцию вызова из ROM и задаёт
+нулевой адрес в сохранённом контексте; код ядра и PTE страницы 0 не меняет.
+Использует UART-проверки case `null_call` из `run_ready.py` с адресом возврата
+тестового вызова: CAUSE=8, EPC=BADADDR=0, exit 254. Логи и SHA-256 находятся
+в `laix/build/acceptance/null_page/`. Отдельный `tests/null_call.m` по-прежнему
+проверяется через `run_ready.py`, когда готов его образ и карта.
+
+`tests/probe_stack_overflow.py` проверяет аварийный путь при исчерпанном
+стеке на готовом `laix.img`, без сборки:
+
+```sh
+python3 -B laix/tests/probe_stack_overflow.py laix/build/laix.img laix/build/laix.map
+```
+
+Monitor задаёт SP на нижней границе и возвращает CPU в существующий пролог
+`main`: выделение стека и store вызывают настоящий page fault в guard.
+Probe сверяет раннюю строку со SP, полный dump, все GPR и управляющие
+регистры в статическом TrapFrame, вызов `trapBadStack` на аварийном стеке
+и выход 254. Guard и обычный стек не изменены входом в обработчик.
+Логи и SHA-256 — в `laix/build/acceptance/stack_overflow_probe/`.
+Это проверка аварийного пути; отдельный рекурсивный образ
+`tests/stack_overflow.m` запускается через case `stack_overflow`, когда готов.
+
 Критерии первого этапа для supervisor mode подтверждены на эмуляторе;
 результаты и команды — в [tests/ACCEPTANCE.md](tests/ACCEPTANCE.md).
 Пролог user entry выбирает доверенный стек по `KERNEL_SP`, не обращаясь

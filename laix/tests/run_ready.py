@@ -25,7 +25,10 @@ FAULTS = {
     "data_exec": ("data-exec-test", 8, "dataExecTarget", "dataExecTarget", "dataExecReturn"),
 }
 CASES = {"trap", "stack_overflow"} | FAULTS.keys()
-MAP_SYMBOLS = set(LAYOUT_SYMBOLS) | {"main", "kernelInit", "bootInfoAddress", "kernelBootInfo"} | {
+MAP_SYMBOLS = set(LAYOUT_SYMBOLS) | {"main", "kernelInit", "bootInfoAddress", "kernelBootInfo",
+                                  "panic", "panic__panicStage", "trapDispatch", "trap__expectedTrap",
+                                  "trapBadStack", "trapEmergencyFrame", "trapEmergencyStack",
+                                  "trapEmergencyStackTop"} | {
     value for fault in FAULTS.values() for value in fault[1:] if isinstance(value, str)}
 
 
@@ -133,6 +136,9 @@ def check_stack_overflow(symbols, output, exit_code):
             raise ValueError("expected a store page fault into the guard")
         if not guard <= field(part, "badaddr") < bottom:
             raise ValueError("BADADDR is not in the stack guard page")
+    for name in ("epc", "badaddr"):
+        if field(early, name) != field(full, name):
+            raise ValueError(f"full dump {name} does not match the early line")
     if (field(early, "bottom"), field(early, "top")) != (bottom, top):
         raise ValueError("early line reports wrong stack bounds")
     sp, scratch = field(early, "sp"), field(early, "scratch")

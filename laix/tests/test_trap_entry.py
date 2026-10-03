@@ -332,11 +332,13 @@ class TrapEntryTests(unittest.TestCase):
 
     def test_unexpected_user_break_or_syscall_panics_even_when_armed(self):
         for cause, message in ((13, "unexpected breakpoint"), (12, "unexpected syscall")):
-            with self.subTest(cause=cause):
-                machine = EntryMachine(True, 0x800000, cause=cause)
-                machine.dispatch.call("trapExpect", cause)
-                self.assert_rejected(machine, message)
-                self.assertFalse(machine.dispatch.call("trapExpectationMet"))
+            for armed in (None, cause, 12 if cause == 13 else 13):
+                with self.subTest(cause=cause, armed=armed):
+                    machine = EntryMachine(True, 0xFFFFFFF8, cause=cause)
+                    if armed is not None:
+                        machine.dispatch.call("trapExpect", armed)
+                    self.assert_rejected(machine, message)
+                    self.assertEqual(machine.dispatch.call("trapExpectationMet"), armed is None)
 
     def test_expectation_is_one_shot(self):
         machine = expected_supervisor_machine(0x91E00)

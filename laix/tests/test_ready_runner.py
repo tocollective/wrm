@@ -91,6 +91,8 @@ class ReadyRunnerTests(unittest.TestCase):
                              (stack_overflow_dump(scratch=0x90FE0), 254),
                              (stack_overflow_dump(r30=0x90FE0), 254),
                              (stack_overflow_dump(bottom=0x92000), 254),
+                             (stack_overflow_dump().replace("epc=00012400", "epc=00012404", 1), 254),
+                             (stack_overflow_dump().replace("badaddr=00090FF8", "badaddr=00090FFC", 1), 254),
                              (stack_overflow_dump().replace("stage=stack-overflow-test", "stage=running"), 254)):
             with self.subTest(output=output[-60:], code=code):
                 with self.assertRaises(ValueError):

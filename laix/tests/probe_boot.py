@@ -6,6 +6,7 @@ verify the boot-info copy, stack and IRQ state after kernelInit returns.
 """
 
 import argparse
+from contextlib import contextmanager
 import json
 from pathlib import Path
 import re
@@ -29,6 +30,40 @@ ENTRY_STATE = asm_constants(parse_asm(LAIX / "src/defs.inc"))["KERNEL_SP"]
 def require(condition, message):
     if not condition:
         raise ValueError(message)
+
+
+@contextmanager
+def ready_monitor(data, emulator, rom, timeout):
+    """Open a temporary, paused machine using existing executable bytes only."""
+    with tempfile.TemporaryDirectory(prefix="laix-ready-monitor-") as directory:
+        disk = Path(directory) / "boot.img"
+        sectors = struct.unpack_from("<I", data, 4)[0]
+        disk.write_bytes(data[:sectors * 512])
+        with socket.socket() as reservation:
+            reservation.bind(("127.0.0.1", 0))
+            port = reservation.getsockname()[1]
+        with tempfile.TemporaryFile(mode="w+") as stdout, tempfile.TemporaryFile(mode="w+") as stderr:
+            process = subprocess.Popen([str(emulator), "--headless", "--no-net", "--rom", str(rom),
+                                        "--hdd", str(disk), f"--monitor={port}", "--pause"],
+                                       cwd=directory, stdout=stdout, stderr=stderr)
+            connection = None
+            try:
+                deadline = time.monotonic() + timeout
+                while connection is None:
+                    require(process.poll() is None, "emulator exited before opening monitor")
+                    require(time.monotonic() < deadline, "monitor connection timed out")
+                    try:
+                        connection = socket.create_connection(("127.0.0.1", port), timeout=0.2)
+                    except ConnectionRefusedError:
+                        time.sleep(0.02)
+                connection.settimeout(timeout)
+                yield Monitor(connection), process, stdout, stderr
+            finally:
+                if connection is not None:
+                    connection.close()
+                if process.poll() is None:
+                    process.kill()
+                    process.wait()
 
 
 class Monitor:
@@ -92,7 +127,7 @@ class Monitor:
     def registers(output):
         values = {f"r{number}": int(value, 16) for number, value in
                   re.findall(r"\br(\d+)\s+([0-9A-F]{8})", output)}
-        for name in ("pc", "epc", "status", "cause", "fcsr"):
+        for name in ("pc", "epc", "status", "cause", "badaddr", "fcsr", "ptbr"):
             match = re.search(rf"\b{name}\s+([0-9A-F]{{8}})", output)
             require(match, f"monitor register dump lacks {name}")
             values[name] = int(match[1], 16)
