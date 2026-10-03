@@ -252,29 +252,52 @@ write:  li r9, SYS_WRITE
 
 The first LA/IX user ABI fixes these numbers. Dispatch reads the saved
 `r9`; argument words come from saved `r1`–`r6`. Unused arguments are
-ignored. These calls never read a user pointer or the user stack.
-
-No buffer syscall is assigned yet. The internal LA/IX helpers
-`copyFromUser` / `copyToUser` return 0 or -14 (`-EFAULT`) after checking
-the complete byte range, every page's user/access permissions and ownership,
-and the supervisor physical aliases under one memory lock. Invalid user
-buffers cause no partial destination writes. Zero-length copies do not access
-either buffer; the address-space identity must still be valid. Kernel buffers
-are trusted and must not overlap user frames or MMU metadata. See the
-[user-buffer contract](../laix/docs/03_USER_TASK_SYSCALLS.md#пользовательские-указатели-и-ошибки).
+ignored. Buffer calls validate the full user range and copy through checked
+physical aliases using the owning task's directory. They never use the user
+stack. `copyFromUser` / `copyToUser` return 0 or -14 (`-EFAULT`) without partial
+writes on invalid ranges; zero-length copies still require a valid address
+space but never dereference either buffer. Kernel buffers are trusted and must
+not overlap user frames or MMU metadata. See the
+[user-buffer contract](../laix/docs/03_USER_TASK_SYSCALLS.md#пользовательские-указатели-и-ошибки)
+and [IPC contract](../laix/docs/05_IPC_RIGHTS.md#implemented-transport-contract).
 
 | Number (`r9`) | Call | Arguments | Result (`r1`) / errors |
 |---|---|---|---|
 | 0 | `debugPutChar(code)` | `r1`: unsigned byte value, 0…255 | 0 on UART write; -22 (`-EINVAL`) for any other value, with no write |
 | 1 | `exit(code)` | `r1`: signed 32-bit task exit code | Does not return; retains the full code in the task record |
 | 2 | `yield()` | none | 0 when this task resumes; rotates the Ready queue |
+| 16 | `closeHandle(token)` | r1: task-local handle | 0 or -errno |
+| 17 | `copyHandle(token, task, rights)` | r1..r3: source token, target task ID, subset rights | Positive token in target table or -errno |
+| 18 | `destroyEndpoint(token)` | r1: task-local manage handle | 0 or -errno |
+| 19 | `send(token, buffer, length)` | r1..r3: local send handle, source VA, length (0..32) | Delivered length or -errno; blocks until delivery/revocation |
+| 20 | `recv(token, buffer, capacity)` | r1..r3: local receive handle, destination VA, capacity | Received length or -errno; blocks when no sender waits |
+| 21 | `call(token, request, length, response, capacity)` | r1..r5: local Service send handle, request VA/length, response VA/capacity | Response length or -errno; stays blocked through accept until reply/cancellation |
+| 22 | `accept(token, request, capacity)` | r1..r3: bound Service receive handle, destination VA, capacity | Request length or -errno; r2 is a positive one-use reply token on success |
+| 23 | `reply(token, response, length)` | r1..r3: reply token, response VA, length | Response length or -errno; never blocks |
 | any other | unsupported | ignored | -38 (`-ENOSYS`) |
 
-On a returning LA/IX syscall only `r1` changes: `r2`–`r31` (including
-the argument words, `r9`, `tp`, `sp` and `ra`) and the complete `FCSR`
-are preserved. Saved `EPC` advances by exactly 4, including unsupported
-calls and invalid arguments. The saved exit context also records `EPC + 4`,
+Calls 19/20 return the verified message length in r2 on success. Receive also
+returns the required length in r2 on -90 (`-EMSGSIZE`), leaving the message
+pending without partial writes; other errors set r2=0. M wrappers return only
+r1 and can retry receive with a 32-byte buffer. Calls 0..2 and 16..18, and
+unsupported calls, preserve r2. Calls 21..23 use r2 as specified below.
+Every returning call preserves r3..r31 and the complete FCSR. Saved `EPC`
+advances by exactly 4, including unsupported calls and invalid arguments. The saved exit context also records `EPC + 4`,
 but that context is never resumed. A user fault retains the faulting EPC.
+
+The [service request/reply contract](../laix/docs/IPC_REQUEST_REPLY.md#syscall-abi)
+specifies calls 21..23, Service-mode endpoint rights and exact validation order.
+Calls 21/23 return the response length in r2 on success. Destination-size
+errors return the required length in r2; other errors set r2=0. Successful
+`accept` returns its one-use reply token in r2, including for an empty request.
+The M `accept` helper stores length and token in an `AcceptResult`; it clears
+the token on error. Both payload limits are 32 bytes. Service self-call returns
+-35 (-EDEADLK), and revocation cancels queued and accepted calls with -32
+(-EPIPE). These additions pass source checks and
+[request/reply CPU acceptance](../laix/tests/IPC_REQUEST_REPLY_ACCEPTANCE.md)
+on the recorded ready image.
+Calls 19/20 retain their Raw transport behavior and reject Service endpoints
+with -22 (-EINVAL).
 
 The cooperative scheduler has eight task slots, one thread per task and one
 CPU. Yield saves the complete frame, advances EPC once, appends the current

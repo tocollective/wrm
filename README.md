@@ -19,6 +19,10 @@ and its share of the clock rate; below 100% the guest's time, which it
 counts in ticks, falls behind the host's. `--unthrottled` runs it as fast
 as the host can instead (see [Speed and determinism](#speed-and-determinism)).
 
+# Disclaimer
+
+# THIS PROJECT IS VIBECODED AS A TOY FOR MYSELF. IF YOU DON'T LIKE IT, DON'T USE IT.
+
 ## Running
 
 ```sh

@@ -8,6 +8,6 @@ mc/ - programming language
 
 # Rules
 
-* Do not verify code by building it.
+* Do not verify the source code of WRM by building it, but you can do that with other projects.
 * Write any documentation (and comments) in English. Except if I ask you.
 
