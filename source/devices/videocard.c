@@ -238,17 +238,53 @@ static bool surface_fits(const surface_t* surface, const uint32_t w,
 	return end <= VIDEO_VRAM_SIZE;
 }
 
+// Whether lines of w pixels from x start and end on byte boundaries, so the
+// host can move them with memcpy instead of pixel by pixel.
+static bool surface_whole_bytes(const surface_t* surface, const uint32_t w,
+								const uint32_t bpp) {
+	return (((uint64_t)surface->x * bpp) | ((uint64_t)w * bpp)) % 8 == 0;
+}
+
+// the first byte of the line j of the rectangle; it must be whole bytes
+static uint8_t* surface_line(videocard_t* videocard, const surface_t* surface,
+							 const uint32_t j, const uint32_t bpp) {
+	return &videocard->vram[surface_bit(surface, 0, j, bpp) >> 3];
+}
+
 static uint32_t videocard_fill(videocard_t* videocard) {
 	const uint32_t bpp = videocard_bpp(videocard);
 	const uint32_t w = videocard->size & 0xFFFF;
 	const uint32_t h = videocard->size >> 16;
 	const surface_t dst = videocard_dst(videocard);
 	if (!surface_fits(&dst, w, h, bpp)) return VIDEO_ERROR_RANGE;
+	if (w == 0 || h == 0) return VIDEO_ERROR_NONE;
 
-	for (uint32_t j = 0; j < h; j++)
-		for (uint32_t i = 0; i < w; i++)
-			videocard_poke(
-					videocard, surface_bit(&dst, i, j, bpp), bpp, videocard->fg);
+	if (!surface_whole_bytes(&dst, w, bpp)) {
+		for (uint32_t j = 0; j < h; j++)
+			for (uint32_t i = 0; i < w; i++)
+				videocard_poke(videocard,
+							   surface_bit(&dst, i, j, bpp),
+							   bpp,
+							   videocard->fg);
+		return VIDEO_ERROR_NONE;
+	}
+
+	// Draws the pixels of the first whole byte (or the first pixel), doubles
+	// them up to the first line, then copies that line to the others. Lines
+	// don't overlap: each fits in the pitch.
+	const size_t bytes = (size_t)w * bpp / 8;
+	const uint32_t unit_pixels = bpp < 8 ? 8 / bpp : 1;
+	for (uint32_t i = 0; i < unit_pixels; i++)
+		videocard_poke(
+				videocard, surface_bit(&dst, i, 0, bpp), bpp, videocard->fg);
+	uint8_t* first = surface_line(videocard, &dst, 0, bpp);
+	for (size_t done = (size_t)unit_pixels * bpp / 8; done < bytes;) {
+		const size_t n = done < bytes - done ? done : bytes - done;
+		memcpy(first + done, first, n);
+		done += n;
+	}
+	for (uint32_t j = 1; j < h; j++)
+		memcpy(surface_line(videocard, &dst, j, bpp), first, bytes);
 	return VIDEO_ERROR_NONE;
 }
 
@@ -271,6 +307,35 @@ static uint32_t videocard_copy(videocard_t* videocard) {
 	if (!surface_fits(&src, w, h, bpp) || !surface_fits(&dst, w, h, bpp))
 		return VIDEO_ERROR_RANGE;
 	if (w == 0 || h == 0) return VIDEO_ERROR_NONE;
+
+	// Whole-byte lines go with memmove, a line at a time in the same order as
+	// below. That gives the same result when the pitches match or the
+	// rectangles' spans of VRAM don't overlap; otherwise copy pixel by pixel.
+	if (surface_whole_bytes(&src, w, bpp)
+		&& surface_whole_bytes(&dst, w, bpp)) {
+		const size_t bytes = (size_t)w * bpp / 8;
+		const uint64_t src_start = surface_bit(&src, 0, 0, bpp) >> 3;
+		const uint64_t dst_start = surface_bit(&dst, 0, 0, bpp) >> 3;
+		const uint64_t src_end =
+				(surface_bit(&src, 0, h - 1, bpp) >> 3) + bytes;
+		const uint64_t dst_end =
+				(surface_bit(&dst, 0, h - 1, bpp) >> 3) + bytes;
+		if (src.pitch == dst.pitch || dst_end <= src_start
+			|| src_end <= dst_start) {
+			if (dst_start > src_start) {
+				for (uint32_t j = h; j-- > 0;)
+					memmove(surface_line(videocard, &dst, j, bpp),
+							surface_line(videocard, &src, j, bpp),
+							bytes);
+			} else {
+				for (uint32_t j = 0; j < h; j++)
+					memmove(surface_line(videocard, &dst, j, bpp),
+							surface_line(videocard, &src, j, bpp),
+							bytes);
+			}
+			return VIDEO_ERROR_NONE;
+		}
+	}
 
 	if (surface_bit(&dst, 0, 0, bpp) > surface_bit(&src, 0, 0, bpp)) {
 		for (uint32_t j = h; j-- > 0;)
