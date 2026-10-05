@@ -5,6 +5,41 @@ on:
   pull_request:
 
 jobs:
+  laix-source:
+    name: LA/IX source acceptance
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Run checked-source regressions
+        run: python3 -B laix/tests/run_source_suite.py --log-dir laix/build/acceptance/ci-source
+      - name: Publish source results and provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: laix-source-${{ github.run_id }}
+          path: laix/build/acceptance/ci-source/
+          if-no-files-found: error
+
+  laix-cpu:
+    name: LA/IX CPU acceptance
+    needs: laix-source
+    if: vars.LAIX_TOOLS_RUN_ID != '' && vars.LAIX_TOOLS_ARTIFACT != '' && vars.LAIX_EMULATOR_SHA256 != '' && vars.LAIX_ROM_SHA256 != ''
+    permissions:
+      contents: read
+      actions: read
+    uses: ./.github/workflows/laix-acceptance.yml
+    with:
+      tools_run_id: ${{ vars.LAIX_TOOLS_RUN_ID }}
+      tools_artifact: ${{ vars.LAIX_TOOLS_ARTIFACT }}
+      emulator_sha256: ${{ vars.LAIX_EMULATOR_SHA256 }}
+      rom_sha256: ${{ vars.LAIX_ROM_SHA256 }}
+
   test:
     name: ${{ matrix.os }}
     strategy:

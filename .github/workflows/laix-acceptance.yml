@@ -1,0 +1,145 @@
+name: LAIX artifact acceptance
+
+on:
+  workflow_call:
+    inputs:
+      tools_run_id:
+        required: true
+        type: string
+      tools_artifact:
+        required: true
+        type: string
+      emulator_sha256:
+        required: true
+        type: string
+      rom_sha256:
+        required: true
+        type: string
+      bundle_run_id:
+        required: false
+        type: string
+        default: ''
+  workflow_dispatch:
+    inputs:
+      bundle_run_id:
+        description: Existing input-bundle run to replay (empty produces new LA/IX artifacts)
+        required: false
+        type: string
+      tools_run_id:
+        description: Run ID containing an approved Linux emulator/ROM artifact
+        required: false
+        type: string
+      tools_artifact:
+        description: Artifact name (contains wrm081632 and firmware.rom at its root)
+        required: false
+        type: string
+      emulator_sha256:
+        description: Approved emulator SHA-256
+        required: false
+        type: string
+      rom_sha256:
+        description: Approved ROM SHA-256
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  produce:
+    if: inputs.bundle_run_id == ''
+    name: Produce LA/IX ${{ matrix.profile }} artifacts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [uart, screen, services, uart-stress, screen-stress, memory, sharing, objects, supervisor, recovery, recovery-production, latency, hid, media]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Download approved existing WRM and ROM
+        uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.tools_run_id }}
+          name: ${{ inputs.tools_artifact }}
+          path: approved-tools
+      - name: Verify approved byte identities
+        env:
+          EMULATOR_SHA256: ${{ inputs.emulator_sha256 }}
+          ROM_SHA256: ${{ inputs.rom_sha256 }}
+        run: |
+          python3 - <<'PY'
+          import hashlib, os, pathlib, re
+          for name, key in [('wrm081632', 'EMULATOR_SHA256'), ('firmware.rom', 'ROM_SHA256')]:
+              expected = os.environ[key]
+              path = pathlib.Path('approved-tools') / name
+              if not re.fullmatch('[0-9a-f]{64}', expected) or path.is_symlink():
+                  raise SystemExit('Invalid approval identity: ' + name)
+              if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+                  raise SystemExit('Approved artifact hash mismatch: ' + name)
+          PY
+          chmod +x approved-tools/wrm081632
+      - name: Build LA/IX and snapshot identified inputs
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: sh laix/tools/build_acceptance_bundle.sh "$PROFILE" "$PWD/bundle" "$PWD/approved-tools/wrm081632" "$PWD/approved-tools/firmware.rom"
+      - name: Publish replayable input bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: laix-inputs-${{ matrix.profile }}-${{ github.run_id }}
+          path: bundle/
+          if-no-files-found: error
+      - name: Publish production failure context
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: laix-production-failure-${{ matrix.profile }}-${{ github.run_id }}
+          path: |
+            bundle/manifest.json
+            laix/build/**/*.map
+            laix/build/*.json
+          if-no-files-found: ignore
+
+  cpu:
+    if: always() && (needs.produce.result == 'success' || needs.produce.result == 'skipped')
+    name: No-build CPU ${{ matrix.profile }}
+    needs: produce
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [uart, screen, services, uart-stress, screen-stress, memory, sharing, objects, supervisor, recovery, recovery-production, latency, hid, media]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: ${{ inputs.bundle_run_id || github.run_id }}
+          name: laix-inputs-${{ matrix.profile }}-${{ inputs.bundle_run_id || github.run_id }}
+          path: bundle
+      - name: Execute verified existing inputs without building
+        env:
+          PROFILE: ${{ matrix.profile }}
+        run: python3 -B laix/tests/acceptance_bundle.py run --bundle bundle --profile "$PROFILE" --log-dir laix/build/acceptance/ci-cpu
+      - name: Publish CPU logs and input/source provenance
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: laix-cpu-${{ matrix.profile }}-${{ github.run_id }}
+          path: |
+            laix/build/acceptance/ci-cpu/
+            bundle/manifest.json
+          if-no-files-found: error
